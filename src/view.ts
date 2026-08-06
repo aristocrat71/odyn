@@ -4,7 +4,9 @@ import { renderBrevity } from "./brevctl";
 import { renderChat } from "./chat";
 import { renderConfig } from "./config";
 import { el } from "./dom";
+import { renderHome } from "./home";
 import { renderPicker } from "./picker";
+import { renderProviders } from "./providers";
 import { state } from "./state";
 
 export function renderView(root: HTMLElement): void {
@@ -39,8 +41,10 @@ function topbar(): HTMLElement {
 
 function body(): HTMLElement {
   const view = el("section", "view");
+  if (state.view === "home") view.append(renderHome());
   if (state.view === "chat") view.append(renderChat());
   if (state.view === "brain") view.append(renderBrain());
+  if (state.view === "providers") view.append(renderProviders());
   if (state.view === "config") view.append(renderConfig());
   if (state.view === "guide") view.append(guide());
   return view;

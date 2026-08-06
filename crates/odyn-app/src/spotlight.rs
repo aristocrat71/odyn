@@ -207,7 +207,7 @@ pub fn spotlight_ask(
         task: None,
     };
 
-    match target(ready) {
+    match target(&ready) {
         Ok((provider, model)) => match ready.registry.provider(&provider) {
             Ok(provider) => {
                 let history = vec![Message::new(Role::User, text)];
@@ -258,7 +258,7 @@ pub async fn spotlight_promote(
     }
     let usage = *lock(&ask.shared.usage);
 
-    let (provider, model) = target(ready)?;
+    let (provider, model) = target(&ready)?;
     let storage = ready.storage();
     let row = storage
         .create_conversation(&title_from(&ask.question), &provider, &model)

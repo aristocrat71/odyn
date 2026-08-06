@@ -1,14 +1,14 @@
-//! Reading and rewriting single keys of `odyn.toml`.
+//! Reading and rewriting `odyn.toml`: single keys, and whole provider tables.
 //!
-//! A config file is something a person edits by hand, so `set` goes through
-//! `toml_edit`: every comment, every blank line and every quirk of spacing the
-//! user left behind survives an edit to some other key.
+//! A config file is something a person edits by hand, so every write goes
+//! through `toml_edit`: every comment, every blank line and every quirk of
+//! spacing the user left behind survives an edit to some other key.
 
 use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
 
-use crate::config::{invalid, read_or_create, Config, ConfigError};
+use crate::config::{invalid, read_or_create, Config, ConfigError, ProviderConfig};
 
 /// The value at a dotted key, ready to print: strings raw, everything else as
 /// TOML.
@@ -32,6 +32,85 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let edited = doc.to_string();
     Config::parse(&edited)?;
     write_atomically(path, &edited)
+}
+
+/// Writes `[providers.{name}]` wholesale — new or replacing — from `provider`.
+/// The table becomes machine-shaped; the rest of the file keeps its hand.
+pub fn upsert_provider(
+    path: &Path,
+    name: &str,
+    provider: &ProviderConfig,
+) -> Result<(), ConfigError> {
+    check_name(name)?;
+    let mut doc = parse(&read_or_create(path)?)?;
+    let providers = descend(doc.as_table_mut(), &["providers"], "providers")?;
+    providers.insert(name, Item::Table(provider_table(provider)));
+    let edited = doc.to_string();
+    Config::parse(&edited)?;
+    write_atomically(path, &edited)
+}
+
+/// Validation runs on the document with the table gone, so removing the
+/// default provider is rejected and the file left untouched.
+pub fn remove_provider(path: &Path, name: &str) -> Result<(), ConfigError> {
+    let mut doc = parse(&read_or_create(path)?)?;
+    doc.get_mut("providers")
+        .and_then(Item::as_table_like_mut)
+        .and_then(|providers| providers.remove(name))
+        .ok_or_else(|| ConfigError::UnknownProvider(name.to_string()))?;
+    let edited = doc.to_string();
+    Config::parse(&edited)?;
+    write_atomically(path, &edited)
+}
+
+fn provider_table(provider: &ProviderConfig) -> Table {
+    let mut table = Table::new();
+    table.insert("kind", toml_edit::value(provider.kind()));
+    match provider {
+        ProviderConfig::OpenAiCompat {
+            base_url,
+            api_key,
+            api_key_env,
+            default_model,
+        } => {
+            table.insert("base_url", toml_edit::value(base_url));
+            for (key, value) in [
+                ("api_key", api_key),
+                ("api_key_env", api_key_env),
+                ("default_model", default_model),
+            ] {
+                if let Some(value) = value {
+                    table.insert(key, toml_edit::value(value));
+                }
+            }
+        }
+        ProviderConfig::Ollama {
+            base_url,
+            keep_alive,
+        } => {
+            table.insert("base_url", toml_edit::value(base_url));
+            if let Some(keep_alive) = keep_alive {
+                table.insert("keep_alive", toml_edit::value(keep_alive));
+            }
+        }
+    }
+    table
+}
+
+/// Names stay addressable by the CLI's dotted keys, so no dots and no spaces.
+fn check_name(name: &str) -> Result<(), ConfigError> {
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if plain {
+        Ok(())
+    } else {
+        Err(invalid(
+            format!("providers.{name}"),
+            "provider names use letters, digits, `_` and `-`",
+        ))
+    }
 }
 
 fn parse(text: &str) -> Result<DocumentMut, ConfigError> {
@@ -356,5 +435,84 @@ similarity_edge_threshold = 0.5
 
         assert_eq!(get(&fixture.0, "default_provider").expect("get"), "ollama");
         assert!(fixture.text().starts_with("# Odyn configuration."));
+    }
+
+    #[test]
+    fn an_upserted_provider_lands_beside_the_hand_written_ones() {
+        let fixture = Fixture::new("upsert");
+        let zen = ProviderConfig::OpenAiCompat {
+            base_url: "https://opencode.ai/zen/v1".to_string(),
+            api_key: Some("sk-test".to_string()),
+            api_key_env: None,
+            default_model: Some("kimi-k3".to_string()),
+        };
+
+        upsert_provider(&fixture.0, "zen", &zen).expect("add zen");
+
+        let text = fixture.text();
+        assert!(text.starts_with("# odyn, hand-edited."), "{text}");
+        assert!(text.contains("[providers.ollama]  # local only"), "{text}");
+        assert_eq!(
+            get(&fixture.0, "providers.zen.api_key").expect("get"),
+            "sk-test"
+        );
+        assert_eq!(
+            Config::load_from(&fixture.0).expect("parse").providers["zen"],
+            zen
+        );
+
+        // Replacing rewrites the whole table: dropped fields stay dropped.
+        let keyless = ProviderConfig::OpenAiCompat {
+            base_url: "https://opencode.ai/zen/v1".to_string(),
+            api_key: None,
+            api_key_env: Some("OPENCODE_API_KEY".to_string()),
+            default_model: None,
+        };
+        upsert_provider(&fixture.0, "zen", &keyless).expect("replace zen");
+        assert_eq!(
+            Config::load_from(&fixture.0).expect("parse").providers["zen"],
+            keyless
+        );
+        assert!(!fixture.text().contains("sk-test"), "{}", fixture.text());
+    }
+
+    #[test]
+    fn removing_a_provider_spares_the_default_and_the_unknown() {
+        let fixture = Fixture::new("remove");
+        let extra = ProviderConfig::Ollama {
+            base_url: "http://localhost:11435".to_string(),
+            keep_alive: None,
+        };
+        upsert_provider(&fixture.0, "spare", &extra).expect("add a second provider");
+
+        remove_provider(&fixture.0, "spare").expect("remove it again");
+        assert!(!fixture.text().contains("spare"), "{}", fixture.text());
+
+        let err = remove_provider(&fixture.0, "ollama")
+            .expect_err("the default provider must survive")
+            .to_string();
+        assert!(err.contains("default_provider"), "{err}");
+        assert!(fixture.text().contains("[providers.ollama]"));
+
+        let err = remove_provider(&fixture.0, "nope")
+            .expect_err("an unknown name must fail")
+            .to_string();
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn a_provider_name_the_cli_cannot_address_is_rejected() {
+        let fixture = Fixture::new("bad-name");
+        let provider = ProviderConfig::Ollama {
+            base_url: "http://localhost:11434".to_string(),
+            keep_alive: None,
+        };
+        for name in ["", "with space", "with.dot", "wíth-áccents"] {
+            let err = upsert_provider(&fixture.0, name, &provider)
+                .expect_err("bad names must be rejected")
+                .to_string();
+            assert!(err.contains("letters, digits"), "{err}");
+            assert_eq!(fixture.text(), FIXTURE);
+        }
     }
 }

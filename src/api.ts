@@ -182,6 +182,45 @@ export const configFile = (): Promise<ConfigFile> => invoke("config_file");
 
 export const openConfig = (): Promise<void> => invoke("open_config");
 
+export type ProviderEntry = {
+  name: string;
+  kind: "openai_compat" | "ollama";
+  base_url: string;
+  default: boolean;
+  default_model: string | null;
+  keep_alive: string | null;
+  // The key itself never crosses to the frontend — only whether one is there.
+  key_stored: boolean;
+  key_env: string | null;
+  key_env_set: boolean;
+};
+
+export type ProviderDraft = {
+  name: string;
+  kind: string;
+  base_url: string;
+  // Blank means "unchanged" for a provider that already stores a key.
+  api_key: string | null;
+  api_key_env: string | null;
+  default_model: string | null;
+  keep_alive: string | null;
+  make_default: boolean;
+};
+
+export const providersConfig = (): Promise<ProviderEntry[]> =>
+  invoke("providers_config");
+
+export const providerSave = (draft: ProviderDraft): Promise<ProviderEntry[]> =>
+  invoke("provider_save", { draft });
+
+export const providerRemove = (name: string): Promise<ProviderEntry[]> =>
+  invoke("provider_remove", { name });
+
+export const setDefaultProvider = (name: string): Promise<ProviderEntry[]> =>
+  invoke("set_default_provider", { name });
+
+export const reloadConfig = (): Promise<void> => invoke("reload_config");
+
 export const onChatEvent = (handle: (event: ChatEvent) => void): void => {
   void listen<ChatEvent>("chat-event", (event) => handle(event.payload));
 };

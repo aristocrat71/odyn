@@ -171,13 +171,15 @@ pub async fn rename_conversation(
     title: String,
 ) -> Result<(), String> {
     let ready = state.ready()?;
-    ready.storage().rename_conversation(id, &title).map_err(say)
+    let renamed = ready.storage().rename_conversation(id, &title);
+    renamed.map_err(say)
 }
 
 #[tauri::command]
 pub async fn delete_conversation(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let ready = state.ready()?;
-    ready.storage().delete_conversation(id).map_err(say)
+    let deleted = ready.storage().delete_conversation(id);
+    deleted.map_err(say)
 }
 
 /// An explicit level for this conversation, written immediately; it affects
@@ -189,10 +191,10 @@ pub async fn set_conversation_brevity(
     brevity: Brevity,
 ) -> Result<(), String> {
     let ready = state.ready()?;
-    ready
+    let set = ready
         .storage()
-        .set_conversation_brevity(conversation_id, brevity)
-        .map_err(say)
+        .set_conversation_brevity(conversation_id, brevity);
+    set.map_err(say)
 }
 
 #[tauri::command]
@@ -203,10 +205,10 @@ pub async fn set_conversation_model(
     model: String,
 ) -> Result<(), String> {
     let ready = state.ready()?;
-    ready
+    let set = ready
         .storage()
-        .set_conversation_model(conversation_id, &provider, &model)
-        .map_err(say)
+        .set_conversation_model(conversation_id, &provider, &model);
+    set.map_err(say)
 }
 
 #[tauri::command]
@@ -215,7 +217,7 @@ pub async fn get_conversation(
     id: i64,
 ) -> Result<ConversationView, String> {
     let ready = state.ready()?;
-    let row = conversation(ready, id)?;
+    let row = conversation(&ready, id)?;
     let stored = ready.storage().messages(id).map_err(say)?;
     Ok(ConversationView {
         id: row.id,
@@ -298,7 +300,7 @@ pub async fn send_message(
     retry: bool,
 ) -> Result<u64, String> {
     let ready = state.ready()?;
-    let row = conversation(ready, conversation_id)?;
+    let row = conversation(&ready, conversation_id)?;
     if !retry {
         let storage = ready.storage();
         storage
@@ -324,13 +326,13 @@ pub async fn send_message(
         .map(|row| Message::new(row.role, row.content.clone()))
         .collect();
 
-    let (request_id, stream) = ready.streams.open(conversation_id);
+    let (request_id, stream) = state.streams.open(conversation_id);
     if row.model.is_empty() {
-        return fail(&app, ready, request_id, NO_MODEL.to_string());
+        return fail(&app, &state, request_id, NO_MODEL.to_string());
     }
     let provider = match ready.registry.provider(&row.provider) {
         Ok(provider) => provider,
-        Err(err) => return fail(&app, ready, request_id, err.to_string()),
+        Err(err) => return fail(&app, &state, request_id, err.to_string()),
     };
     let brevity = row.brevity.unwrap_or(ready.config.style.brevity);
     let task = tauri::async_runtime::spawn(run(
@@ -356,11 +358,11 @@ pub async fn cancel_message(
 ) -> Result<(), String> {
     let ready = state.ready()?;
     // An entry that is gone belongs to a reply that already finished.
-    let Some(stream) = ready.streams.close(request_id) else {
+    let Some(stream) = state.streams.close(request_id) else {
         return Ok(());
     };
     stream.abort();
-    settle(&app, ready, request_id, &stream, None, true);
+    settle(&app, &ready, request_id, &stream, None, true);
     Ok(())
 }
 
@@ -509,16 +511,16 @@ async fn run(
     )
     .await;
     let state = app.state::<AppState>();
+    // A closed entry means a cancel already finished this reply.
+    if state.streams.close(request_id).is_none() {
+        return;
+    }
     let Ok(ready) = state.ready() else {
         return;
     };
-    // A closed entry means a cancel already finished this reply.
-    if ready.streams.close(request_id).is_none() {
-        return;
-    }
     match outcome {
-        Outcome::Done(usage) => settle(&app, ready, request_id, &stream, usage, false),
-        Outcome::Interrupted => settle(&app, ready, request_id, &stream, None, true),
+        Outcome::Done(usage) => settle(&app, &ready, request_id, &stream, usage, false),
+        Outcome::Interrupted => settle(&app, &ready, request_id, &stream, None, true),
         Outcome::Failed(message) => emit(&app, request_id, Body::Error { message }),
     }
 }
@@ -547,15 +549,15 @@ pub(crate) async fn build_context(
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
-        brain::build_context(
+        let context = brain::build_context(
             &ready.storage(),
             &ready.config.memory,
             &prior,
             &question,
             brevity,
             load_default_embedder,
-        )
-        .ok()
+        );
+        context.ok()
     })
     .await
     .ok()
@@ -593,7 +595,7 @@ pub async fn context_preview(
         let (prior, chosen): (Vec<Message>, Option<Brevity>) = match conversation_id {
             Some(id) => {
                 // One lock per statement to prevent self-deadlock.
-                let brevity = conversation(ready, id)?.brevity;
+                let brevity = conversation(&ready, id)?.brevity;
                 let prior = ready
                     .storage()
                     .messages(id)
@@ -698,8 +700,13 @@ fn settle(
 
 /// A send that never reaches a provider still answers on the event channel, so
 /// the frontend renders every failure in the same place.
-fn fail(app: &AppHandle, ready: &Ready, request_id: u64, message: String) -> Result<u64, String> {
-    ready.streams.close(request_id);
+fn fail(
+    app: &AppHandle,
+    state: &AppState,
+    request_id: u64,
+    message: String,
+) -> Result<u64, String> {
+    state.streams.close(request_id);
     emit(app, request_id, Body::Error { message });
     Ok(request_id)
 }

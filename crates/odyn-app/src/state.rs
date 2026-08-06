@@ -2,19 +2,26 @@
 //! database connection, and the replies streaming right now.
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use odyn_core::config::{Config, ProviderRegistry};
 use odyn_core::storage::Storage;
 use tauri::async_runtime::JoinHandle;
 
-pub struct AppState(Result<Ready, String>);
+pub struct AppState {
+    /// Behind a lock so the providers view can swap in an edited config;
+    /// a command that already holds a guard finishes on the state it saw.
+    ready: RwLock<Result<Ready, String>>,
+    /// Beside `ready`, not inside it: a reply streaming through a reload
+    /// still has to be reachable by the cancel that ends it.
+    pub streams: Streams,
+}
 
 pub struct Ready {
     pub config: Config,
     pub registry: ProviderRegistry,
-    pub streams: Streams,
     storage: Mutex<Storage>,
 }
 
@@ -23,7 +30,10 @@ impl AppState {
     /// window still opens, and every command answers with the reason so the
     /// frontend can print it where the data would have been.
     pub fn load() -> Self {
-        Self(Self::open())
+        Self {
+            ready: RwLock::new(Self::open()),
+            streams: Streams::default(),
+        }
     }
 
     fn open() -> Result<Ready, String> {
@@ -33,14 +43,46 @@ impl AppState {
         Ok(Ready {
             config,
             registry,
-            streams: Streams::default(),
             storage: Mutex::new(storage),
         })
     }
 
-    pub fn ready(&self) -> Result<&Ready, String> {
-        self.0.as_ref().map_err(Clone::clone)
+    pub fn ready(&self) -> Result<ReadyGuard<'_>, String> {
+        let guard = read_lock(&self.ready);
+        match &*guard {
+            Ok(_) => Ok(ReadyGuard(guard)),
+            Err(err) => Err(err.clone()),
+        }
     }
+
+    /// Rereads the config and reopens the database. A failed reload keeps the
+    /// failure as the new state — the file on disk is the truth, even when it
+    /// is broken — and returns the reason.
+    pub fn reload(&self) -> Result<(), String> {
+        let fresh = Self::open();
+        let outcome = fresh.as_ref().map(|_| ()).map_err(Clone::clone);
+        *self
+            .ready
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = fresh;
+        outcome
+    }
+}
+
+/// Proof that the state was `Ok` when the lock was taken, carried as a guard
+/// so everything a command reads comes from one consistent state.
+pub struct ReadyGuard<'a>(RwLockReadGuard<'a, Result<Ready, String>>);
+
+impl Deref for ReadyGuard<'_> {
+    type Target = Ready;
+
+    fn deref(&self) -> &Ready {
+        self.0.as_ref().expect("checked when the guard was made")
+    }
+}
+
+fn read_lock(lock: &RwLock<Result<Ready, String>>) -> RwLockReadGuard<'_, Result<Ready, String>> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Ready {

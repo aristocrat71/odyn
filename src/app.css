@@ -1319,3 +1319,283 @@ g.labeled .gnode-epi text {
     margin-bottom: 10px;
   }
 }
+
+/* ---- home: the front door (issue #9) ---- */
+
+.home {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+
+.home-box {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 82%);
+  margin-bottom: 8vh;
+}
+
+.home-rune {
+  font-size: 34px;
+  color: var(--epi);
+  text-align: center;
+}
+
+.home-title {
+  margin: 4px 0 26px;
+  font-family: var(--wordmark);
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: 0.34em;
+  text-align: center;
+  text-indent: 0.34em;
+  color: var(--muted);
+}
+
+.home-input {
+  padding: 12px 16px;
+  border: 0;
+  outline: none;
+  border-radius: var(--radius-composer);
+  background: var(--bg-soft);
+  box-shadow: var(--ring);
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.home-input::placeholder {
+  color: var(--dim);
+}
+
+.home-commands {
+  display: flex;
+  flex-direction: column;
+  margin-top: 14px;
+}
+
+.home-cmd {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 7px 16px;
+  border-radius: 8px;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.home-cmd.active {
+  background: var(--epi-soft);
+}
+
+.home-cmd-name {
+  min-width: 96px;
+  color: var(--epi);
+}
+
+.home-cmd-hint {
+  color: var(--dim);
+}
+
+.home-note {
+  margin-top: 16px;
+  padding-left: 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* ---- providers: config without the file (issue #9) ---- */
+
+.providers {
+  max-width: 660px;
+  padding: 6px 0;
+  overflow-y: auto;
+}
+
+.prov-loading,
+.prov-note {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+}
+
+.prov-note {
+  margin-top: 22px;
+  color: var(--faint);
+}
+
+.prov-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  row-gap: 2px;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
+.prov-row:hover {
+  background: var(--bg-soft);
+}
+
+.prov-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.prov-name {
+  color: var(--ink);
+}
+
+.prov-default {
+  font-size: 10.5px;
+  color: var(--core);
+}
+
+.prov-kind {
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.prov-detail {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 14px;
+  grid-column: 1;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.prov-url {
+  color: var(--muted);
+}
+
+.prov-model {
+  color: var(--dim);
+}
+
+.prov-key.ok {
+  color: var(--epi);
+}
+
+.prov-key.missing {
+  color: var(--danger);
+}
+
+.prov-key.dim {
+  color: var(--dim);
+}
+
+.prov-actions {
+  display: flex;
+  gap: 12px;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.prov-row:hover .prov-actions,
+.prov-row:focus-within .prov-actions {
+  opacity: 1;
+}
+
+.prov-act {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+  transition: color 150ms ease;
+}
+
+.prov-act:hover {
+  color: var(--epi);
+}
+
+.prov-remove:hover {
+  color: var(--danger);
+}
+
+.prov-save {
+  color: var(--epi);
+}
+
+.prov-add {
+  margin-top: 10px;
+  padding: 0 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+  transition: color 150ms ease;
+}
+
+.prov-add:hover {
+  color: var(--epi);
+}
+
+.prov-form {
+  margin: 6px 0;
+  padding: 14px 16px;
+  border-radius: var(--radius-menu);
+  background: var(--bg-soft);
+  box-shadow: var(--ring);
+}
+
+.prov-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.prov-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.prov-label {
+  min-width: 88px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.prov-input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 0;
+  outline: none;
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.prov-input::placeholder {
+  color: var(--faint);
+}
+
+.prov-input:disabled {
+  color: var(--dim);
+}
+
+select.prov-input {
+  appearance: none;
+  flex: 0 1 auto;
+}
+
+.prov-form-actions {
+  display: flex;
+  gap: 16px;
+  margin-top: 14px;
+}
