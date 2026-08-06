@@ -20,3 +20,8 @@ tauri-plugin-opener = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sysinfo = { workspace = true }
+
+# Spotlight is a real NSPanel on macOS: non-activating, so the app in front
+# keeps focus. Branch-pinned like asklight; Cargo.lock holds the exact rev.
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }

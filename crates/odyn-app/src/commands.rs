@@ -87,7 +87,7 @@ pub struct ProviderGroup {
 
 #[derive(serde::Serialize)]
 pub struct Model {
-    name: String,
+    pub(crate) name: String,
     /// On-disk size, which only Ollama reports. Config names no context length
     /// for API models, and an invented one would be worse than none.
     size_bytes: Option<u64>,
@@ -145,14 +145,14 @@ enum Outcome {
 }
 
 #[tauri::command]
-pub fn list_conversations(state: State<'_, AppState>) -> Result<Vec<Conversation>, String> {
+pub async fn list_conversations(state: State<'_, AppState>) -> Result<Vec<Conversation>, String> {
     let ready = state.ready()?;
     let rows = ready.storage().list_conversations().map_err(say)?;
     Ok(rows.into_iter().map(Conversation::from).collect())
 }
 
 #[tauri::command]
-pub fn create_conversation(state: State<'_, AppState>) -> Result<Conversation, String> {
+pub async fn create_conversation(state: State<'_, AppState>) -> Result<Conversation, String> {
     let ready = state.ready()?;
     let provider = ready.registry.default_provider_name();
     // No default model is a real state for Ollama; the picker fills it in.
@@ -165,54 +165,59 @@ pub fn create_conversation(state: State<'_, AppState>) -> Result<Conversation, S
 }
 
 #[tauri::command]
-pub fn rename_conversation(
+pub async fn rename_conversation(
     state: State<'_, AppState>,
     id: i64,
     title: String,
 ) -> Result<(), String> {
     let ready = state.ready()?;
-    ready.storage().rename_conversation(id, &title).map_err(say)
+    let renamed = ready.storage().rename_conversation(id, &title);
+    renamed.map_err(say)
 }
 
 #[tauri::command]
-pub fn delete_conversation(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+pub async fn delete_conversation(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let ready = state.ready()?;
-    ready.storage().delete_conversation(id).map_err(say)
+    let deleted = ready.storage().delete_conversation(id);
+    deleted.map_err(say)
 }
 
 /// An explicit level for this conversation, written immediately; it affects
 /// the next send, never the past.
 #[tauri::command]
-pub fn set_conversation_brevity(
+pub async fn set_conversation_brevity(
     state: State<'_, AppState>,
     conversation_id: i64,
     brevity: Brevity,
 ) -> Result<(), String> {
     let ready = state.ready()?;
-    ready
+    let set = ready
         .storage()
-        .set_conversation_brevity(conversation_id, brevity)
-        .map_err(say)
+        .set_conversation_brevity(conversation_id, brevity);
+    set.map_err(say)
 }
 
 #[tauri::command]
-pub fn set_conversation_model(
+pub async fn set_conversation_model(
     state: State<'_, AppState>,
     conversation_id: i64,
     provider: String,
     model: String,
 ) -> Result<(), String> {
     let ready = state.ready()?;
-    ready
+    let set = ready
         .storage()
-        .set_conversation_model(conversation_id, &provider, &model)
-        .map_err(say)
+        .set_conversation_model(conversation_id, &provider, &model);
+    set.map_err(say)
 }
 
 #[tauri::command]
-pub fn get_conversation(state: State<'_, AppState>, id: i64) -> Result<ConversationView, String> {
+pub async fn get_conversation(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<ConversationView, String> {
     let ready = state.ready()?;
-    let row = conversation(ready, id)?;
+    let row = conversation(&ready, id)?;
     let stored = ready.storage().messages(id).map_err(say)?;
     Ok(ConversationView {
         id: row.id,
@@ -235,7 +240,7 @@ pub fn get_conversation(state: State<'_, AppState>, id: i64) -> Result<Conversat
 /// Injections are recorded against the question; the trace line renders under
 /// the answer, so each assistant row carries the ids of the user row before it.
 #[tauri::command]
-pub fn messages(
+pub async fn messages(
     state: State<'_, AppState>,
     conversation_id: i64,
 ) -> Result<Vec<MessageView>, String> {
@@ -287,7 +292,7 @@ pub fn messages(
 /// question is already stored, so a failed stream is retried without asking it
 /// twice.
 #[tauri::command]
-pub fn send_message(
+pub async fn send_message(
     app: AppHandle,
     state: State<'_, AppState>,
     conversation_id: i64,
@@ -295,7 +300,7 @@ pub fn send_message(
     retry: bool,
 ) -> Result<u64, String> {
     let ready = state.ready()?;
-    let row = conversation(ready, conversation_id)?;
+    let row = conversation(&ready, conversation_id)?;
     if !retry {
         let storage = ready.storage();
         storage
@@ -321,13 +326,13 @@ pub fn send_message(
         .map(|row| Message::new(row.role, row.content.clone()))
         .collect();
 
-    let (request_id, stream) = ready.streams.open(conversation_id);
+    let (request_id, stream) = state.streams.open(conversation_id);
     if row.model.is_empty() {
-        return fail(&app, ready, request_id, NO_MODEL.to_string());
+        return fail(&app, &state, request_id, NO_MODEL.to_string());
     }
     let provider = match ready.registry.provider(&row.provider) {
         Ok(provider) => provider,
-        Err(err) => return fail(&app, ready, request_id, err.to_string()),
+        Err(err) => return fail(&app, &state, request_id, err.to_string()),
     };
     let brevity = row.brevity.unwrap_or(ready.config.style.brevity);
     let task = tauri::async_runtime::spawn(run(
@@ -346,18 +351,18 @@ pub fn send_message(
 }
 
 #[tauri::command]
-pub fn cancel_message(
+pub async fn cancel_message(
     app: AppHandle,
     state: State<'_, AppState>,
     request_id: u64,
 ) -> Result<(), String> {
     let ready = state.ready()?;
     // An entry that is gone belongs to a reply that already finished.
-    let Some(stream) = ready.streams.close(request_id) else {
+    let Some(stream) = state.streams.close(request_id) else {
         return Ok(());
     };
     stream.abort();
-    settle(&app, ready, request_id, &stream, None, true);
+    settle(&app, &ready, request_id, &stream, None, true);
     Ok(())
 }
 
@@ -449,7 +454,7 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
 
 /// The installed list doubles as the reachability answer: the menu can only
 /// offer what Ollama names. `ping` is what bounds the wait on a dead endpoint.
-async fn installed(base_url: &str, keep_alive: Option<String>) -> (bool, Vec<Model>) {
+pub(crate) async fn installed(base_url: &str, keep_alive: Option<String>) -> (bool, Vec<Model>) {
     if !ollama::ping(base_url).await {
         return (false, Vec::new());
     }
@@ -506,16 +511,16 @@ async fn run(
     )
     .await;
     let state = app.state::<AppState>();
+    // A closed entry means a cancel already finished this reply.
+    if state.streams.close(request_id).is_none() {
+        return;
+    }
     let Ok(ready) = state.ready() else {
         return;
     };
-    // A closed entry means a cancel already finished this reply.
-    if ready.streams.close(request_id).is_none() {
-        return;
-    }
     match outcome {
-        Outcome::Done(usage) => settle(&app, ready, request_id, &stream, usage, false),
-        Outcome::Interrupted => settle(&app, ready, request_id, &stream, None, true),
+        Outcome::Done(usage) => settle(&app, &ready, request_id, &stream, usage, false),
+        Outcome::Interrupted => settle(&app, &ready, request_id, &stream, None, true),
         Outcome::Failed(message) => emit(&app, request_id, Body::Error { message }),
     }
 }
@@ -544,15 +549,15 @@ pub(crate) async fn build_context(
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
-        brain::build_context(
+        let context = brain::build_context(
             &ready.storage(),
             &ready.config.memory,
             &prior,
             &question,
             brevity,
             load_default_embedder,
-        )
-        .ok()
+        );
+        context.ok()
     })
     .await
     .ok()
@@ -588,16 +593,18 @@ pub async fn context_preview(
     tauri::async_runtime::spawn_blocking(move || {
         let ready = app.state::<AppState>().inner().ready()?;
         let (prior, chosen): (Vec<Message>, Option<Brevity>) = match conversation_id {
-            Some(id) => (
-                ready
+            Some(id) => {
+                // One lock per statement to prevent self-deadlock.
+                let brevity = conversation(&ready, id)?.brevity;
+                let prior = ready
                     .storage()
                     .messages(id)
                     .map_err(say)?
                     .into_iter()
                     .map(|row| Message::new(row.role, row.content))
-                    .collect(),
-                conversation(ready, id)?.brevity,
-            ),
+                    .collect();
+                (prior, brevity)
+            }
             None => (Vec::new(), None),
         };
         let memory = &ready.config.memory;
@@ -693,8 +700,13 @@ fn settle(
 
 /// A send that never reaches a provider still answers on the event channel, so
 /// the frontend renders every failure in the same place.
-fn fail(app: &AppHandle, ready: &Ready, request_id: u64, message: String) -> Result<u64, String> {
-    ready.streams.close(request_id);
+fn fail(
+    app: &AppHandle,
+    state: &AppState,
+    request_id: u64,
+    message: String,
+) -> Result<u64, String> {
+    state.streams.close(request_id);
     emit(app, request_id, Body::Error { message });
     Ok(request_id)
 }

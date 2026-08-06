@@ -13,7 +13,7 @@ import {
   type View,
 } from "./state";
 
-const VIEWS: View[] = ["chat", "brain", "config", "guide"];
+const VIEWS: View[] = ["home", "chat", "brain", "providers", "config", "guide"];
 
 export function renderSidebar(root: HTMLElement): void {
   root.replaceChildren(

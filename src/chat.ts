@@ -88,6 +88,13 @@ export function refreshLedger(): void {
   if (state.selected !== null) void refreshPreview(input.value);
 }
 
+// The home input hands its non-command text over as the draft: nothing is
+// sent on someone's behalf, but nothing has to be typed twice either.
+export function prefillComposer(text: string): void {
+  input.value = text;
+  schedulePreview(text);
+}
+
 // One message is redrawn per delta; the transcript follows only if it was
 // already showing the end.
 function patch(): void {

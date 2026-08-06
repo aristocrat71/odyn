@@ -8,9 +8,13 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    // The spotlight panel type lives behind this plugin; macOS only.
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    let app = builder
         .setup(|app| {
             app.manage(state::AppState::load());
             spotlight::setup(app.handle());
@@ -36,6 +40,11 @@ pub fn run() {
             brain::brain_graph,
             config::config_file,
             config::open_config,
+            config::providers_config,
+            config::provider_save,
+            config::provider_remove,
+            config::set_default_provider,
+            config::reload_config,
             commands::cancel_message,
             commands::status,
             commands::providers_overview,
@@ -44,6 +53,9 @@ pub fn run() {
             spotlight::spotlight_status,
             spotlight::spotlight_ask,
             spotlight::spotlight_promote,
+            spotlight::spotlight_target,
+            spotlight::spotlight_set_target,
+            spotlight::spotlight_save_key,
         ])
         .run(tauri::generate_context!());
     if let Err(err) = app {

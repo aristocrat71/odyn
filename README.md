@@ -131,7 +131,7 @@ that reports them.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `hotkey` | `"CmdOrCtrl+Shift+Space"` | Global shortcut, in Tauri accelerator syntax. A shortcut that cannot be registered is reported as status, never a crash. |
+| `hotkey` | `"Alt+Space"` | Global shortcut, in Tauri accelerator syntax — `Alt` is Option on macOS. A shortcut that cannot be registered is reported as status, never a crash. |
 | `brevity` | `"full"` | Answer style for spotlight asks, independent of `[style]`. |
 | `provider` | unset | Falls back to `default_provider`. Must name a configured provider. |
 | `model` | unset | Falls back to that provider's `default_model`. With neither, spotlight asks fail with `no spotlight model`. |

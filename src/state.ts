@@ -1,6 +1,6 @@
 import * as api from "./api";
 
-export type View = "chat" | "brain" | "config" | "guide";
+export type View = "home" | "chat" | "brain" | "providers" | "config" | "guide";
 
 export type Stream = {
   conversation: number;
@@ -18,7 +18,8 @@ const NO_MODEL = "no model set · pick one";
 const PICKER_REFRESH_MS = 30_000;
 
 export const state = {
-  view: "chat" as View,
+  // The front door: commands from here, not straight into a conversation.
+  view: "home" as View,
   conversations: [] as api.Conversation[],
   selected: null as number | null,
   messages: [] as api.Message[],
@@ -54,6 +55,11 @@ export const state = {
   },
   config: {
     file: null as api.ConfigFile | null,
+  },
+  providers: {
+    entries: null as api.ProviderEntry[] | null,
+    // `{ name: null }` is the add form; a string names the row being edited.
+    editing: null as { name: string | null } | null,
   },
   error: "",
 };
@@ -116,6 +122,7 @@ export function setView(view: View): void {
   if (view === "brain") void loadBrain();
   // Re-read on every open, so an edit made outside the app is on screen.
   if (view === "config") void loadConfig();
+  if (view === "providers") void loadProvidersConfig();
   render();
 }
 
@@ -427,6 +434,42 @@ export const removeMemory = (id: number): Promise<void> =>
 export const loadConfig = (): Promise<void> =>
   guard(async () => {
     state.config.file = await api.configFile();
+  });
+
+export const loadProvidersConfig = (): Promise<void> =>
+  guard(async () => {
+    state.providers.entries = await api.providersConfig();
+  });
+
+export function startProviderEdit(name: string | null): void {
+  state.providers.editing = { name };
+  render();
+}
+
+export function cancelProviderEdit(): void {
+  state.providers.editing = null;
+  render();
+}
+
+// Every write answers with the reloaded list, so what the view shows is what
+// the running app just adopted. The footer probes again on its own time.
+export const saveProvider = (draft: api.ProviderDraft): Promise<void> =>
+  guard(async () => {
+    state.providers.entries = await api.providerSave(draft);
+    state.providers.editing = null;
+    void refreshStatus();
+  });
+
+export const deleteProvider = (name: string): Promise<void> =>
+  guard(async () => {
+    state.providers.entries = await api.providerRemove(name);
+    void refreshStatus();
+  });
+
+export const chooseDefaultProvider = (name: string): Promise<void> =>
+  guard(async () => {
+    state.providers.entries = await api.setDefaultProvider(name);
+    void refreshStatus();
   });
 
 // The system's default program for the file; which one that is belongs to the

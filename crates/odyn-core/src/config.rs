@@ -1,8 +1,9 @@
 //! `odyn.toml`: which providers exist, how much of the brain to inject, and how
 //! Spotlight behaves.
 //!
-//! API keys never live in the file — `api_key_env` names an environment
-//! variable, and it is read only when that provider is actually built.
+//! API keys come from `api_key` in the file, or — for a file that must never
+//! contain one — from the environment variable `api_key_env` names. Either is
+//! read only when that provider is actually built.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,8 +21,8 @@ const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 /// file on disk and the running configuration can never disagree.
 const DEFAULT_CONFIG: &str = r#"# Odyn configuration.
 #
-# Keys are never stored here: `api_key_env` names an environment variable that
-# holds the key, read only when that provider is used.
+# Keys: put the key itself in `api_key`, or point `api_key_env` at an
+# environment variable holding it — then the key never lives in this file.
 
 default_provider = "ollama"
 
@@ -31,8 +32,8 @@ kind = "ollama"
 base_url = "http://localhost:11434"
 keep_alive = "5m"  # how long a model stays in RAM; "0" unloads it immediately
 
-# Any number of OpenAI-compatible endpoints can be added. Uncomment one, export
-# its key in your shell, and point `default_provider` at it.
+# Any number of OpenAI-compatible endpoints can be added. Uncomment one, give
+# it a key, and point `default_provider` at it.
 #
 # [providers.deepseek]
 # kind = "openai_compat"
@@ -42,8 +43,8 @@ keep_alive = "5m"  # how long a model stays in RAM; "0" unloads it immediately
 #
 # [providers.zen]
 # kind = "openai_compat"
-# base_url = "https://api.opencode.ai/zen/v1"
-# api_key_env = "OPENCODE_API_KEY"
+# base_url = "https://opencode.ai/zen/v1"
+# api_key = "your key"
 
 [memory]
 core_budget_tokens = 500
@@ -55,7 +56,7 @@ similarity_edge_threshold = 0.78
 brevity = "off"        # off | lite | full | ultra — default for new conversations
 
 [spotlight]
-hotkey = "CmdOrCtrl+Shift+Space"
+hotkey = "Alt+Space"   # Option+Space on macOS, Alt+Space elsewhere
 brevity = "full"       # spotlight answers should be terse
 # provider = "ollama"    # falls back to default_provider when unset
 # model = "llama3.3:8b"
@@ -91,6 +92,10 @@ pub enum ConfigError {
     UnknownProvider(String),
     #[error("providers.{name}.api_key_env: environment variable `{var}` is empty or not set")]
     MissingApiKey { name: String, var: String },
+    /// Deliberately silent about the value: what sits in a key field wrongly
+    /// is, more often than not, the key.
+    #[error("providers.{name}.api_key_env: must name an environment variable (letters, digits, underscores) — a literal key belongs in `api_key`")]
+    BadKeyEnvName { name: String },
     #[error("providers.{name}: {source}")]
     Provider {
         name: String,
@@ -118,6 +123,8 @@ pub enum ProviderConfig {
     #[serde(rename = "openai_compat")]
     OpenAiCompat {
         base_url: String,
+        /// The key itself. Set from the providers view; wins over `api_key_env`.
+        api_key: Option<String>,
         api_key_env: Option<String>,
         default_model: Option<String>,
     },
@@ -168,7 +175,9 @@ impl Default for MemoryConfig {
 impl Default for SpotlightConfig {
     fn default() -> Self {
         Self {
-            hotkey: "CmdOrCtrl+Shift+Space".to_string(),
+            // `Alt` is Option on macOS and Alt everywhere else, so one
+            // accelerator is the same physical chord on every platform.
+            hotkey: "Alt+Space".to_string(),
             provider: None,
             model: None,
             brevity: Brevity::Full,
@@ -186,7 +195,7 @@ impl ProviderConfig {
         }
     }
 
-    fn base_url(&self) -> &str {
+    pub fn base_url(&self) -> &str {
         match self {
             Self::OpenAiCompat { base_url, .. } | Self::Ollama { base_url, .. } => base_url,
         }
@@ -229,26 +238,9 @@ impl Config {
                 return Err(unconfigured("spotlight.provider", name));
             }
         }
-        for (name, provider) in &self.providers {
-            if provider.base_url().trim().is_empty() {
-                return Err(invalid(
-                    format!("providers.{name}.base_url"),
-                    "must not be empty",
-                ));
-            }
-            if let ProviderConfig::OpenAiCompat {
-                api_key_env: Some(var),
-                ..
-            } = provider
-            {
-                if !is_env_var_name(var) {
-                    return Err(invalid(
-                        format!("providers.{name}.api_key_env"),
-                        "must name an environment variable (letters, digits, underscores)",
-                    ));
-                }
-            }
-        }
+        // One provider's mistakes stay that provider's: they surface from
+        // `ProviderRegistry::provider` when it is used, so a broken zen entry
+        // never stops Odyn from talking to a local Ollama.
         if self.memory.episodic_top_k == 0 {
             return Err(invalid("memory.episodic_top_k", "must be at least 1"));
         }
@@ -305,15 +297,20 @@ impl ProviderRegistry {
         match config {
             ProviderConfig::OpenAiCompat {
                 base_url,
+                api_key,
                 api_key_env,
                 ..
             } => {
-                // No `api_key_env` means no auth header, which is what keyless
+                // A literal `api_key` wins; `api_key_env` is read otherwise.
+                // Neither means no auth header, which is what keyless
                 // endpoints expect.
-                let api_key = api_key_env
-                    .as_deref()
-                    .map(|var| read_api_key(name, var))
-                    .transpose()?;
+                let api_key = match api_key.as_deref().map(str::trim) {
+                    Some(key) if !key.is_empty() => Some(key.to_string()),
+                    _ => api_key_env
+                        .as_deref()
+                        .map(|var| read_api_key(name, var))
+                        .transpose()?,
+                };
                 let provider =
                     OpenAiCompatProvider::new(base_url, api_key, Vec::new()).map_err(built)?;
                 Ok(Box::new(provider))
@@ -330,6 +327,11 @@ impl ProviderRegistry {
 }
 
 fn read_api_key(name: &str, var: &str) -> Result<String, ConfigError> {
+    if !is_env_var_name(var) {
+        return Err(ConfigError::BadKeyEnvName {
+            name: name.to_string(),
+        });
+    }
     std::env::var(var)
         .ok()
         .filter(|key| !key.trim().is_empty())
@@ -491,6 +493,7 @@ kind = "ollama"
             config.providers["deepseek"],
             ProviderConfig::OpenAiCompat {
                 base_url: "https://api.deepseek.com".to_string(),
+                api_key: None,
                 api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
                 default_model: Some("deepseek-chat".to_string()),
             }
@@ -499,6 +502,7 @@ kind = "ollama"
             config.providers["zen"],
             ProviderConfig::OpenAiCompat {
                 base_url: "https://api.opencode.ai/zen/v1".to_string(),
+                api_key: None,
                 api_key_env: Some("OPENCODE_API_KEY".to_string()),
                 default_model: None,
             }
@@ -579,14 +583,6 @@ kind = "ollama"
                 "spotlight.provider",
             ),
             (
-                "default_provider = \"zen\"\n[providers.zen]\nkind = \"openai_compat\"\nbase_url = \"\"\n".to_string(),
-                "providers.zen.base_url",
-            ),
-            (
-                "default_provider = \"zen\"\n[providers.zen]\nkind = \"openai_compat\"\nbase_url = \"https://example.test\"\napi_key_env = \"not a var\"\n".to_string(),
-                "providers.zen.api_key_env",
-            ),
-            (
                 format!("{MINIMAL}[memory]\nepisodic_top_k = 0\n"),
                 "memory.episodic_top_k",
             ),
@@ -605,6 +601,70 @@ kind = "ollama"
                 .to_string();
             assert!(err.contains(key), "{err}");
         }
+    }
+
+    /// The lesson of a bricked app: a provider whose entry is broken fails
+    /// when *it* is built, and no sooner — issue #8.
+    #[test]
+    fn provider_problems_break_only_that_provider() {
+        let config = Config::parse(
+            "default_provider = \"ollama\"\n\
+             [providers.ollama]\n\
+             kind = \"ollama\"\n\
+             [providers.zen]\n\
+             kind = \"openai_compat\"\n\
+             base_url = \"https://example.test/v1\"\n\
+             api_key_env = \"sk-a-key-pasted-where-a-name-goes\"\n\
+             [providers.hollow]\n\
+             kind = \"openai_compat\"\n\
+             base_url = \"\"\n",
+        )
+        .expect("a broken provider entry must still parse");
+        let registry = ProviderRegistry::from_config(&config).expect("build registry");
+
+        assert!(registry.provider("ollama").is_ok());
+
+        let err = provider_error(&registry, "zen");
+        assert!(err.contains("providers.zen.api_key_env"), "{err}");
+        assert!(err.contains("`api_key`"), "{err}");
+        // The misplaced value is usually the key itself, so no echo.
+        assert!(!err.contains("sk-a-key"), "{err}");
+
+        assert!(provider_error(&registry, "hollow").contains("hollow"));
+    }
+
+    #[test]
+    fn a_literal_api_key_builds_without_the_environment() {
+        let _env = crate::lock_env();
+        const VAR: &str = "ODYN_TEST_UNSET_TOKEN";
+        std::env::remove_var(VAR);
+        let config = Config::parse(&format!(
+            "default_provider = \"zen\"\n\
+             [providers.zen]\n\
+             kind = \"openai_compat\"\n\
+             base_url = \"https://example.test/v1\"\n\
+             api_key = \"sk-literal\"\n\
+             api_key_env = \"{VAR}\"\n"
+        ))
+        .expect("parse");
+        let registry = ProviderRegistry::from_config(&config).expect("build registry");
+
+        // The literal wins, so the unset variable is never consulted.
+        assert!(registry.provider("zen").is_ok());
+
+        // Blank is absence, not an empty key: the env fallback applies.
+        let config = Config::parse(&format!(
+            "default_provider = \"zen\"\n\
+             [providers.zen]\n\
+             kind = \"openai_compat\"\n\
+             base_url = \"https://example.test/v1\"\n\
+             api_key = \"  \"\n\
+             api_key_env = \"{VAR}\"\n"
+        ))
+        .expect("parse");
+        let registry = ProviderRegistry::from_config(&config).expect("build registry");
+        let err = provider_error(&registry, "zen");
+        assert!(err.contains(VAR), "{err}");
     }
 
     #[test]

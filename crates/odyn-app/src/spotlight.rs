@@ -7,12 +7,14 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
+use odyn_core::config::{config_path, ConfigError, ProviderConfig};
+use odyn_core::config_edit;
 use tauri::async_runtime::JoinHandle;
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::commands::{describe, title_from, Body, Event, INTERRUPTED};
 use crate::state::AppState;
@@ -22,6 +24,76 @@ const MAIN: &str = "main";
 const EVENT: &str = "spotlight-event";
 /// 640px field plus room for its 80px shadow to bleed inside the window.
 const WIDTH: f64 = 720.0;
+
+/// Registered only while spotlight shows, so Esc dismisses it even when the
+/// webview never sees the key. Released again on hide — the asklight pattern.
+fn esc() -> Shortcut {
+    Shortcut::new(None, Code::Escape)
+}
+
+/// The real Spotlight behavior is an NSPanel, not a window: non-activating —
+/// the app in front keeps focus while the panel takes keys — floating at
+/// status level on every space. Ported from asklight.
+#[cfg(target_os = "macos")]
+mod panel {
+    use tauri::{AppHandle, Manager, WebviewWindow};
+    use tauri_nspanel::{
+        tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
+    };
+
+    tauri_panel! {
+        panel!(SpotPanel {
+            config: {
+                can_become_key_window: true,
+                can_become_main_window: false,
+                is_floating_panel: true
+            }
+        })
+    }
+
+    /// No delegate of our own: tao's stays on the window, so losing key
+    /// status reaches us as Tauri's ordinary `Focused(false)` — the one
+    /// dismissal path shared with the fallback window on other platforms.
+    pub fn convert(window: &WebviewWindow) -> bool {
+        let Ok(panel) = window.to_panel::<SpotPanel>() else {
+            return false;
+        };
+        panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
+        panel.set_level(PanelLevel::Status.value());
+        panel.set_collection_behavior(
+            CollectionBehavior::new()
+                .can_join_all_spaces()
+                .stationary()
+                .full_screen_auxiliary()
+                .value(),
+        );
+        true
+    }
+
+    /// Show via the panel — `show_and_make_key` — never by converting it back
+    /// to a window, which would silently drop the resign-key handler.
+    pub fn show(app: &AppHandle) -> bool {
+        match app.get_webview_panel(super::LABEL) {
+            Ok(panel) => {
+                panel.show_and_make_key();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub fn hide(app: &AppHandle) -> bool {
+        match app.get_webview_panel(super::LABEL) {
+            Ok(panel) => {
+                if panel.is_visible() {
+                    panel.hide();
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
 
 /// `None` while the hotkey works; the reason when it does not.
 pub struct HotkeyStatus(Mutex<Option<String>>);
@@ -71,6 +143,9 @@ pub fn setup(app: &AppHandle) {
     let error = register(app, &hotkey).err();
     app.manage(HotkeyStatus(Mutex::new(error)));
     app.manage(AskState::default());
+    // Built now, on the main thread, where AppKit wants it — never inside the
+    // hotkey callback. On macOS the window immediately becomes an NSPanel.
+    let _ = build(app);
 }
 
 fn register(app: &AppHandle, hotkey: &str) -> Result<(), String> {
@@ -80,10 +155,22 @@ fn register(app: &AppHandle, hotkey: &str) -> Result<(), String> {
     app.global_shortcut()
         .on_shortcut(shortcut, |app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
-                toggle(app);
+                defer(app, toggle);
             }
         })
         .map_err(|err| format!("hotkey `{hotkey}`: {err}"))
+}
+
+/// AppKit window operations silently no-op when run synchronously inside the
+/// hotkey callback (asklight's hard-won lesson). A thread hop makes
+/// `run_on_main_thread` QUEUE onto the run loop instead of executing inline —
+/// this is the difference between spotlight appearing and nothing happening.
+fn defer(app: &AppHandle, act: fn(&AppHandle)) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || act(&handle));
+    });
 }
 
 fn toggle(app: &AppHandle) {
@@ -91,10 +178,31 @@ fn toggle(app: &AppHandle) {
         return;
     };
     if window.is_visible().unwrap_or(false) {
-        let _ = window.hide();
+        conceal(app);
     } else {
         present(app, &window);
     }
+}
+
+/// Hides without dropping the ask: a stray click or a re-summon later still
+/// finds the answer. Only Esc and promotion end an exchange.
+fn conceal(app: &AppHandle) {
+    let _ = app.global_shortcut().unregister(esc());
+    #[cfg(target_os = "macos")]
+    if !fallback_mode() && panel::hide(app) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.hide();
+    }
+}
+
+/// Esc semantics: the exchange is dropped, spotlight keeps nothing.
+fn dismiss(app: &AppHandle) {
+    if let Some(ask) = lock(&app.state::<AskState>().current).take() {
+        abort(&ask);
+    }
+    conceal(app);
 }
 
 /// The in-app ⌘K, doing exactly what the global hotkey does.
@@ -128,15 +236,43 @@ fn build(app: &AppHandle) -> Option<WebviewWindow> {
             .shadow(false)
             .inner_size(WIDTH, 520.0)
     };
-    builder.build().ok()
+    let window = builder.build().ok()?;
+    #[cfg(target_os = "macos")]
+    if !fallback_mode() {
+        panel::convert(&window);
+    }
+    // Standard Spotlight dismissal: focus gone — a click into another app, a
+    // ⌘-tab away — hides it. AppKit's resign-key arrives as Tauri's own
+    // focus event, so every platform shares this one path.
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Focused(false)) {
+            conceal(&handle);
+        }
+    });
+    Some(window)
 }
 
 fn present(app: &AppHandle, window: &WebviewWindow) {
     if !fallback_mode() {
         place(app, window);
     }
-    let _ = window.show();
-    let _ = window.set_focus();
+    // While it shows, Esc reaches it from anywhere.
+    let _ = app
+        .global_shortcut()
+        .on_shortcut(esc(), |app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                defer(app, dismiss);
+            }
+        });
+    #[cfg(target_os = "macos")]
+    let shown = !fallback_mode() && panel::show(app);
+    #[cfg(not(target_os = "macos"))]
+    let shown = false;
+    if !shown {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
     let _ = tauri::Emitter::emit(window, "spotlight-show", ());
 }
 
@@ -175,14 +311,8 @@ fn monitor_with_cursor(app: &AppHandle) -> Option<tauri::Monitor> {
 }
 
 #[tauri::command]
-pub fn spotlight_hide(app: AppHandle, asks: State<'_, AskState>) {
-    // Dismissal drops the exchange: spotlight keeps nothing it wasn't asked to.
-    if let Some(ask) = lock(&asks.current).take() {
-        abort(&ask);
-    }
-    if let Some(window) = app.get_webview_window(LABEL) {
-        let _ = window.hide();
-    }
+pub fn spotlight_hide(app: AppHandle) {
+    dismiss(&app);
 }
 
 /// Streams an ephemeral answer to the spotlight window; a new question
@@ -207,7 +337,7 @@ pub fn spotlight_ask(
         task: None,
     };
 
-    match target(ready) {
+    match target(&ready) {
         Ok((provider, model)) => match ready.registry.provider(&provider) {
             Ok(provider) => {
                 let history = vec![Message::new(Role::User, text)];
@@ -238,7 +368,7 @@ pub fn spotlight_ask(
 /// Saves the current exchange as a real conversation and hands off to the main
 /// window. Mid-stream, the answer is kept as an interrupted partial.
 #[tauri::command]
-pub fn spotlight_promote(
+pub async fn spotlight_promote(
     app: AppHandle,
     state: State<'_, AppState>,
     asks: State<'_, AskState>,
@@ -258,7 +388,7 @@ pub fn spotlight_promote(
     }
     let usage = *lock(&ask.shared.usage);
 
-    let (provider, model) = target(ready)?;
+    let (provider, model) = target(&ready)?;
     let storage = ready.storage();
     let row = storage
         .create_conversation(&title_from(&ask.question), &provider, &model)
@@ -289,9 +419,7 @@ pub fn spotlight_promote(
         let _ = main.show();
         let _ = main.set_focus();
     }
-    if let Some(window) = app.get_webview_window(LABEL) {
-        let _ = window.hide();
-    }
+    conceal(&app);
     Ok(row.id)
 }
 
@@ -403,4 +531,140 @@ pub fn spotlight_status(status: State<'_, HotkeyStatus>) -> Option<String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
+}
+
+/// What the spotlight footer renders: the current target, whether its key is
+/// missing, and everything pickable.
+#[derive(serde::Serialize)]
+pub struct SpotTarget {
+    provider: String,
+    model: String,
+    needs_key: bool,
+    providers: Vec<SpotProvider>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SpotProvider {
+    name: String,
+    kind: &'static str,
+    models: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn spotlight_target(state: State<'_, AppState>) -> Result<SpotTarget, String> {
+    let (provider, model, needs_key, configured) = {
+        let ready = state.ready()?;
+        let provider = ready
+            .config
+            .spotlight
+            .provider
+            .clone()
+            .unwrap_or_else(|| ready.registry.default_provider_name().to_string());
+        let model = ready
+            .config
+            .spotlight
+            .model
+            .clone()
+            .or_else(|| ready.config.default_model(&provider).map(str::to_string))
+            .unwrap_or_default();
+        // A key problem is an intake prompt, not an error: the ask field turns
+        // into the place the key is pasted — asklight's one-time setup.
+        let needs_key = matches!(
+            ready.registry.provider(&provider),
+            Err(ConfigError::MissingApiKey { .. } | ConfigError::BadKeyEnvName { .. })
+        );
+        let configured: Vec<(String, ProviderConfig)> = ready
+            .config
+            .providers
+            .iter()
+            .map(|(name, config)| (name.clone(), config.clone()))
+            .collect();
+        (provider, model, needs_key, configured)
+    };
+    let mut providers = Vec::with_capacity(configured.len());
+    for (name, config) in configured {
+        let kind = config.kind();
+        let models = match config {
+            ProviderConfig::OpenAiCompat { default_model, .. } => {
+                default_model.into_iter().collect()
+            }
+            // The models Ollama actually has installed, not a guess.
+            ProviderConfig::Ollama {
+                base_url,
+                keep_alive,
+            } => crate::commands::installed(&base_url, keep_alive)
+                .await
+                .1
+                .into_iter()
+                .map(|model| model.name)
+                .collect(),
+        };
+        providers.push(SpotProvider { name, kind, models });
+    }
+    Ok(SpotTarget {
+        provider,
+        model,
+        needs_key,
+        providers,
+    })
+}
+
+/// The pick lands in `[spotlight]` in the file, so the CLI, the next launch
+/// and this panel all agree on what spotlight talks to.
+#[tauri::command]
+pub async fn spotlight_set_target(
+    state: State<'_, AppState>,
+    provider: String,
+    model: String,
+) -> Result<(), String> {
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "spotlight.provider", &provider).map_err(|err| err.to_string())?;
+    if !model.trim().is_empty() {
+        config_edit::set(&path, "spotlight.model", model.trim()).map_err(|err| err.to_string())?;
+    }
+    state.reload()
+}
+
+/// asklight's one-time setup with odyn's storage: the key pasted into the ask
+/// field becomes the target provider's `api_key` in `odyn.toml`.
+#[tauri::command]
+pub async fn spotlight_save_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err("nothing pasted".to_string());
+    }
+    let (name, config) = {
+        let ready = state.ready()?;
+        let name = ready
+            .config
+            .spotlight
+            .provider
+            .clone()
+            .unwrap_or_else(|| ready.registry.default_provider_name().to_string());
+        let config = ready
+            .config
+            .providers
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| format!("no provider named `{name}` is configured"))?;
+        (name, config)
+    };
+    let ProviderConfig::OpenAiCompat {
+        base_url,
+        api_key_env,
+        default_model,
+        ..
+    } = config
+    else {
+        return Err("ollama needs no key".to_string());
+    };
+    let provider = ProviderConfig::OpenAiCompat {
+        base_url,
+        api_key: Some(key),
+        api_key_env,
+        default_model,
+    };
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::upsert_provider(&path, &name, &provider).map_err(|err| err.to_string())?;
+    state.reload()
 }
