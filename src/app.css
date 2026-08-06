@@ -1589,11 +1589,6 @@ g.labeled .gnode-epi text {
   color: var(--dim);
 }
 
-select.prov-input {
-  appearance: none;
-  flex: 0 1 auto;
-}
-
 .prov-form-actions {
   display: flex;
   gap: 16px;

@@ -129,3 +129,48 @@ body.spotlight {
 .trace-id {
   color: var(--epi);
 }
+
+/* The footer strip: target picks and the hints, one quiet line. */
+
+.spot-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  padding: 9px 18px 12px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.spot-picks {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+}
+
+.spot-hints {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* The one-time key intake, and the line that follows it. */
+
+.spot-card {
+  padding: 4px 0 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.spot-card-dim {
+  margin-top: 4px;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.spot-ok {
+  padding: 4px 0 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--epi);
+}

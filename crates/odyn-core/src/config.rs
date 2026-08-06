@@ -56,7 +56,7 @@ similarity_edge_threshold = 0.78
 brevity = "off"        # off | lite | full | ultra — default for new conversations
 
 [spotlight]
-hotkey = "CmdOrCtrl+Shift+Space"
+hotkey = "Alt+Space"   # Option+Space on macOS, Alt+Space elsewhere
 brevity = "full"       # spotlight answers should be terse
 # provider = "ollama"    # falls back to default_provider when unset
 # model = "llama3.3:8b"
@@ -175,7 +175,9 @@ impl Default for MemoryConfig {
 impl Default for SpotlightConfig {
     fn default() -> Self {
         Self {
-            hotkey: "CmdOrCtrl+Shift+Space".to_string(),
+            // `Alt` is Option on macOS and Alt everywhere else, so one
+            // accelerator is the same physical chord on every platform.
+            hotkey: "Alt+Space".to_string(),
             provider: None,
             model: None,
             brevity: Brevity::Full,

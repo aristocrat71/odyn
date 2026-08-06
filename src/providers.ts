@@ -1,5 +1,6 @@
 import type { ProviderDraft, ProviderEntry } from "./api";
 import { el } from "./dom";
+import { dropdown } from "./dropdown";
 import {
   cancelProviderEdit,
   chooseDefaultProvider,
@@ -118,13 +119,14 @@ function form(entry: ProviderEntry | null): HTMLElement {
   name.value = entry?.name ?? "";
   name.disabled = !adding;
 
-  const kind = el("select", "prov-input");
-  for (const option of ["openai_compat", "ollama"]) {
-    const item = el("option", undefined, option);
-    item.value = option;
-    kind.append(item);
-  }
-  kind.value = entry?.kind ?? "openai_compat";
+  const kind = dropdown({ onPick: () => refill() });
+  kind.set(
+    [
+      { value: "openai_compat", hint: "api endpoint" },
+      { value: "ollama", hint: "local models" },
+    ],
+    entry?.kind ?? "openai_compat",
+  );
 
   const url = field("base url", "https://opencode.ai/zen/v1");
   url.value = entry?.base_url ?? "";
@@ -157,23 +159,22 @@ function form(entry: ProviderEntry | null): HTMLElement {
   const ollamaRows = [line("keep alive", keepAlive)];
 
   const refill = (): void => {
-    const openai = kind.value === "openai_compat";
+    const openai = kind.value() === "openai_compat";
     rows.replaceChildren(
       line("name", name),
-      line("kind", kind),
+      line("kind", kind.root),
       line("base url", url),
       ...(openai ? openaiRows : ollamaRows),
       line("default", makeDefault),
     );
   };
-  kind.addEventListener("change", refill);
   refill();
 
   const save = el("button", "prov-act prov-save", "save");
   save.addEventListener("click", () => {
     const draft: ProviderDraft = {
       name: name.value.trim(),
-      kind: kind.value,
+      kind: kind.value(),
       base_url: url.value.trim(),
       api_key: apiKey.value,
       api_key_env: keyEnv.value,

@@ -87,7 +87,7 @@ pub struct ProviderGroup {
 
 #[derive(serde::Serialize)]
 pub struct Model {
-    name: String,
+    pub(crate) name: String,
     /// On-disk size, which only Ollama reports. Config names no context length
     /// for API models, and an invented one would be worse than none.
     size_bytes: Option<u64>,
@@ -454,7 +454,7 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
 
 /// The installed list doubles as the reachability answer: the menu can only
 /// offer what Ollama names. `ping` is what bounds the wait on a dead endpoint.
-async fn installed(base_url: &str, keep_alive: Option<String>) -> (bool, Vec<Model>) {
+pub(crate) async fn installed(base_url: &str, keep_alive: Option<String>) -> (bool, Vec<Model>) {
     if !ollama::ping(base_url).await {
         return (false, Vec::new());
     }
