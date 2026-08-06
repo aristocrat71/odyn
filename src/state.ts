@@ -1,6 +1,6 @@
 import * as api from "./api";
 
-export type View = "chat" | "brain" | "config";
+export type View = "chat" | "brain" | "config" | "guide";
 
 export type Stream = {
   conversation: number;

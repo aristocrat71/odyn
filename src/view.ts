@@ -42,7 +42,37 @@ function body(): HTMLElement {
   if (state.view === "chat") view.append(renderChat());
   if (state.view === "brain") view.append(renderBrain());
   if (state.view === "config") view.append(renderConfig());
+  if (state.view === "guide") view.append(guide());
   return view;
+}
+
+// The guide is a chunk of its own — nothing it contains is in the main bundle
+// until the view is first opened, which is why it is reached by `import()` and
+// never by a static import. The promise is cached, not just the module, so a
+// redraw while the chunk is in flight does not start a second load.
+let loaded: typeof import("./guide") | null = null;
+let loading: Promise<typeof import("./guide")> | null = null;
+
+function guide(): HTMLElement {
+  const box = el("div", "guide-view");
+  if (loaded !== null) {
+    box.append(loaded.renderGuide());
+    return box;
+  }
+  box.append(el("div", "guide-loading", "loading guide…"));
+  if (loading === null) loading = import("./guide");
+  // A view switched away from leaves `box` detached, and writing to it is a
+  // no-op — so nothing has to be cancelled.
+  void loading.then(
+    (module) => {
+      loaded = module;
+      box.replaceChildren(module.renderGuide());
+    },
+    (err: unknown) => {
+      box.replaceChildren(el("div", "guide-error", `guide failed to load: ${String(err)}`));
+    },
+  );
+  return box;
 }
 
 function selected(): Conversation | undefined {
