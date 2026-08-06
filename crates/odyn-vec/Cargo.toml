@@ -1,0 +1,8 @@
+[package]
+name = "odyn-vec"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }

@@ -5,17 +5,20 @@
   "identifier": "com.aristocrat71.odyn",
   "build": {
     "beforeDevCommand": "bun run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1430",
     "beforeBuildCommand": "bun run build",
-    "frontendDist": "../dist"
+    "frontendDist": "../../dist"
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "odyn",
-        "width": 800,
-        "height": 600
+        "width": 1100,
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 560
       }
     ],
     "security": {

@@ -1,0 +1,131 @@
+/* The window is transparent; the surface is the only visible thing. */
+body.spotlight {
+  background: none;
+}
+
+.spot {
+  padding-top: 2px;
+}
+
+.spot-surface {
+  width: 640px;
+  margin: 0 auto;
+  background: var(--bg-soft);
+  border-radius: 14px;
+  box-shadow: var(--shadow-spotlight), var(--ring);
+}
+
+.spot-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 15px 18px;
+}
+
+.spot-rune {
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--epi);
+}
+
+#spot-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14.5px;
+}
+
+#spot-results {
+  max-height: 45vh;
+  overflow-y: auto;
+  padding: 0 18px 16px;
+  color: var(--ink);
+}
+
+#spot-results code {
+  font-family: var(--mono);
+  color: var(--epi);
+  background: var(--epi-soft);
+  border-radius: var(--radius-code);
+  padding: 1px 5px;
+}
+
+#spot-results pre {
+  background: var(--epi-soft);
+  border-radius: var(--radius-code);
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+#spot-results pre code {
+  background: none;
+  padding: 0;
+}
+
+.spot-error {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  vertical-align: text-bottom;
+  background: var(--epi);
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor {
+    animation: none;
+  }
+}
+
+/* DESIGN.md §7: the minimal one-line ledger between field and answer. */
+
+#spot-ledger {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 8px 18px 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#spot-ledger .chip-core {
+  color: var(--core);
+}
+
+#spot-ledger .chip-epi {
+  color: var(--epi);
+}
+
+.spot-ledger-total {
+  margin-left: auto;
+  color: var(--faint);
+}
+
+.trace {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+.trace-mark,
+.trace-id {
+  color: var(--epi);
+}

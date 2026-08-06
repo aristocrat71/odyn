@@ -1,0 +1,225 @@
+import type { Message } from "./api";
+import { el } from "./dom";
+import { renderMarkdown } from "./markdown";
+import {
+  cancelStream,
+  expandLedger,
+  onStream,
+  refreshPreview,
+  resend,
+  schedulePreview,
+  send,
+  state,
+  streaming,
+  type Stream,
+} from "./state";
+
+const INTERRUPTED = " (interrupted)";
+const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
+// How far from the end still counts as reading the end of the stream.
+const SLACK = 24;
+// Chips shown before the tail collapses to `◈ +N more`.
+const CHIP_LIMIT = 5;
+
+// The composer outlives every redraw: a draft being typed, its height and the
+// caret in it survive a render that has nothing to do with the chat.
+const input = el("textarea", "composer-input");
+input.rows = 1;
+input.placeholder = "Message Odyn…";
+input.addEventListener("input", () => {
+  grow();
+  schedulePreview(input.value);
+});
+input.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  event.preventDefault();
+  submit();
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") cancelStream();
+});
+onStream(patch);
+
+let transcript: HTMLElement | null = null;
+let answer: HTMLElement | null = null;
+let shown: number | null = null;
+
+export function renderChat(): HTMLElement {
+  if (state.selected === null) return empty();
+
+  const opened = shown !== state.selected;
+  const follow = opened || transcript === null || atBottom(transcript);
+  const offset = transcript === null ? 0 : transcript.scrollTop;
+  shown = state.selected;
+
+  const rolled = el("div", "transcript");
+  answer = null;
+  if (state.messages.length === 0) rolled.append(empty());
+  for (const message of state.messages) rolled.append(said(message));
+  const stream = state.stream;
+  if (stream !== null && stream.conversation === state.selected) {
+    rolled.append(streamed(stream));
+  }
+  transcript = rolled;
+
+  const column = el("div", "chat");
+  column.append(
+    rolled,
+    ledger(),
+    composer(),
+    el(
+      "div",
+      "hint",
+      `${MOD}K spotlight · the line above is exactly what the model sees`,
+    ),
+  );
+  // A conversation just opened previews immediately; typing debounces.
+  if (opened) void refreshPreview(input.value);
+  // Scrolling needs the transcript to be in the document and laid out.
+  queueMicrotask(() => {
+    rolled.scrollTop = follow ? rolled.scrollHeight : offset;
+  });
+  return column;
+}
+
+// The ledger refreshes when the window regains focus, so a memory added from
+// the CLI shows up without a restart.
+export function refreshLedger(): void {
+  if (state.selected !== null) void refreshPreview(input.value);
+}
+
+// One message is redrawn per delta; the transcript follows only if it was
+// already showing the end.
+function patch(): void {
+  const stream = state.stream;
+  if (answer === null || transcript === null || stream === null) return;
+  const follow = atBottom(transcript);
+  fill(answer, stream.text, true);
+  if (follow) transcript.scrollTop = transcript.scrollHeight;
+}
+
+function said(message: Message): HTMLElement {
+  const block = el("div", `message ${message.role}`);
+  const text = el("div", "text");
+  fill(text, message.content, false);
+  block.append(speaker(message.role), text);
+  if (message.used.length > 0) block.append(trace(message.used));
+  return block;
+}
+
+function streamed(stream: Stream): HTMLElement {
+  const block = el("div", "message assistant");
+  const text = el("div", "text");
+  fill(text, stream.text, stream.error === "");
+  block.append(speaker("assistant"), text);
+  if (stream.error === "") answer = text;
+  else block.append(failed(stream.error));
+  if (stream.used.length > 0) block.append(trace(stream.used));
+  return block;
+}
+
+// DESIGN.md §5: `◈ used e-0142 e-0087` — mark and ids teal, the rest dim.
+function trace(used: string[]): HTMLElement {
+  const line = el("div", "trace");
+  line.append(el("span", "trace-mark", "◈"), " used");
+  for (const id of used) {
+    line.append(" ", el("span", "trace-id", id));
+  }
+  return line;
+}
+
+function speaker(role: Message["role"]): HTMLElement {
+  return el("div", "speaker", role === "user" ? "MITUL" : "ᛟ ODYN");
+}
+
+function fill(node: HTMLElement, content: string, cursor: boolean): void {
+  const interrupted = content.endsWith(INTERRUPTED);
+  const blocks = renderMarkdown(
+    interrupted ? content.slice(0, -INTERRUPTED.length) : content,
+  );
+  node.replaceChildren(...blocks);
+  // Both marks belong at the end of the last line, unless that line is code.
+  const last = blocks[blocks.length - 1];
+  const tail = last instanceof HTMLParagraphElement ? last : node;
+  if (interrupted) tail.append(" ", el("span", "interrupted", "(interrupted)"));
+  if (cursor) tail.append(el("span", "cursor"));
+}
+
+function failed(message: string): HTMLElement {
+  const line = el("div", "stream-error", `${message} · `);
+  const link = el("button", "retry", "retry");
+  link.addEventListener("click", resend);
+  line.append(link);
+  return line;
+}
+
+// DESIGN.md §5.1: one mono status line fused to the top of the composer.
+function ledger(): HTMLElement {
+  const line = el("div", "ledger");
+  line.append(el("span", "ledger-label", "CONTEXT"));
+  if (state.ledger.error !== null) {
+    line.append(el("span", "ledger-note", state.ledger.error));
+    return line;
+  }
+  const preview = state.ledger.preview;
+  if (preview === null) return line;
+
+  if (preview.core_tokens > 0) {
+    const chip = el("span", "chip chip-core");
+    chip.append("● core ", el("span", "chip-tokens", String(preview.core_tokens)));
+    if (preview.over_budget) chip.classList.add("over");
+    chip.dataset.tip = preview.core.map((item) => item.content).join(" · ");
+    line.append(chip);
+  }
+  const visible = state.ledger.expanded
+    ? preview.episodic
+    : preview.episodic.slice(0, CHIP_LIMIT);
+  for (const item of visible) {
+    const chip = el("span", "chip chip-epi");
+    chip.append("◈ ", item.id, " ", el("span", "chip-tokens", String(item.tokens)));
+    chip.dataset.tip = item.content;
+    line.append(chip);
+  }
+  const rest = preview.episodic.slice(CHIP_LIMIT);
+  if (!state.ledger.expanded && rest.length > 0) {
+    const total = rest.reduce((sum, item) => sum + item.tokens, 0);
+    const more = el("button", "chip chip-epi chip-more");
+    more.append(`◈ +${rest.length} more `, el("span", "chip-tokens", String(total)));
+    more.addEventListener("click", expandLedger);
+    line.append(more);
+  }
+  const total = preview.core_tokens + preview.episodic_tokens;
+  line.append(el("span", "ledger-total", `${count(total)} / ${count(preview.cap_tokens)} tk`));
+  return line;
+}
+
+const count = (tokens: number): string => tokens.toLocaleString("en-US");
+
+function composer(): HTMLElement {
+  const box = el("div", "composer");
+  const glyph = el("button", "send", "↵");
+  glyph.addEventListener("click", submit);
+  box.append(input, glyph);
+  return box;
+}
+
+function submit(): void {
+  const text = input.value.trim();
+  if (text === "" || streaming()) return;
+  input.value = "";
+  grow();
+  void send(text);
+}
+
+function grow(): void {
+  input.style.height = "auto";
+  input.style.height = `${input.scrollHeight}px`;
+}
+
+function atBottom(node: HTMLElement): boolean {
+  return node.scrollHeight - node.scrollTop - node.clientHeight < SLACK;
+}
+
+function empty(): HTMLElement {
+  return el("div", "empty", `${MOD}K anywhere · or start here`);
+}

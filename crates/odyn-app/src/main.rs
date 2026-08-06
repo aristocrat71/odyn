@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    odyn_lib::run()
+    odyn_app_lib::run()
 }

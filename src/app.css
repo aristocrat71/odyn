@@ -1,0 +1,1183 @@
+/* DESIGN.md §3. Structure comes from whitespace and color: no panels, no
+   borders, nothing boxed. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* DESIGN.md §9. The default focus ring. The few elements that draw their own
+   focus treatment — composer, the two underlined inputs, menu items — override
+   it below. */
+:focus-visible {
+  outline: 2px solid var(--epi);
+  outline-offset: 2px;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar) minmax(0, 1fr);
+  gap: var(--gutter);
+  height: 100vh;
+  padding: var(--gutter);
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.rune {
+  color: var(--epi);
+  font-size: 15px;
+}
+
+.wordmark-text {
+  font-family: var(--wordmark);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.2em;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 36px;
+}
+
+.nav-item {
+  color: var(--dim);
+  transition: color 150ms ease;
+}
+
+.nav-item:hover {
+  color: var(--muted);
+}
+
+.nav-item.active {
+  color: var(--ink);
+}
+
+.mark {
+  color: var(--epi);
+}
+
+.label {
+  margin-top: 36px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.conversations {
+  flex: 1;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  line-height: 1.9;
+}
+
+.row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: var(--dim);
+  transition: color 150ms ease;
+}
+
+.row:hover .row-title {
+  color: var(--muted);
+}
+
+.row.active .row-title {
+  color: var(--ink);
+}
+
+.row-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.row-delete {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  opacity: 0;
+  transition:
+    color 150ms ease,
+    opacity 150ms ease;
+}
+
+/* Focus reveals it too, or the keyboard could not reach it. */
+.row:hover .row-delete,
+.row:focus-within .row-delete {
+  opacity: 1;
+}
+
+.row-delete:hover {
+  color: var(--danger);
+}
+
+.new {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+  transition: color 150ms ease;
+}
+
+.new:hover {
+  color: var(--epi);
+}
+
+.status {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 24px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.dot {
+  margin-right: 2px;
+  color: var(--epi);
+}
+
+.dot.down {
+  color: var(--danger);
+}
+
+.status-rss {
+  color: var(--faint);
+}
+
+.status-warn {
+  margin-top: 6px;
+  color: var(--danger);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.topbar-left {
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.crumbs {
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* DESIGN.md §4. The trigger is plain text; the menu floats on shadow. */
+
+.picker-wrap {
+  position: relative;
+  flex: none;
+}
+
+.picker {
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  transition: color 150ms ease;
+}
+
+.picker:hover {
+  color: var(--ink);
+}
+
+.picker-provider {
+  color: var(--faint);
+}
+
+.picker-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 1;
+  width: 280px;
+  max-height: 60vh;
+  padding: 12px 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+  border-radius: var(--radius-menu);
+  background: var(--bg-soft);
+  box-shadow: var(--shadow-menu), var(--ring);
+}
+
+.picker-loading {
+  padding: 0 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.picker-group + .picker-group {
+  margin-top: 16px;
+}
+
+.picker-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 16px 5px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.picker-local {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: none;
+  color: var(--epi);
+}
+
+.picker-offline {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.picker-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 16px;
+  font-size: 13px;
+  color: var(--muted);
+  transition: color 150ms ease;
+}
+
+.picker-item:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+/* Inside the edge: a 2px offset would be clipped by the menu's own scroll. */
+.picker-item:focus-visible {
+  outline: 2px solid var(--epi);
+  outline-offset: -2px;
+}
+
+.picker-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.picker-mark {
+  flex: none;
+  width: 9px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--epi);
+}
+
+.picker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.picker-meta {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.error {
+  margin-top: 18px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.view {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  margin-top: 28px;
+}
+
+.empty {
+  margin: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+/* DESIGN.md §5. No avatars, no bubbles, no containers: a label and text. */
+
+.chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 660px;
+}
+
+.transcript {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+}
+
+.message {
+  flex: none;
+}
+
+.message + .message {
+  margin-top: 30px;
+}
+
+.speaker {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.message.assistant .speaker {
+  color: var(--epi);
+}
+
+/* Answers over questions. */
+.text {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.message.assistant .text {
+  color: var(--ink);
+}
+
+.para {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.para + .para,
+.para + .code,
+.code + .para {
+  margin-top: 12px;
+}
+
+.code-inline {
+  padding: 1px 4px;
+  border-radius: var(--radius-code);
+  background: var(--epi-soft);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--epi);
+}
+
+.code {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-radius: var(--radius-code);
+  background: var(--epi-soft);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.interrupted {
+  color: var(--dim);
+}
+
+/* The only spinner in the app. */
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--epi);
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor {
+    animation: none;
+  }
+}
+
+.stream-error {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.retry {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--epi);
+}
+
+/* DESIGN.md §5.2. The app's only elevated surface. */
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 22px;
+  padding: 12px 14px;
+  border-radius: var(--radius-composer);
+  background: var(--bg-soft);
+  box-shadow: var(--ring);
+  transition: box-shadow 200ms ease;
+}
+
+.composer:focus-within {
+  box-shadow: 0 0 0 1px var(--epi);
+}
+
+.composer-input {
+  flex: 1;
+  min-width: 0;
+  /* One row, growing to six. */
+  max-height: 138px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: none;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 23px;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.composer-input::placeholder {
+  color: var(--dim);
+}
+
+.send {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 23px;
+  color: var(--epi);
+}
+
+.hint {
+  margin-top: 10px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+/* DESIGN.md §5. The memory trace under an answer that used memories. */
+
+.trace {
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+.trace-mark,
+.trace-id {
+  color: var(--epi);
+}
+
+/* DESIGN.md §5.1. The context ledger: a status line, not a boxed widget. */
+
+.ledger {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-top: 22px;
+  padding: 0 14px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.ledger + .composer {
+  margin-top: 8px;
+}
+
+.ledger-label {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+
+.ledger-note {
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip {
+  position: relative;
+}
+
+.chip-core {
+  color: var(--core);
+}
+
+.chip-core.over {
+  color: var(--danger);
+}
+
+.chip-epi {
+  color: var(--epi);
+}
+
+.chip-tokens {
+  color: var(--faint);
+}
+
+.chip-more {
+  font: inherit;
+  cursor: pointer;
+}
+
+.chip:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: max-content;
+  max-width: 340px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-soft);
+  box-shadow: var(--shadow-menu), var(--ring);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: normal;
+}
+
+.ledger-total {
+  margin-left: auto;
+  color: var(--faint);
+}
+
+/* DESIGN.md §6. Brain view: open text columns, no panes. */
+
+.brain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+}
+
+.brain-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.brain-stats {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.brain-toggle {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.brain-mode {
+  font: inherit;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.brain-mode.active {
+  color: var(--epi);
+}
+
+.brain-mode-sep {
+  color: var(--faint);
+}
+
+.brain-columns {
+  display: flex;
+  gap: 64px;
+  margin-top: 30px;
+  min-height: 0;
+}
+
+.brain-core {
+  flex: none;
+  width: 340px;
+}
+
+.brain-epi {
+  flex: 1;
+  min-width: 0;
+}
+
+.col-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.col-label.core {
+  color: var(--core);
+}
+
+.col-label.epi {
+  color: var(--epi);
+}
+
+.budget {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+.budget-bar {
+  flex: 1;
+  height: 2px;
+  background: var(--faint);
+}
+
+.budget-fill {
+  height: 100%;
+  background: var(--core);
+}
+
+.mem-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 16px;
+  min-width: 0;
+}
+
+.mem-id {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.mem-id.core {
+  color: var(--core);
+}
+
+.mem-id.epi {
+  color: var(--epi);
+}
+
+.mem-content {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.mem-tokens,
+.mem-meta {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.mem-tag {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--epi);
+}
+
+/* Hidden by opacity, not visibility: the keyboard has to be able to focus it,
+   and reaching it with the pointer already reveals the row. */
+.mem-actions {
+  flex: none;
+  opacity: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  transition: opacity 150ms ease;
+}
+
+.mem-row:hover .mem-actions,
+.mem-row:focus-within .mem-actions {
+  opacity: 1;
+}
+
+.mem-edit,
+.mem-delete {
+  font: inherit;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.mem-edit:hover {
+  color: var(--epi);
+}
+
+.mem-delete:hover {
+  color: var(--danger);
+}
+
+.mem-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  border-bottom: 1px solid var(--faint);
+  outline: none;
+  background: none;
+  font-size: 12.5px;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.ghost-link {
+  margin-top: 18px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.ghost-link:hover {
+  color: var(--epi);
+}
+
+.brain-toolbar {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+.brain-search {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  border-bottom: 1px solid var(--faint);
+  outline: none;
+  background: none;
+  font-size: 12px;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.brain-search::placeholder {
+  color: var(--faint);
+}
+
+.brain-search:focus {
+  border-bottom-color: var(--epi);
+}
+
+.sort-toggle {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.sort-toggle:hover {
+  color: var(--epi);
+}
+
+.brain-none {
+  margin-top: 20px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.brain-empty {
+  margin: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+/* DESIGN.md §6.2. Full-bleed graph on the raw background — no frame. */
+
+.graph {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  margin-top: 20px;
+}
+
+.graph-svg {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.graph-svg:active {
+  cursor: grabbing;
+}
+
+.gedge-sim {
+  stroke: var(--faint);
+  stroke-width: 1;
+}
+
+.gedge-co {
+  stroke: var(--epi);
+  stroke-width: 1;
+  stroke-dasharray: 4 5;
+  opacity: 0.7;
+}
+
+.gnode circle {
+  stroke-width: 1.5;
+}
+
+.gnode-core circle {
+  stroke: var(--core);
+  fill: var(--core);
+  fill-opacity: 0.22;
+}
+
+.gnode-epi circle {
+  stroke: var(--epi);
+  fill: var(--epi);
+  fill-opacity: 0.12;
+}
+
+.gnode text {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--dim);
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+/* Episodic labels earn their place with zoom; core is always named. */
+.gnode-epi text {
+  display: none;
+}
+
+g.labeled .gnode-epi text {
+  display: block;
+}
+
+.graph-hud {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+  pointer-events: none;
+}
+
+.graph-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.graph-control {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: var(--bg-soft);
+  box-shadow: var(--ring);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: center;
+  color: var(--dim);
+}
+
+.graph-control:hover {
+  color: var(--epi);
+}
+
+.graph-tip {
+  position: absolute;
+  z-index: 30;
+  max-width: 300px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--bg-soft);
+  box-shadow: var(--shadow-menu), var(--ring);
+  pointer-events: none;
+}
+
+.graph-tip-id {
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.graph-tip-id.core {
+  color: var(--core);
+}
+
+.graph-tip-id.epi {
+  color: var(--epi);
+}
+
+.graph-tip-text {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.graph-tip-meta {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+/* DESIGN.md §8. The file, read-only, on the raw background: no editor chrome,
+   no box — the highlighting is the whole interface. */
+
+.config {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.config-path {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.config-file {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.config-open {
+  flex: none;
+  font: inherit;
+  color: var(--dim);
+  transition: color 150ms ease;
+}
+
+.config-open:hover {
+  color: var(--epi);
+}
+
+.toml {
+  flex: 1;
+  min-height: 0;
+  margin: 22px 0 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.toml-key,
+.toml-section {
+  color: var(--epi);
+}
+
+.toml-section {
+  font-weight: 500;
+}
+
+.toml-string {
+  color: var(--core);
+}
+
+.toml-comment {
+  color: var(--dim);
+}
+
+.config-note {
+  flex: none;
+  margin-top: 20px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+/* CAVEMAN-INTEGRATION §C.4. The brevity control, beside the model picker. */
+
+.topbar-controls {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  gap: 20px;
+}
+
+.brevity-trigger.off {
+  opacity: 0.6;
+}
+
+.brevity-menu {
+  width: 230px;
+  padding: 8px 0;
+}
+
+/* DESIGN.md §9. Under 900px the sidebar leaves the grid and comes back as a
+   floating surface — the hamburger is borderless text in the page gutter. */
+
+.hamburger {
+  display: none;
+}
+
+@media (max-width: 899px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .hamburger {
+    position: fixed;
+    top: 48px;
+    left: 14px;
+    z-index: 41;
+    display: block;
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1;
+    color: var(--dim);
+    transition: color 150ms ease;
+  }
+
+  .hamburger:hover {
+    color: var(--epi);
+  }
+
+  .sidebar-open .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    display: flex;
+    width: calc(var(--sidebar) + var(--gutter) * 2);
+    padding: var(--gutter);
+    background: var(--bg-soft);
+    box-shadow: var(--shadow-menu);
+  }
+}

@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["crates/odyn-core", "crates/odyn-cli", "crates/odyn-app", "crates/odyn-vec"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# Auto-degrading ANSI: styling disappears when stdout/stderr is not a terminal.
+anstream = "1"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+# bge-small-en-v1.5 embeddings; its `ort` build downloads a prebuilt
+# onnxruntime, accepted as part of dependency installation. Defaults are
+# swapped out because they pull native-tls; only the rustls variants and the
+# text pipeline are wanted.
+fastembed = { version = "5", default-features = false, features = [
+    "hf-hub-rustls-tls",
+    "ort-download-binaries-rustls-tls",
+] }
+futures = "0.3"
+# default-features = false keeps native-tls/openssl out of the tree.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
+# "bundled" statically links SQLite: one known version everywhere, no system lib.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# default-features = false drops file history, completion tries and dir lookup;
+# the REPL needs a line editor, not a shell.
+rustyline = { version = "18", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Statically linked vector search; registered via odyn-vec's init hook.
+sqlite-vec = "0.1"
+# Only the process memory of this process is wanted, so everything but the
+# "system" feature (disks, networks, components, users) is switched off.
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+thiserror = "2"
+# "time" drives the first-token deadline; "rt"/"macros" are for #[tokio::test].
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-opener = "2"
+# Parse only; writing config (Step 2.2) is toml_edit's job.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+# Comment- and layout-preserving TOML, for `odyn config set`.
+toml_edit = "0.25"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
