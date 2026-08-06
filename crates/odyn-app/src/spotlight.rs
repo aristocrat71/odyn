@@ -238,7 +238,7 @@ pub fn spotlight_ask(
 /// Saves the current exchange as a real conversation and hands off to the main
 /// window. Mid-stream, the answer is kept as an interrupted partial.
 #[tauri::command]
-pub fn spotlight_promote(
+pub async fn spotlight_promote(
     app: AppHandle,
     state: State<'_, AppState>,
     asks: State<'_, AskState>,

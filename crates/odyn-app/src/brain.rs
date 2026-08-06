@@ -66,7 +66,7 @@ impl From<MemoryStats> for MemoryRow {
 }
 
 #[tauri::command]
-pub fn brain_overview(state: State<'_, AppState>) -> Result<BrainOverview, String> {
+pub async fn brain_overview(state: State<'_, AppState>) -> Result<BrainOverview, String> {
     let ready = state.ready()?;
     let storage = ready.storage();
     let core = storage.list_memories(Some(MemoryTier::Core)).map_err(say)?;
@@ -85,7 +85,7 @@ pub fn brain_overview(state: State<'_, AppState>) -> Result<BrainOverview, Strin
 }
 
 #[tauri::command]
-pub fn brain_episodic(
+pub async fn brain_episodic(
     state: State<'_, AppState>,
     sort: Sort,
     offset: u32,
@@ -134,7 +134,10 @@ pub async fn brain_search(app: AppHandle, query: String) -> Result<Vec<MemoryRow
 }
 
 #[tauri::command]
-pub fn brain_add_core(state: State<'_, AppState>, content: String) -> Result<MemoryRow, String> {
+pub async fn brain_add_core(
+    state: State<'_, AppState>,
+    content: String,
+) -> Result<MemoryRow, String> {
     let ready = state.ready()?;
     let storage = ready.storage();
     let memory = storage
@@ -144,7 +147,7 @@ pub fn brain_add_core(state: State<'_, AppState>, content: String) -> Result<Mem
 }
 
 #[tauri::command]
-pub fn brain_update_core(
+pub async fn brain_update_core(
     state: State<'_, AppState>,
     id: i64,
     content: String,
@@ -156,7 +159,7 @@ pub fn brain_update_core(
 }
 
 #[tauri::command]
-pub fn brain_delete_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+pub async fn brain_delete_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     state.ready()?.storage().delete_memory(id).map_err(say)
 }
 

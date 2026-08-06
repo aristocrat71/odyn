@@ -145,14 +145,14 @@ enum Outcome {
 }
 
 #[tauri::command]
-pub fn list_conversations(state: State<'_, AppState>) -> Result<Vec<Conversation>, String> {
+pub async fn list_conversations(state: State<'_, AppState>) -> Result<Vec<Conversation>, String> {
     let ready = state.ready()?;
     let rows = ready.storage().list_conversations().map_err(say)?;
     Ok(rows.into_iter().map(Conversation::from).collect())
 }
 
 #[tauri::command]
-pub fn create_conversation(state: State<'_, AppState>) -> Result<Conversation, String> {
+pub async fn create_conversation(state: State<'_, AppState>) -> Result<Conversation, String> {
     let ready = state.ready()?;
     let provider = ready.registry.default_provider_name();
     // No default model is a real state for Ollama; the picker fills it in.
@@ -165,7 +165,7 @@ pub fn create_conversation(state: State<'_, AppState>) -> Result<Conversation, S
 }
 
 #[tauri::command]
-pub fn rename_conversation(
+pub async fn rename_conversation(
     state: State<'_, AppState>,
     id: i64,
     title: String,
@@ -175,7 +175,7 @@ pub fn rename_conversation(
 }
 
 #[tauri::command]
-pub fn delete_conversation(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+pub async fn delete_conversation(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let ready = state.ready()?;
     ready.storage().delete_conversation(id).map_err(say)
 }
@@ -183,7 +183,7 @@ pub fn delete_conversation(state: State<'_, AppState>, id: i64) -> Result<(), St
 /// An explicit level for this conversation, written immediately; it affects
 /// the next send, never the past.
 #[tauri::command]
-pub fn set_conversation_brevity(
+pub async fn set_conversation_brevity(
     state: State<'_, AppState>,
     conversation_id: i64,
     brevity: Brevity,
@@ -196,7 +196,7 @@ pub fn set_conversation_brevity(
 }
 
 #[tauri::command]
-pub fn set_conversation_model(
+pub async fn set_conversation_model(
     state: State<'_, AppState>,
     conversation_id: i64,
     provider: String,
@@ -210,7 +210,10 @@ pub fn set_conversation_model(
 }
 
 #[tauri::command]
-pub fn get_conversation(state: State<'_, AppState>, id: i64) -> Result<ConversationView, String> {
+pub async fn get_conversation(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<ConversationView, String> {
     let ready = state.ready()?;
     let row = conversation(ready, id)?;
     let stored = ready.storage().messages(id).map_err(say)?;
@@ -235,7 +238,7 @@ pub fn get_conversation(state: State<'_, AppState>, id: i64) -> Result<Conversat
 /// Injections are recorded against the question; the trace line renders under
 /// the answer, so each assistant row carries the ids of the user row before it.
 #[tauri::command]
-pub fn messages(
+pub async fn messages(
     state: State<'_, AppState>,
     conversation_id: i64,
 ) -> Result<Vec<MessageView>, String> {
@@ -287,7 +290,7 @@ pub fn messages(
 /// question is already stored, so a failed stream is retried without asking it
 /// twice.
 #[tauri::command]
-pub fn send_message(
+pub async fn send_message(
     app: AppHandle,
     state: State<'_, AppState>,
     conversation_id: i64,
@@ -346,7 +349,7 @@ pub fn send_message(
 }
 
 #[tauri::command]
-pub fn cancel_message(
+pub async fn cancel_message(
     app: AppHandle,
     state: State<'_, AppState>,
     request_id: u64,
@@ -588,16 +591,18 @@ pub async fn context_preview(
     tauri::async_runtime::spawn_blocking(move || {
         let ready = app.state::<AppState>().inner().ready()?;
         let (prior, chosen): (Vec<Message>, Option<Brevity>) = match conversation_id {
-            Some(id) => (
-                ready
+            Some(id) => {
+                // One lock per statement to prevent self-deadlock.
+                let brevity = conversation(ready, id)?.brevity;
+                let prior = ready
                     .storage()
                     .messages(id)
                     .map_err(say)?
                     .into_iter()
                     .map(|row| Message::new(row.role, row.content))
-                    .collect(),
-                conversation(ready, id)?.brevity,
-            ),
+                    .collect();
+                (prior, brevity)
+            }
             None => (Vec::new(), None),
         };
         let memory = &ready.config.memory;
