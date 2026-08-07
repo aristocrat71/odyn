@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod spotlight;
 mod state;
+mod tray;
 
 use tauri::Manager;
 
@@ -18,6 +19,7 @@ pub fn run() {
         .setup(|app| {
             app.manage(state::AppState::load());
             spotlight::setup(app.handle());
+            tray::setup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -60,8 +62,16 @@ pub fn run() {
             spotlight::spotlight_set_target,
             spotlight::spotlight_save_key,
         ])
-        .run(tauri::generate_context!());
-    if let Err(err) = app {
-        eprintln!("odyn: could not start: {err}");
+        .build(tauri::generate_context!());
+    match app {
+        // Once the close button hides the window instead of destroying it, the
+        // dock icon is the other way back in — macOS reports that click here.
+        Ok(app) => app.run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if matches!(_event, tauri::RunEvent::Reopen { .. }) {
+                tray::open_dashboard(_app);
+            }
+        }),
+        Err(err) => eprintln!("odyn: could not start: {err}"),
     }
 }
