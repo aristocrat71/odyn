@@ -21,9 +21,16 @@ function topbar(): HTMLElement {
   const left = el("div", "topbar-left");
   const current = selected();
 
-  left.append(
-    el("h1", "title", state.view === "chat" && current ? current.title : state.view),
+  const head = el(
+    "h1",
+    "title",
+    state.view === "chat" && current ? current.title : state.view,
   );
+  const count = state.brain.overview?.count;
+  if (state.view === "brain" && count !== undefined) {
+    head.append(" ", el("span", "title-note", `${count} memories`));
+  }
+  left.append(head);
   const crumbs = crumbLine(current);
   if (crumbs !== "") left.append(el("div", "crumbs", crumbs));
 

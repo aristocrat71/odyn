@@ -44,6 +44,7 @@ pub fn run() {
             brain::brain_set_model,
             brain::brain_set_save_temperature,
             brain::brain_set_top_k,
+            brain::brain_set_min_relevance,
             config::config_file,
             config::open_config,
             config::providers_config,

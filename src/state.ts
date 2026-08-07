@@ -53,7 +53,6 @@ export const state = {
   ledger: {
     preview: null as api.ContextPreview | null,
     error: null as string | null,
-    expanded: false,
   },
   brain: {
     mode: "list" as "list" | "graph",
@@ -406,6 +405,13 @@ export const chooseTopK = (value: number): Promise<void> =>
     render();
   });
 
+export const chooseMinRelevance = (value: number): Promise<void> =>
+  guard(async () => {
+    if (value === state.brain.overview?.min_relevance) return;
+    state.brain.overview = await api.brainSetMinRelevance(value);
+    render();
+  });
+
 export const chooseEmbedModel = (model: string): Promise<void> =>
   guard(async () => {
     if (model === state.brain.overview?.model) return;
@@ -621,11 +627,6 @@ export async function refreshPreview(draft: string): Promise<void> {
     if (seq !== previewSeq) return;
     state.ledger.error = typeof err === "string" ? err : String(err);
   }
-  render();
-}
-
-export function expandLedger(): void {
-  state.ledger.expanded = true;
   render();
 }
 

@@ -246,7 +246,7 @@ button {
   overflow: hidden;
 }
 
-#spot-ledger .chip-epi {
+.ledger-reading {
   color: var(--epi);
 }
 
@@ -264,6 +264,19 @@ button {
 
 .trace-mark,
 .trace-id {
+  color: var(--epi);
+}
+
+.trace-sep {
+  color: var(--faint);
+}
+
+.trace-more {
+  font: inherit;
+  color: var(--dim);
+}
+
+.trace-more:hover {
   color: var(--epi);
 }
 

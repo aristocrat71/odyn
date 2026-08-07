@@ -133,6 +133,7 @@ export type BrainOverview = {
   // The width the index was built at; 0 before anything is built.
   dim: number;
   save_temperature: number;
+  min_relevance: number;
 };
 
 export type EmbedOption = {
@@ -159,6 +160,9 @@ export const brainSetSaveTemperature = (value: number): Promise<BrainOverview> =
 
 export const brainSetTopK = (value: number): Promise<BrainOverview> =>
   invoke("brain_set_top_k", { value });
+
+export const brainSetMinRelevance = (value: number): Promise<BrainOverview> =>
+  invoke("brain_set_min_relevance", { value });
 
 export const brainMemories = (
   sort: MemorySort,

@@ -360,12 +360,10 @@ odyn chat`),
         "One mono line fused to the top of the composer, which is not a " +
           "readout of what was sent — it is built by the same call the send makes:",
       ),
-      pre("CONTEXT   ◈ cern-trip 61   ◈ espresso-order 48        109 / 1,200 tk"),
+      pre("CONTEXT   ◈ reading the brain                          109 / 1,200 tk"),
       list([
         "Without a trigger in the draft it reads `/brain recalls memory · /memory saves one` — and that is the truth: the send injects nothing.",
-        "With `/brain`, one teal `◈ {slug} {tk}` chip per recalled note, token counts dim.",
-        "Past five chips the tail collapses to `◈ +3 more 122`; clicking expands it.",
-        "Hovering a chip shows that note's full text.",
+        "With `/brain` it reads `◈ reading the brain` in teal. Which notes were recalled is named by the `◈ used` trace under the answer.",
         "The total on the right is against `cap_tokens`. It refreshes at least 400ms after the last keystroke. The line is exactly what the model sees.",
       ]),
       sub("trace lines"),
@@ -387,8 +385,10 @@ odyn chat`),
       ]),
       sub("brain view — list mode"),
       p(
-        "The header states the brain: `214 memories · bge-small · top-k 6 · cap 1200 tk`, " +
-          "with the folder's path under the column label. One row per note; hover " +
+        "The count sits beside the title; the line under it states the brain — " +
+          "`top-k 6 · min-relevance 0.3 · cap 1200 tk` — with top-k and min-relevance " +
+          "editable in place, and the folder's path under the column label. " +
+          "One row per note; hover " +
           "reveals `✎` and `✕`, and editing happens in place — the row becomes an " +
           "input, Enter commits, Esc cancels. `+ add a note` writes a new file the " +
           "same way. The semantic search runs the same embedding pipeline as recall " +

@@ -5,6 +5,7 @@ import { renderGraph } from "./graph";
 import {
   cancelMemoryEdit,
   chooseEmbedModel,
+  chooseMinRelevance,
   chooseSaveTemperature,
   chooseTopK,
   commitMemoryEdit,
@@ -38,31 +39,62 @@ editor.addEventListener("keydown", (event) => {
   if (event.key === "Escape") cancelMemoryEdit();
 });
 
-const topK = el("input", "brain-topk");
-topK.type = "number";
-topK.min = String(TOP_K_MIN);
-topK.max = String(TOP_K_MAX);
-topK.setAttribute("aria-label", "top-k");
-topK.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") topK.blur();
-  if (event.key === "Escape") {
-    topK.value = shownTopK();
-    topK.blur();
-  }
-});
-// Committed on leaving the field: half-typed numbers never reach the config.
-topK.addEventListener("blur", () => {
-  const current = state.brain.overview?.top_k;
-  if (current === undefined) return;
-  const typed = Number(topK.value);
-  const value = Number.isFinite(typed)
-    ? Math.min(TOP_K_MAX, Math.max(TOP_K_MIN, Math.round(typed)))
-    : current;
-  topK.value = String(value);
-  void chooseTopK(value);
-});
+// One editable number on the stats line. Committed on leaving the field, so a
+// half-typed value never reaches the config; out of range snaps back in.
+function numberField(
+  label: string,
+  bounds: { min: number; max: number; step: number },
+  round: (value: number) => number,
+  read: () => number | undefined,
+  write: (value: number) => Promise<void>,
+): HTMLInputElement {
+  const field = el("input", "brain-num");
+  field.type = "number";
+  field.min = String(bounds.min);
+  field.max = String(bounds.max);
+  field.step = String(bounds.step);
+  field.setAttribute("aria-label", label);
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") field.blur();
+    if (event.key === "Escape") {
+      field.value = String(read() ?? "");
+      field.blur();
+    }
+  });
+  field.addEventListener("blur", () => {
+    const current = read();
+    if (current === undefined) return;
+    const typed = Number(field.value);
+    const value = Number.isFinite(typed)
+      ? round(Math.min(bounds.max, Math.max(bounds.min, typed)))
+      : current;
+    field.value = String(value);
+    void write(value);
+  });
+  return field;
+}
 
-const shownTopK = (): string => String(state.brain.overview?.top_k ?? "");
+const topK = numberField(
+  "top-k",
+  { min: TOP_K_MIN, max: TOP_K_MAX, step: 1 },
+  Math.round,
+  () => state.brain.overview?.top_k,
+  chooseTopK,
+);
+
+const minRelevance = numberField(
+  "min-relevance",
+  { min: 0, max: 1, step: 0.05 },
+  (value) => Math.round(value * 100) / 100,
+  () => state.brain.overview?.min_relevance,
+  chooseMinRelevance,
+);
+
+// A redraw mid-entry must not overwrite what is being typed.
+function sync(field: HTMLInputElement, value: number): HTMLInputElement {
+  if (document.activeElement !== field) field.value = String(value);
+  return field;
+}
 
 export function renderBrain(): HTMLElement {
   const root = el("div", "brain");
@@ -126,11 +158,11 @@ function header(): HTMLElement {
   const left = el("div", "brain-stats");
   if (overview !== null) {
     left.title = overview.path;
-    // A redraw mid-entry must not overwrite what is being typed.
-    if (document.activeElement !== topK) topK.value = shownTopK();
     left.append(
-      `${overview.count} memories · top-k `,
-      topK,
+      "top-k ",
+      sync(topK, overview.top_k),
+      " · min-relevance ",
+      sync(minRelevance, overview.min_relevance),
       ` · cap ${overview.cap_tokens} tk`,
     );
   }

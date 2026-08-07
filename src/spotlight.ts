@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { accept, ghost } from "./complete";
-import { el, waiting } from "./dom";
+import { el, forgetTraces, trace, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
 import { renderMarkdown } from "./markdown";
 
@@ -132,9 +132,8 @@ function keyCard(): void {
 function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.replaceChildren();
   if (event.tokens === 0) return;
-  for (const id of event.used) {
-    ledger.append(el("span", "chip-epi", `◈ ${id}`));
-  }
+  // Which notes came back is named by the `◈ used` trace under the answer.
+  ledger.append(el("span", "ledger-reading", "◈ reading the brain"));
   ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
   ledger.hidden = commandMode;
 }
@@ -154,16 +153,10 @@ function draw(): void {
   }
   results.replaceChildren(...body);
   if (!streaming && used.length > 0) {
-    const trace = el("div", "trace");
-    trace.append(el("span", "trace-mark", "◈"), " used");
-    for (const id of used) trace.append(" ", el("span", "trace-id", id));
-    results.append(trace);
+    results.append(trace("◈", "used", used, "used"));
   }
   if (!streaming && saved.length > 0) {
-    const trace = el("div", "trace");
-    trace.append(el("span", "trace-mark", "✎"), " saved");
-    for (const slug of saved) trace.append(" ", el("span", "trace-id", slug));
-    results.append(trace);
+    results.append(trace("✎", "saved", saved, "saved"));
   }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
@@ -187,6 +180,7 @@ function clearScreen(): void {
   streaming = false;
   used = [];
   saved = [];
+  forgetTraces();
   commandMode = false;
   cursor = 0;
   input.value = "";
@@ -285,6 +279,7 @@ async function ask(): Promise<void> {
   answer = "";
   streaming = true;
   used = [];
+  forgetTraces();
   ledger.hidden = true;
   ledger.replaceChildren();
   draw();

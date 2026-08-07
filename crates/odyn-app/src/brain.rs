@@ -43,6 +43,7 @@ pub struct BrainOverview {
     /// The width the index was actually built at; 0 before anything is built.
     dim: usize,
     save_temperature: f32,
+    min_relevance: f32,
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -97,6 +98,7 @@ pub async fn brain_overview(app: AppHandle) -> Result<BrainOverview, String> {
             model_remote: ready.config.brain.model.is_remote(),
             dim,
             save_temperature: ready.config.brain.save_temperature,
+            min_relevance: ready.config.brain.min_relevance,
         })
     })
     .await
@@ -206,6 +208,20 @@ pub async fn brain_set_top_k(app: AppHandle, value: u32) -> Result<BrainOverview
     }
     let path = config_path().map_err(|err| err.to_string())?;
     config_edit::set(&path, "brain.top_k", &value.to_string()).map_err(|err| err.to_string())?;
+    app.state::<AppState>().inner().reload()?;
+    brain_overview(app).await
+}
+
+/// Writes `[brain] min_relevance`. 0 keeps everything the walk ranked; 1 keeps
+/// only what ties the best match.
+#[tauri::command]
+pub async fn brain_set_min_relevance(app: AppHandle, value: f32) -> Result<BrainOverview, String> {
+    if !(0.0..=1.0).contains(&value) {
+        return Err("min_relevance must be between 0 and 1".to_string());
+    }
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "brain.min_relevance", &format!("{value:?}"))
+        .map_err(|err| err.to_string())?;
     app.state::<AppState>().inner().reload()?;
     brain_overview(app).await
 }
