@@ -13,7 +13,6 @@ use odyn_core::providers::ollama::OllamaProvider;
 use odyn_core::providers::openai_compat::OpenAiCompatProvider;
 use odyn_core::providers::{ollama, openai_compat};
 use odyn_core::storage::{Conversation as StoredConversation, MemoryTier, StorageError};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{AppState, Ready, Stream};
@@ -30,7 +29,6 @@ pub struct Conversation {
     title: String,
     provider: String,
     model: String,
-    /// Unix epoch seconds; the list view dates each row by it.
     updated_at: i64,
     /// The conversation's explicit choice; `None` follows `[style] brevity`.
     brevity: Option<Brevity>,
@@ -103,7 +101,6 @@ pub struct Status {
     /// `None` when no local Ollama is configured beside the default provider,
     /// which is also the case when Ollama *is* the default: one dot, not two.
     ollama_reachable: Option<bool>,
-    rss_bytes: u64,
     /// `[style] brevity` — what a conversation without its own choice uses.
     brevity_default: Brevity,
 }
@@ -415,7 +412,6 @@ pub async fn status(state: State<'_, AppState>) -> Result<Status, String> {
         provider_name,
         provider_reachable,
         ollama_reachable,
-        rss_bytes: rss_bytes(),
         brevity_default,
     })
 }
@@ -799,21 +795,6 @@ async fn ping(provider: &ProviderConfig) -> bool {
         ProviderConfig::OpenAiCompat { base_url, .. } => openai_compat::ping(base_url).await,
         ProviderConfig::Ollama { base_url, .. } => ollama::ping(base_url).await,
     }
-}
-
-/// The RAM number in the footer is a brag, so it is measured, not estimated:
-/// this process only, refreshed on demand.
-fn rss_bytes() -> u64 {
-    let Ok(pid) = sysinfo::get_current_pid() else {
-        return 0;
-    };
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing().with_memory(),
-    );
-    system.process(pid).map_or(0, |process| process.memory())
 }
 
 impl From<StoredConversation> for Conversation {

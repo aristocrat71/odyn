@@ -64,7 +64,6 @@ export type Status = {
   provider_name: string;
   provider_reachable: boolean;
   ollama_reachable: boolean | null;
-  rss_bytes: number;
   brevity_default: BrevityLevel;
 };
 

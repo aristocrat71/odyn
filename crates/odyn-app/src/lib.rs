@@ -61,6 +61,7 @@ pub fn run() {
             spotlight::spotlight_target,
             spotlight::spotlight_set_target,
             spotlight::spotlight_save_key,
+            spotlight::spotlight_open_view,
         ])
         .build(tauri::generate_context!());
     match app {

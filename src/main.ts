@@ -11,6 +11,7 @@ import { refreshLedger } from "./chat";
 import { el } from "./dom";
 import { renderSidebar } from "./sidebar";
 import {
+  isView,
   load,
   newConversation,
   onChange,
@@ -83,4 +84,8 @@ window.addEventListener("focus", refreshLedger);
 void listen<number>("open-conversation", async (event) => {
   await load();
   await selectConversation(event.payload);
+});
+
+void listen<string>("open-view", (event) => {
+  if (isView(event.payload)) setView(event.payload);
 });

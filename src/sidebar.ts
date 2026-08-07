@@ -13,10 +13,8 @@ import {
   type View,
 } from "./state";
 
-const VIEWS: View[] = ["home", "chat", "brain", "providers", "config", "guide"];
+const NAV: View[] = ["home", "chat", "brain", "providers", "config", "guide"];
 
-// The sidebar is a shortcut to what you were just doing, not an archive. The
-// rest are a click away on the heading.
 const RECENT = 7;
 
 export function renderSidebar(root: HTMLElement): void {
@@ -30,8 +28,6 @@ export function renderSidebar(root: HTMLElement): void {
   );
 }
 
-// The heading is the way into the searchable list, and it carries the total so
-// that the seven below it never read as all there is.
 function label(): HTMLElement {
   const link = el("button", "label label-link");
   const word = el("span");
@@ -56,7 +52,7 @@ function wordmark(): HTMLElement {
 
 function nav(): HTMLElement {
   const bar = el("nav", "nav");
-  for (const view of VIEWS) {
+  for (const view of NAV) {
     const item = el("button", "nav-item");
     if (view === state.view) {
       item.classList.add("active");
@@ -76,9 +72,6 @@ function conversations(): HTMLElement {
   return list;
 }
 
-// Opening an old conversation does not make it recent — nothing is written
-// until it is answered — so it takes the last slot rather than being the one
-// row the sidebar cannot show while you are sitting in it.
 function recent(): Conversation[] {
   const rows = state.conversations.slice(0, RECENT);
   if (state.selected === null || rows.some((row) => row.id === state.selected)) return rows;
@@ -144,7 +137,6 @@ function footer(): HTMLElement {
   if (status.ollama_reachable !== null) {
     line.append(probe("ollama", status.ollama_reachable));
   }
-  line.append(el("span", "status-rss", megabytes(status.rss_bytes)));
   if (state.hotkeyError !== null) {
     box.append(el("div", "status status-warn", state.hotkeyError));
   }
@@ -155,8 +147,4 @@ function probe(name: string, reachable: boolean): HTMLElement {
   const box = el("span");
   box.append(el("span", reachable ? "dot" : "dot down", "●"), name);
   return box;
-}
-
-function megabytes(bytes: number): string {
-  return `${Math.round(bytes / 1024 / 1024)}MB`;
 }

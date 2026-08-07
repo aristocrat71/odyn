@@ -49,6 +49,16 @@ const modelDrop = dropdown({
 });
 picks.append(providerDrop.root, modelDrop.root);
 
+type Command = { cmd: string; view: string; hint: string };
+
+const COMMANDS: Command[] = [
+  { cmd: "/home", view: "home", hint: "the front door" },
+  { cmd: "/chat", view: "chat", hint: "the conversation" },
+  { cmd: "/convos", view: "conversations", hint: "every conversation, searchable" },
+  { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
+  { cmd: "/guide", view: "guide", hint: "how everything works" },
+];
+
 let current: number | null = null;
 let answer = "";
 let streaming = false;
@@ -56,18 +66,11 @@ let used: string[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
 let keyMode = false;
+let commandMode = false;
+let cursor = 0;
 
 function reset(): void {
-  current = null;
-  answer = "";
-  streaming = false;
-  used = [];
-  input.value = "";
-  ledger.hidden = true;
-  ledger.replaceChildren();
-  results.hidden = true;
-  results.replaceChildren();
-  input.focus();
+  clearScreen();
   void loadTarget();
 }
 
@@ -131,10 +134,11 @@ function drawLedger(event: SpotEvent & { kind: "context" }): void {
     ledger.append(el("span", "chip-epi", `◈ ${id}`));
   }
   ledger.append(el("span", "spot-ledger-total", `${total} tk`));
-  ledger.hidden = false;
+  ledger.hidden = commandMode;
 }
 
 function draw(): void {
+  if (commandMode) return;
   results.hidden = false;
   const body = renderMarkdown(answer);
   if (streaming) {
@@ -169,12 +173,68 @@ function clearScreen(): void {
   answer = "";
   streaming = false;
   used = [];
+  commandMode = false;
+  cursor = 0;
   input.value = "";
   ledger.hidden = true;
   ledger.replaceChildren();
   results.hidden = true;
   results.replaceChildren();
   input.focus();
+}
+
+function commands(): Command[] {
+  const text = input.value.trim().toLowerCase();
+  return COMMANDS.filter((command) => command.cmd.startsWith(text));
+}
+
+function drawCommands(): void {
+  const shown = commands();
+  if (cursor >= shown.length) cursor = 0;
+  ledger.hidden = true;
+  results.hidden = false;
+  if (shown.length === 0) {
+    results.replaceChildren(el("div", "spot-cmd-none", "no such command"));
+    return;
+  }
+  const box = el("div", "spot-cmds");
+  box.append(
+    ...shown.map((command, index) => {
+      const row = el("button", "spot-cmd");
+      if (index === cursor) row.classList.add("active");
+      row.append(
+        el("span", "spot-cmd-name", command.cmd),
+        el("span", "spot-cmd-hint", command.hint),
+      );
+      row.addEventListener("click", () => void run(command));
+      row.addEventListener("pointerenter", () => {
+        cursor = index;
+        drawCommands();
+      });
+      return row;
+    }),
+  );
+  results.replaceChildren(box);
+}
+
+function drawAsk(): void {
+  ledger.hidden = ledger.childElementCount === 0;
+  if (answer !== "") {
+    draw();
+    return;
+  }
+  results.hidden = true;
+  results.replaceChildren();
+}
+
+async function run(command: Command): Promise<void> {
+  try {
+    await invoke("spotlight_open_view", { view: command.view });
+  } catch (err) {
+    fail(String(err));
+    return;
+  }
+  clearScreen();
 }
 
 async function ask(): Promise<void> {
@@ -253,6 +313,18 @@ function cycleModel(): void {
   if (next !== undefined) void pick(target.provider, next);
 }
 
+input.addEventListener("input", () => {
+  if (!keyMode && input.value.startsWith("/")) {
+    cursor = 0;
+    commandMode = true;
+    drawCommands();
+    return;
+  }
+  if (!commandMode) return;
+  commandMode = false;
+  drawAsk();
+});
+
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     e.preventDefault();
@@ -281,6 +353,22 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     cycleProvider();
     return;
+  }
+  if (commandMode) {
+    const shown = commands();
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (shown.length === 0) return;
+      cursor = (cursor + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length;
+      drawCommands();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const chosen = shown[cursor];
+      if (chosen !== undefined) void run(chosen);
+      return;
+    }
   }
   if (e.key === "Enter" && document.activeElement === input) {
     e.preventDefault();

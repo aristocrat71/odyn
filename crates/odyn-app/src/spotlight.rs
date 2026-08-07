@@ -417,6 +417,13 @@ pub async fn spotlight_promote(
     Ok(row.id)
 }
 
+#[tauri::command]
+pub fn spotlight_open_view(app: AppHandle, view: String) {
+    let _ = app.emit_to(MAIN, "open-view", view);
+    crate::tray::open_dashboard(&app);
+    dismiss(&app);
+}
+
 /// The spotlight target: its own config keys first, the app defaults after.
 fn target(ready: &crate::state::Ready) -> Result<(String, String), String> {
     let provider = ready

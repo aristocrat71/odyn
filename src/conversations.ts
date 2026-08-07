@@ -4,12 +4,8 @@ import { deleteConversation, selectConversation, state } from "./state";
 
 type Hit = { row: Conversation; score: number; marks: number[] };
 
-// Characters a word can start after, which is what makes an initialism like
-// `dsr` find "deepseek · slow reply" instead of only literal prefixes.
 const BOUNDARY = " -_/.:·";
 
-// The query lives on the input, not in app state: the whole list is already in
-// memory, so filtering it is local to this view and nothing else needs to know.
 const search = el("input", "conv-search");
 search.placeholder = "search conversations…";
 search.setAttribute("aria-label", "search conversations");
@@ -17,7 +13,6 @@ search.setAttribute("aria-label", "search conversations");
 const count = el("div", "conv-count");
 const list = el("div", "conv-list");
 
-// Which row the arrows are on; the text changing puts it back on the best hit.
 let active = 0;
 
 search.addEventListener("input", () => {
@@ -49,8 +44,6 @@ search.addEventListener("keydown", (event) => {
 });
 
 export function renderConversations(): HTMLElement {
-  // Leaving the view detaches the input, so this is "just arrived" and the
-  // focus is not taken again on the redraws that follow.
   const arrived = !search.isConnected;
   const view = el("div", "convs");
   const head = el("div", "conv-head");
@@ -94,8 +87,6 @@ function line(hit: Hit, index: number): HTMLElement {
   return row;
 }
 
-// The letters that earned the hit are marked, so a match nobody would have
-// guessed at least shows its reasoning.
 function title(hit: Hit): HTMLElement {
   const box = el("span", "conv-title");
   const text = hit.row.title;
@@ -109,8 +100,6 @@ function title(hit: Hit): HTMLElement {
   return box;
 }
 
-// Spaces are dropped from the query, so `dee cha` is the same search as
-// `deecha` and neither has to guess where the title puts its own spaces.
 function matches(): Hit[] {
   const query = search.value.toLowerCase().replace(/\s+/g, "");
   if (query === "") return state.conversations.map((row) => ({ row, score: 0, marks: [] }));
@@ -119,13 +108,9 @@ function matches(): Hit[] {
     const hit = fuzzy(row.title, query);
     if (hit !== null) hits.push({ row, ...hit });
   }
-  // The sort is stable, so equal scores stay in most-recent-first order.
   return hits.sort((a, b) => b.score - a.score);
 }
 
-// The letters have to appear in order; ones that land together or start a word
-// count for more, which is the whole difference between a fuzzy match and a
-// substring one.
 function fuzzy(text: string, query: string): { score: number; marks: number[] } | null {
   const hay = text.toLowerCase();
   const marks: number[] = [];
@@ -141,8 +126,6 @@ function fuzzy(text: string, query: string): { score: number; marks: number[] } 
     marks.push(found);
     at = found + letter.length;
   }
-  // Same letters, so what separates the rows is where the match starts and how
-  // much title it had to search through to find it.
   return { score: score - first / 10 - text.length / 100, marks };
 }
 

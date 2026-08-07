@@ -107,7 +107,6 @@ button {
   color: var(--muted);
 }
 
-/* Stays put while the heading brightens: the total is not the tap target. */
 .label-count {
   color: var(--faint);
 }
@@ -209,10 +208,6 @@ button {
 
 .dot.down {
   color: var(--danger);
-}
-
-.status-rss {
-  color: var(--faint);
 }
 
 .status-warn {
@@ -1775,7 +1770,6 @@ g.labeled .gnode-epi text {
   gap: 20px;
 }
 
-/* DESIGN.md §2.3: the underline is one of the two borders in the app. */
 .conv-search {
   flex: 1;
   min-width: 0;

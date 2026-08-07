@@ -1,13 +1,19 @@
 import * as api from "./api";
 
-export type View =
-  | "home"
-  | "chat"
-  | "conversations"
-  | "brain"
-  | "providers"
-  | "config"
-  | "guide";
+export const VIEWS = [
+  "home",
+  "chat",
+  "conversations",
+  "brain",
+  "providers",
+  "config",
+  "guide",
+] as const;
+
+export type View = (typeof VIEWS)[number];
+
+export const isView = (name: string): name is View =>
+  (VIEWS as readonly string[]).includes(name);
 
 // Provider and model are picked apart: one list of both is as long as every
 // provider's catalog put together.
@@ -344,9 +350,6 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   state.stream = null;
   void guard(async () => {
-    // Storing the turn bumped this conversation's `updated_at`, so the order is
-    // re-read rather than guessed at — the sidebar only has room for the seven
-    // most recent and they have just changed.
     state.conversations = await api.listConversations();
     // The stored turn is the truth now: it carries the interrupted marker and
     // the token counts the crumbs read.
