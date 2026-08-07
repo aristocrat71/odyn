@@ -6,6 +6,7 @@ import "./spotlight.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import { accept, ghost } from "./complete";
 import { el, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
 import { renderMarkdown } from "./markdown";
@@ -35,6 +36,9 @@ const ledger = document.getElementById("spot-ledger") as HTMLDivElement;
 const results = document.getElementById("spot-results") as HTMLDivElement;
 const picks = document.getElementById("spot-picks") as HTMLSpanElement;
 
+// The field completes itself while a `/` command is being typed.
+const hint = ghost(input, "spot-ask");
+
 // Menus drop below the footer, into the window's empty lower half — above
 // the footer sits the whole surface, and the window's top edge would clip.
 const providerDrop = dropdown({
@@ -48,7 +52,10 @@ const modelDrop = dropdown({
 });
 picks.append(providerDrop.root, modelDrop.root);
 
-type Command = { cmd: string; view: string; hint: string };
+/// `view: null` is the `/brain` mention: not somewhere to go, a prefix to
+/// finish typing. Taking it leaves the text in the field — the question is what
+/// comes next.
+type Command = { cmd: string; view: string | null; hint: string };
 
 const COMMANDS: Command[] = [
   { cmd: "/home", view: "home", hint: "the front door" },
@@ -56,6 +63,7 @@ const COMMANDS: Command[] = [
   { cmd: "/convos", view: "conversations", hint: "every conversation, searchable" },
   { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
   { cmd: "/guide", view: "guide", hint: "how everything works" },
+  { cmd: "/brain", view: null, hint: "ask with what odyn remembers" },
 ];
 
 let current: number | null = null;
@@ -178,6 +186,7 @@ function clearScreen(): void {
   commandMode = false;
   cursor = 0;
   input.value = "";
+  hint.draw(undefined);
   ledger.hidden = true;
   ledger.replaceChildren();
   results.hidden = true;
@@ -195,6 +204,9 @@ function drawCommands(): void {
   if (cursor >= shown.length) cursor = 0;
   ledger.hidden = true;
   results.hidden = false;
+  // The highlighted row is what the field completes to, so the arrows move the
+  // ghost as well as the highlight.
+  const completing = hint.draw(shown[cursor]?.cmd);
   if (shown.length === 0) {
     results.replaceChildren(el("div", "spot-cmd-none", "no such command"));
     return;
@@ -208,6 +220,7 @@ function drawCommands(): void {
         el("span", "spot-cmd-name", command.cmd),
         el("span", "spot-cmd-hint", command.hint),
       );
+      if (index === cursor && completing) row.append(el("span", "spot-cmd-key", "⇥"));
       row.addEventListener("click", () => void run(command));
       row.addEventListener("pointerenter", () => {
         cursor = index;
@@ -221,6 +234,7 @@ function drawCommands(): void {
 
 function drawAsk(): void {
   ledger.hidden = ledger.childElementCount === 0;
+  hint.draw(undefined);
   // An ask typed over mid-flight comes back to whatever it left: the answer so
   // far, or the wait line if the first token is still out.
   if (answer !== "" || streaming) {
@@ -232,6 +246,12 @@ function drawAsk(): void {
 }
 
 async function run(command: Command): Promise<void> {
+  // The mention is finished in place, not run: `/brain` alone goes nowhere,
+  // and the field is now an ask with recall on.
+  if (command.view === null) {
+    take(command);
+    return;
+  }
   try {
     await invoke("spotlight_open_view", { view: command.view });
   } catch (err) {
@@ -239,6 +259,20 @@ async function run(command: Command): Promise<void> {
     return;
   }
   clearScreen();
+}
+
+// ⇥ on any row, ⏎ or a click on a mention: the completion lands in the field.
+// A field that has become a `/brain` ask leaves the command list behind.
+function take(command: Command | undefined): boolean {
+  if (!accept(input, command?.cmd)) return false;
+  input.focus();
+  if (brainAsk(input.value)) {
+    commandMode = false;
+    drawAsk();
+  } else {
+    drawCommands();
+  }
+  return true;
 }
 
 async function ask(): Promise<void> {
@@ -365,6 +399,13 @@ document.addEventListener("keydown", (e) => {
   }
   if (commandMode) {
     const shown = commands();
+    // ⇥ takes the completion, → takes it only from the end of the line, where
+    // there is no caret left to move.
+    const end = input.selectionStart === input.value.length;
+    if (e.key === "Tab" || (e.key === "ArrowRight" && end)) {
+      if (take(shown[cursor])) e.preventDefault();
+      return;
+    }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       if (shown.length === 0) return;

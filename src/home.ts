@@ -1,4 +1,5 @@
 import { prefillComposer } from "./chat";
+import { accept, ghost } from "./complete";
 import { el } from "./dom";
 import { setView, state, type View } from "./state";
 
@@ -21,6 +22,9 @@ const input = el("input", "home-input");
 input.placeholder = "type a command, or just start talking…";
 input.setAttribute("aria-label", "command");
 
+// The field completes itself while a `/` command is being typed.
+const hint = ghost(input, "home-field");
+
 // Which suggestion the arrows are on; reset when the text changes.
 let active = 0;
 let list: HTMLElement | null = null;
@@ -32,6 +36,15 @@ input.addEventListener("input", () => {
 
 input.addEventListener("keydown", (event) => {
   const shown = matches();
+  // ⇥ takes the completion, → takes it only from the end of the line. Neither
+  // is swallowed when there is nothing to complete: ⇥ still moves focus on.
+  const end = input.selectionStart === input.value.length;
+  if (event.key === "Tab" || (event.key === "ArrowRight" && end)) {
+    if (!accept(input, shown[active]?.cmd)) return;
+    event.preventDefault();
+    refill();
+    return;
+  }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     if (shown.length === 0) return;
@@ -59,6 +72,7 @@ input.addEventListener("keydown", (event) => {
   if (text !== "" && (!text.startsWith("/") || brainAsk(text))) {
     prefillComposer(text);
     input.value = "";
+    refill();
     setView("chat");
   }
 });
@@ -74,7 +88,7 @@ export function renderHome(): HTMLElement {
   box.append(
     el("div", "home-rune", "ᛟ"),
     el("div", "home-title", "ODYN"),
-    input,
+    hint.wrap,
   );
   list = el("div", "home-commands");
   refill();
@@ -95,6 +109,9 @@ function refill(): void {
   if (list === null) return;
   const shown = matches();
   if (active >= shown.length) active = 0;
+  // The highlighted row is what the field completes to, so the arrows move the
+  // ghost as well as the highlight.
+  const completing = hint.draw(shown[active]?.cmd);
   list.replaceChildren(
     ...shown.map((command, index) => {
       const row = el("button", "home-cmd");
@@ -103,6 +120,7 @@ function refill(): void {
         el("span", "home-cmd-name", command.cmd),
         el("span", "home-cmd-hint", command.hint),
       );
+      if (index === active && completing) row.append(el("span", "home-cmd-key", "⇥"));
       row.addEventListener("click", () => run(command));
       row.addEventListener("pointerenter", () => {
         active = index;

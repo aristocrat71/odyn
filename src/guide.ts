@@ -491,6 +491,10 @@ memories 13/1200 tk
           "cancel a running stream; close the model or brevity menu; cancel a rename or memory edit; close the sidebar overlay on a narrow window.",
         ],
         ["↑ ↓", "walk the model picker once it is open."],
+        [
+          "Tab",
+          "take the completion offered under the caret: a `/` command in the front-door or spotlight field, the `/brain` mention in the composer. → does it too, from the end of the line.",
+        ],
       ]),
       p(
         "Every app shortcut is a modifier combo, so a focused input can never swallow one. " +

@@ -1,5 +1,6 @@
 import type { Conversation, Message } from "./api";
 import { renderBrevity } from "./brevctl";
+import { accept, ghost } from "./complete";
 import { el, waiting } from "./dom";
 import { renderMarkdown } from "./markdown";
 import { renderPickers } from "./picker";
@@ -22,17 +23,33 @@ const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 const SLACK = 24;
 // Chips shown before the tail collapses to `◈ +N more`.
 const CHIP_LIMIT = 5;
+// The only thing a message completes to. It is a mention, not a command: it
+// can sit anywhere in the line, so the word under the caret is what is matched.
+const MENTION = "/brain";
 
 // The composer outlives every redraw: a draft being typed, its height and the
 // caret in it survive a render that has nothing to do with the chat.
 const input = el("textarea", "composer-input");
 input.rows = 1;
 input.placeholder = "Message Odyn…";
+const hint = ghost(input, "composer-ask");
 input.addEventListener("input", () => {
   grow();
+  hint.draw(MENTION);
   schedulePreview(input.value);
 });
 input.addEventListener("keydown", (event) => {
+  // ⇥ takes the completion, → takes it only from the end of the draft. Neither
+  // is swallowed when there is nothing to complete: ⇥ still moves focus on.
+  const end = input.selectionStart === input.value.length;
+  if (event.key === "Tab" || (event.key === "ArrowRight" && end)) {
+    if (!accept(input, MENTION)) return;
+    event.preventDefault();
+    hint.draw(MENTION);
+    // The mention is what turns recall on, so the CONTEXT line answers for it.
+    schedulePreview(input.value);
+    return;
+  }
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
   submit();
@@ -89,6 +106,7 @@ export function refreshLedger(): void {
 // sent on someone's behalf, but nothing has to be typed twice either.
 export function prefillComposer(text: string): void {
   input.value = text;
+  hint.draw(MENTION);
   schedulePreview(text);
 }
 
@@ -216,7 +234,7 @@ function composer(): HTMLElement {
   const field = el("div", "composer-field");
   const glyph = el("button", "send", "↵");
   glyph.addEventListener("click", submit);
-  field.append(input, glyph);
+  field.append(hint.wrap, glyph);
   box.append(ledger(), field, foot());
   return box;
 }
@@ -244,6 +262,7 @@ function submit(): void {
   if (text === "" || streaming()) return;
   input.value = "";
   grow();
+  hint.draw(MENTION);
   void send(text);
 }
 
