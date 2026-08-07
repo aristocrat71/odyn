@@ -20,8 +20,9 @@ button {
   cursor: pointer;
 }
 
+/* Shadow room above the surface; `LIFT` in spotlight.rs matches. */
 .spot {
-  padding-top: 2px;
+  padding-top: 96px;
 }
 
 .spot-surface {

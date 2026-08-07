@@ -24,8 +24,11 @@ const MAIN: &str = "main";
 const EVENT: &str = "spotlight-event";
 /// Every way a model fails to answer reads the same; the raw text rides `detail`.
 const UNAVAILABLE: &str = "model unavailable";
-/// 640px field plus room for its 80px shadow to bleed inside the window.
-const WIDTH: f64 = 720.0;
+/// Room for the 80px shadow to fade out before the window clips it square.
+const HALO: f64 = 120.0;
+/// The shadow sits 24px low; `.spot` in spotlight.css pads by the same.
+const LIFT: f64 = HALO - 24.0;
+const WIDTH: f64 = 640.0 + HALO * 2.0;
 
 /// Registered only while spotlight shows, so Esc dismisses it even when the
 /// webview never sees the key; released again on hide.
@@ -224,7 +227,7 @@ fn build(app: &AppHandle) -> Option<WebviewWindow> {
         .visible(false)
         .accept_first_mouse(true);
     let builder = if fallback_mode() {
-        builder.inner_size(WIDTH, 520.0).center()
+        builder.inner_size(WIDTH, 520.0 + LIFT).center()
     } else {
         builder
             .decorations(false)
@@ -232,7 +235,7 @@ fn build(app: &AppHandle) -> Option<WebviewWindow> {
             .always_on_top(true)
             .skip_taskbar(true)
             .shadow(false)
-            .inner_size(WIDTH, 520.0)
+            .inner_size(WIDTH, 520.0 + LIFT)
     };
     let window = builder.build().ok()?;
     #[cfg(target_os = "macos")]
@@ -280,9 +283,10 @@ fn place(app: &AppHandle, window: &WebviewWindow) {
     let position = monitor.position();
     let scale = monitor.scale_factor();
     let width = (WIDTH * scale) as u32;
-    let height = (size.height as f64 * 0.52) as u32;
+    // Grows upward by the lift, so the bottom edge stays where it was.
+    let height = (size.height as f64 * 0.52 + LIFT * scale) as u32;
     let x = position.x + ((size.width.saturating_sub(width)) / 2) as i32;
-    let y = position.y + (size.height as f64 * 0.38) as i32;
+    let y = position.y + (size.height as f64 * 0.38 - LIFT * scale) as i32;
     let _ = window.set_size(PhysicalSize::new(width, height));
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }

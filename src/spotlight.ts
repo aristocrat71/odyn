@@ -60,6 +60,7 @@ const COMMANDS: Command[] = [
   { cmd: "/convos", view: "conversations", hint: "every conversation, searchable" },
   { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
   { cmd: "/guide", view: "guide", hint: "how everything works" },
+  { cmd: "/view-brain", view: "brain", hint: "what odyn remembers" },
   { cmd: "/brain", view: null, hint: "ask with what odyn remembers" },
   { cmd: "/memory", view: null, hint: "tell odyn something to remember" },
 ];
