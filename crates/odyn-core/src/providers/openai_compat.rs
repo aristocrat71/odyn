@@ -180,10 +180,24 @@ impl OpenAiCompatProvider {
             .map(|id| id.strip_prefix("models/").unwrap_or(&id).to_string())
             .filter(|id| !id.trim().is_empty())
             .collect();
-        names.sort();
+        // Equal names stay adjacent under this order, so the dedup still holds.
+        order_models(&mut names);
         names.dedup();
         Ok(names)
     }
+}
+
+/// The order every model menu shows: free first, alphabetical within each half.
+pub fn order_models(names: &mut [String]) {
+    names.sort_by(|a, b| is_free(b).cmp(&is_free(a)).then_with(|| a.cmp(b)));
+}
+
+/// What an endpoint says about its own pricing, in the id: OpenRouter suffixes
+/// `:free`, OpenCode Zen `-free`. Nothing else is inferred — a name that merely
+/// contains the word is a name.
+pub fn is_free(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.ends_with(":free") || model.ends_with("-free")
 }
 
 /// Both shapes seen in the wild: OpenAI's envelope, and the bare array some
@@ -1076,6 +1090,33 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("authorization: bearer sk-test"),
             "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_puts_the_free_ones_first() {
+        let body = r#"{"data":[
+            {"id":"z-ai/glm-5"},
+            {"id":"qwen/qwen3-next:FREE"},
+            {"id":"deepseek/deepseek-r1:free"},
+            {"id":"mimo-v2.5-free"},
+            {"id":"free-lunch/not-really"},
+            {"id":"a-paid/model"}
+        ]}"#;
+        let (addr, _rx) = spawn_server(error_response("200 OK", "application/json", body));
+        let provider = provider_for(addr, "/v1", None);
+
+        // Both suffixes count; a name that merely contains the word does not.
+        assert_eq!(
+            provider.list_models().await.expect("list models"),
+            vec![
+                "deepseek/deepseek-r1:free",
+                "mimo-v2.5-free",
+                "qwen/qwen3-next:FREE",
+                "a-paid/model",
+                "free-lunch/not-really",
+                "z-ai/glm-5",
+            ]
         );
     }
 

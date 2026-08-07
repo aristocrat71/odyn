@@ -127,6 +127,12 @@ that is merely unreachable still connects, since being offline now says nothing
 about whether the key is good. `+ custom endpoint` writes the same table by
 hand for anything the catalog has never heard of.
 
+Every model menu — the chat picker and spotlight's — lists the free models
+first, then the rest, alphabetical within each half, and connecting starts you
+on a free model when the endpoint serves one. Free means the endpoint said so,
+in the id: OpenRouter suffixes `:free`, OpenCode Zen `-free`. Nothing else is
+inferred, and nothing is badged — the id already says it.
+
 ### `[memory]`
 
 | Key | Default | Meaning |

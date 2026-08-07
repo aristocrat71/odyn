@@ -463,7 +463,7 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
 
 /// What an OpenAI-compatible endpoint offers, from its own `/models`. The
 /// listing doubles as the reachability answer — an endpoint that refuses the
-/// key still answered, so it counts as up — and `default_model` leads the list
+/// key still answered, so it counts as up — and `default_model` joins the list
 /// whether or not the endpoint names it, so the model a conversation is on is
 /// never missing from the menu it is chosen in.
 pub(crate) async fn served(
@@ -471,15 +471,16 @@ pub(crate) async fn served(
     api_key: Option<String>,
     default_model: Option<&str>,
 ) -> (bool, Vec<Model>) {
-    let named = |names: Vec<String>| -> Vec<Model> {
-        default_model
-            .map(str::to_string)
+    let named = |mut names: Vec<String>| -> Vec<Model> {
+        if let Some(default) = default_model {
+            if !names.iter().any(|name| name == default) {
+                names.push(default.to_string());
+            }
+        }
+        // The menu's own order, not the endpoint's: free models lead it.
+        openai_compat::order_models(&mut names);
+        names
             .into_iter()
-            .chain(
-                names
-                    .into_iter()
-                    .filter(|name| Some(name.as_str()) != default_model),
-            )
             .map(|name| Model {
                 name,
                 size_bytes: None,

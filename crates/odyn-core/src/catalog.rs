@@ -8,6 +8,7 @@
 //! reachable the long way round.
 
 use crate::config::ProviderConfig;
+use crate::providers::openai_compat::is_free;
 
 /// One known endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,15 +192,21 @@ pub fn connected(
 
 /// The model a fresh connection starts on: the first hint any listed model
 /// carries, else the first model listed, else whatever the entry falls back to.
+/// A free model wins even on a later hint — hints say which model is sensible,
+/// not what it is worth paying for.
 pub fn starting_model(provider: &Provider, models: &[String]) -> Option<String> {
-    for hint in provider.model_hints {
-        if let Some(found) = models.iter().find(|model| model.contains(hint)) {
-            return Some(found.clone());
-        }
-    }
-    models
-        .first()
-        .cloned()
+    let hinted = |free_only: bool| {
+        provider.model_hints.iter().find_map(|hint| {
+            models
+                .iter()
+                .find(|model| model.contains(hint) && (!free_only || is_free(model)))
+                .cloned()
+        })
+    };
+    hinted(true)
+        .or_else(|| hinted(false))
+        // Listings arrive free-first, so this lands on one too.
+        .or_else(|| models.first().cloned())
         .or_else(|| provider.fallback_model.map(str::to_string))
 }
 
@@ -274,6 +281,30 @@ mod tests {
         assert_eq!(
             starting_model(deepseek, &[]),
             Some("deepseek-chat".to_string())
+        );
+    }
+
+    #[test]
+    fn a_free_model_beats_a_paid_one_on_an_earlier_hint() {
+        let openrouter = find("openrouter").expect("openrouter");
+        // Hints are gpt-oss, qwen, deepseek, llama — and only qwen is free.
+        let listed = [
+            "qwen/qwen3-next:free".to_string(),
+            "openai/gpt-oss-120b".to_string(),
+        ];
+        assert_eq!(
+            starting_model(openrouter, &listed),
+            Some("qwen/qwen3-next:free".to_string())
+        );
+
+        // Nothing free: the hint order decides as it always did.
+        let paid = [
+            "qwen/qwen3-next".to_string(),
+            "openai/gpt-oss-120b".to_string(),
+        ];
+        assert_eq!(
+            starting_model(openrouter, &paid),
+            Some("openai/gpt-oss-120b".to_string())
         );
     }
 
