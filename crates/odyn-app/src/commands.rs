@@ -10,6 +10,7 @@ use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, 
 use odyn_core::config::{MemoryConfig, ProviderConfig};
 use odyn_core::embed::load_default_embedder;
 use odyn_core::providers::ollama::OllamaProvider;
+use odyn_core::providers::openai_compat::OpenAiCompatProvider;
 use odyn_core::providers::{ollama, openai_compat};
 use odyn_core::storage::{Conversation as StoredConversation, MemoryTier, StorageError};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -134,7 +135,21 @@ pub(crate) enum Body {
     },
     Error {
         message: String,
+        /// The provider's own words when `message` stands in for them. Never
+        /// rendered: the frontend logs it to the webview console.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
+}
+
+impl Body {
+    /// An error whose text is the whole story.
+    pub(crate) fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            detail: None,
+        }
+    }
 }
 
 /// What a reply ended as. An interruption is not a failure: it keeps its text.
@@ -429,16 +444,10 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
             base_url,
             default_model,
             ..
-        } => (
-            openai_compat::ping(base_url).await,
-            default_model
-                .iter()
-                .map(|model| Model {
-                    name: model.clone(),
-                    size_bytes: None,
-                })
-                .collect(),
-        ),
+        } => {
+            let key = provider.api_key(&name).ok().flatten();
+            served(base_url, key, default_model.as_deref()).await
+        }
         ProviderConfig::Ollama {
             base_url,
             keep_alive,
@@ -449,6 +458,45 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
         kind: provider.kind(),
         reachable,
         models,
+    }
+}
+
+/// What an OpenAI-compatible endpoint offers, from its own `/models`. The
+/// listing doubles as the reachability answer — an endpoint that refuses the
+/// key still answered, so it counts as up — and `default_model` joins the list
+/// whether or not the endpoint names it, so the model a conversation is on is
+/// never missing from the menu it is chosen in.
+pub(crate) async fn served(
+    base_url: &str,
+    api_key: Option<String>,
+    default_model: Option<&str>,
+) -> (bool, Vec<Model>) {
+    let named = |mut names: Vec<String>| -> Vec<Model> {
+        if let Some(default) = default_model {
+            if !names.iter().any(|name| name == default) {
+                names.push(default.to_string());
+            }
+        }
+        // The menu's own order, not the endpoint's: free models lead it.
+        openai_compat::order_models(&mut names);
+        names
+            .into_iter()
+            .map(|name| Model {
+                name,
+                size_bytes: None,
+            })
+            .collect()
+    };
+    let Ok(provider) = OpenAiCompatProvider::new(base_url, api_key, Vec::new()) else {
+        return (false, named(Vec::new()));
+    };
+    match provider.list_models().await {
+        Ok(models) => (true, named(models)),
+        // The endpoint answered, just not with a listing: no `/models` route,
+        // or a key it would not accept for one. Both are still reachable, and
+        // `ping` would have said so at the cost of a second request.
+        Err(ChatError::Api { .. }) => (true, named(Vec::new())),
+        Err(_) => (false, named(Vec::new())),
     }
 }
 
@@ -521,7 +569,7 @@ async fn run(
     match outcome {
         Outcome::Done(usage) => settle(&app, &ready, request_id, &stream, usage, false),
         Outcome::Interrupted => settle(&app, &ready, request_id, &stream, None, true),
-        Outcome::Failed(message) => emit(&app, request_id, Body::Error { message }),
+        Outcome::Failed(message) => emit(&app, request_id, Body::error(message)),
     }
 }
 
@@ -691,9 +739,7 @@ fn settle(
     );
     let body = match stored {
         Ok(_) => Body::Done { usage, interrupted },
-        Err(err) => Body::Error {
-            message: err.to_string(),
-        },
+        Err(err) => Body::error(err.to_string()),
     };
     emit(app, request_id, body);
 }
@@ -707,7 +753,7 @@ fn fail(
     message: String,
 ) -> Result<u64, String> {
     state.streams.close(request_id);
-    emit(app, request_id, Body::Error { message });
+    emit(app, request_id, Body::error(message));
     Ok(request_id)
 }
 

@@ -149,14 +149,18 @@ impl ChatProvider for OllamaProvider {
             .header(CONTENT_TYPE, "application/json")
             .body(body);
 
-        futures::stream::unfold(
-            State::Start {
-                builder: Box::new(builder),
-                base_url: self.base_url.clone(),
-            },
-            step,
+        // Local reasoning models put `<think>` blocks in `content` too; the
+        // filter is the same one the OpenAI-compatible path uses.
+        crate::reasoning::strip_reasoning(
+            futures::stream::unfold(
+                State::Start {
+                    builder: Box::new(builder),
+                    base_url: self.base_url.clone(),
+                },
+                step,
+            )
+            .boxed(),
         )
-        .boxed()
     }
 }
 

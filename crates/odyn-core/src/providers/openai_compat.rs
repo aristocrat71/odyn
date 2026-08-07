@@ -21,6 +21,9 @@ const MAX_ERROR_BODY_CHARS: usize = 512;
 /// Short enough that a status line never waits on a dead endpoint.
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Long enough for a cold gateway, short enough that a model menu still opens.
+const LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Reachability for a status line: any HTTP answer means the endpoint is
 /// there, so an unauthorized `GET /models` still counts as up. Never an error
 /// — "unknown" and "down" look the same to the user.
@@ -133,6 +136,92 @@ impl OpenAiCompatProvider {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
+
+    /// The model names the endpoint serves, sorted and deduplicated. Bounded
+    /// as a whole: a listing is small and instant, so a wedged endpoint must
+    /// not hang a model menu the way the streaming timeouts allow a long
+    /// answer to.
+    pub async fn list_models(&self) -> Result<Vec<String>, ChatError> {
+        let url = format!("{}/models", self.base_url);
+        let fetch = async {
+            let response = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|err| transport_error(&err))?;
+            let status = response.status();
+            let body = response.text().await.map_err(|err| transport_error(&err))?;
+            Ok::<_, ChatError>((status, body))
+        };
+        let (status, body) = match tokio::time::timeout(LIST_TIMEOUT, fetch).await {
+            Err(_) => {
+                return Err(ChatError::Network(format!(
+                    "no model list from {url} within {LIST_TIMEOUT:?}"
+                )))
+            }
+            Ok(result) => result?,
+        };
+        if !status.is_success() {
+            return Err(ChatError::Api {
+                status: status.as_u16(),
+                message: error_message(&body),
+            });
+        }
+
+        let listing: ModelListing = serde_json::from_str(&body)
+            .map_err(|err| ChatError::Parse(format!("malformed model list: {err}")))?;
+        let mut names: Vec<String> = listing
+            .into_ids()
+            .into_iter()
+            // Some endpoints namespace what they list (`models/<name>`) but
+            // take the bare name at `/chat/completions`. No model name starts
+            // with that segment, so stripping it only ever makes a name usable.
+            .map(|id| id.strip_prefix("models/").unwrap_or(&id).to_string())
+            .filter(|id| !id.trim().is_empty())
+            .collect();
+        // Equal names stay adjacent under this order, so the dedup still holds.
+        order_models(&mut names);
+        names.dedup();
+        Ok(names)
+    }
+}
+
+/// The order every model menu shows: free first, alphabetical within each half.
+pub fn order_models(names: &mut [String]) {
+    names.sort_by(|a, b| is_free(b).cmp(&is_free(a)).then_with(|| a.cmp(b)));
+}
+
+/// What an endpoint says about its own pricing, in the id: OpenRouter suffixes
+/// `:free`, OpenCode Zen `-free`. Nothing else is inferred — a name that merely
+/// contains the word is a name.
+pub fn is_free(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.ends_with(":free") || model.ends_with("-free")
+}
+
+/// Both shapes seen in the wild: OpenAI's envelope, and the bare array some
+/// gateways answer with.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ModelListing {
+    Envelope { data: Vec<ModelId> },
+    Bare(Vec<ModelId>),
+}
+
+impl ModelListing {
+    fn into_ids(self) -> Vec<String> {
+        let models = match self {
+            Self::Envelope { data } => data,
+            Self::Bare(models) => models,
+        };
+        models.into_iter().map(|model| model.id).collect()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ModelId {
+    id: String,
 }
 
 fn build_client(
@@ -176,14 +265,18 @@ impl ChatProvider for OpenAiCompatProvider {
             .header(CONTENT_TYPE, "application/json")
             .body(body);
 
-        futures::stream::unfold(
-            State::Start {
-                builder: Box::new(builder),
-                first_token: self.timeouts.first_token,
-            },
-            step,
+        // Models that write their thinking into `content` are stripped here, so
+        // no surface has to know they do it.
+        crate::reasoning::strip_reasoning(
+            futures::stream::unfold(
+                State::Start {
+                    builder: Box::new(builder),
+                    first_token: self.timeouts.first_token,
+                },
+                step,
+            )
+            .boxed(),
         )
-        .boxed()
     }
 }
 
@@ -967,6 +1060,99 @@ mod tests {
             request.starts_with("GET /v1/models HTTP/1.1\r\n"),
             "{request}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_models_reads_the_envelope_and_normalises_the_names() {
+        let body = r#"{"object":"list","data":[
+            {"id":"models/qwen3-32b"},
+            {"id":"gpt-oss-120b"},
+            {"id":"gpt-oss-120b"},
+            {"id":"  "}
+        ]}"#;
+        let (addr, rx) = spawn_server(error_response("200 OK", "application/json", body));
+        let provider = provider_for(addr, "/v1", Some("sk-test".to_string()));
+
+        let models = provider.list_models().await.expect("list models");
+
+        // Sorted and deduplicated, with the namespace some endpoints put on
+        // their ids stripped back to the name the chat endpoint takes.
+        assert_eq!(models, vec!["gpt-oss-120b", "qwen3-32b"]);
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured request");
+        assert!(
+            request.starts_with("GET /v1/models HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-test"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_puts_the_free_ones_first() {
+        let body = r#"{"data":[
+            {"id":"z-ai/glm-5"},
+            {"id":"qwen/qwen3-next:FREE"},
+            {"id":"deepseek/deepseek-r1:free"},
+            {"id":"mimo-v2.5-free"},
+            {"id":"free-lunch/not-really"},
+            {"id":"a-paid/model"}
+        ]}"#;
+        let (addr, _rx) = spawn_server(error_response("200 OK", "application/json", body));
+        let provider = provider_for(addr, "/v1", None);
+
+        // Both suffixes count; a name that merely contains the word does not.
+        assert_eq!(
+            provider.list_models().await.expect("list models"),
+            vec![
+                "deepseek/deepseek-r1:free",
+                "mimo-v2.5-free",
+                "qwen/qwen3-next:FREE",
+                "a-paid/model",
+                "free-lunch/not-really",
+                "z-ai/glm-5",
+            ]
+        );
+    }
+
+    /// Gateways that answer with the bare array are common enough that the
+    /// envelope cannot be assumed.
+    #[tokio::test]
+    async fn list_models_reads_a_bare_array_too() {
+        let (addr, _rx) = spawn_server(error_response(
+            "200 OK",
+            "application/json",
+            r#"[{"id":"kimi-k3"},{"id":"deepseek-chat"}]"#,
+        ));
+        let provider = provider_for(addr, "/v1", None);
+
+        let models = provider.list_models().await.expect("list models");
+        assert_eq!(models, vec!["deepseek-chat", "kimi-k3"]);
+    }
+
+    /// A rejected key is the connect flow's one refusal, so it has to arrive as
+    /// a status and not as a network failure.
+    #[tokio::test]
+    async fn list_models_surfaces_a_rejected_key_as_its_status() {
+        let (addr, _rx) = spawn_server(error_response(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"error":{"message":"invalid api key"}}"#,
+        ));
+        let provider = provider_for(addr, "/v1", Some("sk-wrong".to_string()));
+
+        match provider.list_models().await {
+            Err(ChatError::Api { status, message }) => {
+                assert_eq!(status, 401);
+                assert_eq!(message, "invalid api key");
+            }
+            other => panic!("expected an api error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

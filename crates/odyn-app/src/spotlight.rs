@@ -22,6 +22,9 @@ use crate::state::AppState;
 const LABEL: &str = "spotlight";
 const MAIN: &str = "main";
 const EVENT: &str = "spotlight-event";
+/// A rate limit, a bad request, a dropped connection and a wordless reply are
+/// one thing from here: this model cannot answer. The raw text rides `detail`.
+const UNAVAILABLE: &str = "model unavailable";
 /// 640px field plus room for its 80px shadow to bleed inside the window.
 const WIDTH: f64 = 720.0;
 
@@ -350,15 +353,10 @@ pub fn spotlight_ask(
                     history,
                 )));
             }
-            Err(err) => emit(
-                &app,
-                request_id,
-                Body::Error {
-                    message: err.to_string(),
-                },
-            ),
+            // A misconfigured provider is the user's to fix, so it says so.
+            Err(err) => emit(&app, request_id, Body::error(err.to_string())),
         },
-        Err(message) => emit(&app, request_id, Body::Error { message }),
+        Err(message) => emit(&app, request_id, Body::error(message)),
     }
 
     *lock(&asks.current) = Some(ask);
@@ -477,47 +475,50 @@ async fn run(
         }
     }
     let mut events = provider.chat_stream(ChatRequest::new(&history, &model));
+    // A model that says nothing — filtered, or all reasoning — is as unusable
+    // as one that errored, so it reads the same way.
+    let mut spoke = false;
     while let Some(event) = events.next().await {
         match event {
             Ok(ChatEvent::TextDelta(delta)) => {
+                spoke = spoke || !delta.trim().is_empty();
                 lock(&shared.answer).push_str(&delta);
                 emit(&app, request_id, Body::Delta { text: delta });
             }
             Ok(ChatEvent::Done { usage }) => {
                 *lock(&shared.usage) = usage;
                 shared.finished.store(true, Ordering::Release);
-                emit(
-                    &app,
-                    request_id,
-                    Body::Done {
-                        usage,
-                        interrupted: false,
-                    },
-                );
+                emit(&app, request_id, finished(spoke, usage));
                 return;
             }
             Err(ChatError::Cancelled) => return,
             Err(err) => {
-                emit(
-                    &app,
-                    request_id,
-                    Body::Error {
-                        message: format!("stream failed: {}", describe(&err)),
-                    },
-                );
+                emit(&app, request_id, unavailable(describe(&err)));
                 return;
             }
         }
     }
     shared.finished.store(true, Ordering::Release);
-    emit(
-        &app,
-        request_id,
+    emit(&app, request_id, finished(spoke, None));
+}
+
+/// The end of a stream: an answer, or the report that there wasn't one.
+fn finished(spoke: bool, usage: Option<Usage>) -> Body {
+    if spoke {
         Body::Done {
-            usage: None,
+            usage,
             interrupted: false,
-        },
-    );
+        }
+    } else {
+        unavailable("the model streamed no text")
+    }
+}
+
+fn unavailable(detail: impl Into<String>) -> Body {
+    Body::Error {
+        message: UNAVAILABLE.to_string(),
+        detail: Some(detail.into()),
+    }
 }
 
 fn emit(app: &AppHandle, request_id: u64, body: Body) {
@@ -584,15 +585,28 @@ pub async fn spotlight_target(state: State<'_, AppState>) -> Result<SpotTarget, 
     let mut providers = Vec::with_capacity(configured.len());
     for (name, config) in configured {
         let kind = config.kind();
-        let models = match config {
-            ProviderConfig::OpenAiCompat { default_model, .. } => {
-                default_model.into_iter().collect()
-            }
+        let models = match &config {
+            // What the endpoint itself lists, not just the one model the file
+            // happens to name.
+            ProviderConfig::OpenAiCompat {
+                base_url,
+                default_model,
+                ..
+            } => crate::commands::served(
+                base_url,
+                config.api_key(&name).ok().flatten(),
+                default_model.as_deref(),
+            )
+            .await
+            .1
+            .into_iter()
+            .map(|model| model.name)
+            .collect(),
             // The models Ollama actually has installed, not a guess.
             ProviderConfig::Ollama {
                 base_url,
                 keep_alive,
-            } => crate::commands::installed(&base_url, keep_alive)
+            } => crate::commands::installed(base_url, keep_alive.clone())
                 .await
                 .1
                 .into_iter()

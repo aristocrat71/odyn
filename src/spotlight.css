@@ -71,6 +71,13 @@ body.spotlight {
   color: var(--danger);
 }
 
+.spot-error-hint {
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
 .cursor {
   display: inline-block;
   width: 7px;

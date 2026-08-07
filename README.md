@@ -70,6 +70,12 @@ nothing in the repository requires it.
 the frontend never has to be built by hand. A plain `cargo build --workspace`
 compiles the app crate in dev mode and does not need `dist/` to exist.
 
+The app lives in the tray under its own icon, with two items: **Open Odyn**
+brings the dashboard back, **Quit** ends the process. Closing the dashboard
+window only hides it — the spotlight hotkey has to keep answering — so Quit is
+the way out. If the tray cannot be created the close button quits instead,
+rather than leaving odyn running with no way to reach it.
+
 ### Checks
 
 ```sh
@@ -83,9 +89,10 @@ bun run build
 
 `odyn.toml` is written from a built-in template the first time it is read, then
 parsed as the running configuration — the file and the process can never
-disagree. Unknown keys are rejected by name. API keys are never stored in the
-file: `api_key_env` names an environment variable, read only when that provider
-is actually used.
+disagree. Unknown keys are rejected by name. A key you paste into the providers
+view is stored as `api_key`; to keep keys out of the file entirely, use
+`api_key_env` instead, which names an environment variable read only when that
+provider is actually used.
 
 Edit it by hand, or through `odyn config get` / `odyn config set`, which
 preserve comments and formatting and validate the whole file before writing.
@@ -106,8 +113,31 @@ Any number of entries. `kind` selects the shape; the name is yours and is what
 | `kind` | both | — | `"ollama"` or `"openai_compat"`. Required. |
 | `base_url` | both | `"http://localhost:11434"` for `ollama`, required for `openai_compat` | Endpoint root. Must not be empty. |
 | `keep_alive` | `ollama` | unset | How long Ollama keeps the model in RAM, e.g. `"5m"`. `"0"` unloads it immediately. |
-| `api_key_env` | `openai_compat` | unset | Name of the environment variable holding the key. Omit for keyless endpoints; no auth header is sent then. Must look like an environment variable name. |
+| `api_key` | `openai_compat` | unset | The key itself, which is what the providers view writes. Wins over `api_key_env`. |
+| `api_key_env` | `openai_compat` | unset | Name of the environment variable holding the key instead. Omit both for keyless endpoints; no auth header is sent then. Must look like an environment variable name. |
 | `default_model` | `openai_compat` | unset | Model new sessions start on. Without it, `--model` (or `/model`) is required. |
+
+#### Connecting one
+
+The providers view knows the endpoint and the model list for a handful of
+open-weight providers — OpenRouter, Groq, Cerebras, DeepSeek, Together,
+Mistral, OpenCode Zen and a local Ollama — so a key is the whole of what it
+asks for. Paste one and a shape only one provider issues (`sk-or-`, `gsk_`,
+`csk-`) names its own; anything else is one click on a tile. Connecting asks
+the endpoint what it serves, starts you on a sensible model, and writes
+`[providers.<name>]` under the catalog's own name, so `--provider openrouter`
+works from the CLI straight away.
+
+A key the endpoint rejects is the one refusal — nothing is written. An endpoint
+that is merely unreachable still connects, since being offline now says nothing
+about whether the key is good. `+ custom endpoint` writes the same table by
+hand for anything the catalog has never heard of.
+
+Every model menu — the chat picker and spotlight's — lists the free models
+first, then the rest, alphabetical within each half, and connecting starts you
+on a free model when the endpoint serves one. Free means the endpoint said so,
+in the id: OpenRouter suffixes `:free`, OpenCode Zen `-free`. Nothing else is
+inferred, and nothing is badged — the id already says it.
 
 ### `[memory]`
 
@@ -135,6 +165,16 @@ that reports them.
 | `brevity` | `"full"` | Answer style for spotlight asks, independent of `[style]`. |
 | `provider` | unset | Falls back to `default_provider`. Must name a configured provider. |
 | `model` | unset | Falls back to that provider's `default_model`. With neither, spotlight asks fail with `no spotlight model`. |
+
+When a model fails anyway — rate-limited, an unsupported request, a dropped
+connection, or a reply with no text in it — the panel says `model unavailable`
+and offers `⌘K`, rather than relaying the provider's raw error. The underlying
+message goes to the webview console. Configuration mistakes are still named in
+full: those are yours to fix, not the model's.
+
+Reasoning is never part of an answer. Models that stream their thinking as a
+`<think>…</think>` block inside the text have it removed as the stream flows,
+on every surface — spotlight, chat, and `odyn ask`.
 
 ## CLI reference
 
@@ -232,7 +272,7 @@ checkout.
 | `ODYN_CONFIG` | Full path to the config file, replacing the default location. |
 | `ODYN_DB` | Full path to the database file, replacing the default location. |
 | `ODYN_SPOTLIGHT_FALLBACK` | `1` forces the spotlight fallback window on any platform. |
-| `<api_key_env>` | Whatever variable a provider's `api_key_env` names. Read only when that provider is built. |
+| `<api_key_env>` | Whatever variable a provider's `api_key_env` names. Read only when that provider is built, and only when it has no `api_key`. |
 
 ## Cross-platform notes
 

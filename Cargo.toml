@@ -41,7 +41,7 @@ sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 thiserror = "2"
 # "time" drives the first-token deadline; "rt"/"macros" are for #[tokio::test].
 tokio = { version = "1", features = ["rt", "macros", "time"] }
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-build = { version = "2", features = [] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"

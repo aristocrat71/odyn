@@ -207,8 +207,43 @@ export type ProviderDraft = {
   make_default: boolean;
 };
 
+// A provider Odyn already knows the endpoint for: everything but the key.
+export type CatalogItem = {
+  id: string;
+  label: string;
+  kind: "openai_compat" | "ollama";
+  base_url: string;
+  needs_key: boolean;
+  keys_url: string;
+  // Key shapes only this provider issues, so a pasted key names its own.
+  key_prefixes: string[];
+  configured: boolean;
+};
+
+export type Connected = {
+  name: string;
+  model: string | null;
+  models: number;
+  // Why the model list is empty, when the endpoint would not give one.
+  note: string | null;
+  providers: ProviderEntry[];
+};
+
 export const providersConfig = (): Promise<ProviderEntry[]> =>
   invoke("providers_config");
+
+export const providerCatalog = (): Promise<CatalogItem[]> =>
+  invoke("provider_catalog");
+
+export const providerConnect = (
+  id: string,
+  apiKey: string,
+  makeDefault: boolean,
+): Promise<Connected> =>
+  invoke("provider_connect", { id, apiKey, makeDefault });
+
+export const openKeysPage = (id: string): Promise<void> =>
+  invoke("open_keys_page", { id });
 
 export const providerSave = (draft: ProviderDraft): Promise<ProviderEntry[]> =>
   invoke("provider_save", { draft });

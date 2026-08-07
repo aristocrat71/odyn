@@ -200,6 +200,38 @@ impl ProviderConfig {
             Self::OpenAiCompat { base_url, .. } | Self::Ollama { base_url, .. } => base_url,
         }
     }
+
+    /// The model a new conversation starts on. Only `openai_compat` entries
+    /// declare one; Ollama has no such notion.
+    pub fn default_model(&self) -> Option<&str> {
+        match self {
+            Self::OpenAiCompat { default_model, .. } => default_model.as_deref(),
+            Self::Ollama { .. } => None,
+        }
+    }
+
+    /// The key this entry resolves to. A literal `api_key` wins; `api_key_env`
+    /// is read otherwise. `None` means no auth header at all, which is what
+    /// keyless and local endpoints expect. `name` only names the provider in
+    /// the error, so a caller can say which entry is the broken one.
+    pub fn api_key(&self, name: &str) -> Result<Option<String>, ConfigError> {
+        let Self::OpenAiCompat {
+            api_key,
+            api_key_env,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        match api_key.as_deref().map(str::trim) {
+            Some(key) if !key.is_empty() => Ok(Some(key.to_string())),
+            // Blank is absence, not an empty key: the env fallback applies.
+            _ => api_key_env
+                .as_deref()
+                .map(|var| read_api_key(name, var))
+                .transpose(),
+        }
+    }
 }
 
 impl Config {
@@ -223,10 +255,7 @@ impl Config {
     /// `openai_compat` entries declare one; Ollama has no such notion, so the
     /// answer there is `None` until a model is chosen.
     pub fn default_model(&self, provider: &str) -> Option<&str> {
-        match self.providers.get(provider) {
-            Some(ProviderConfig::OpenAiCompat { default_model, .. }) => default_model.as_deref(),
-            _ => None,
-        }
+        self.providers.get(provider)?.default_model()
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -295,22 +324,8 @@ impl ProviderRegistry {
             source,
         };
         match config {
-            ProviderConfig::OpenAiCompat {
-                base_url,
-                api_key,
-                api_key_env,
-                ..
-            } => {
-                // A literal `api_key` wins; `api_key_env` is read otherwise.
-                // Neither means no auth header, which is what keyless
-                // endpoints expect.
-                let api_key = match api_key.as_deref().map(str::trim) {
-                    Some(key) if !key.is_empty() => Some(key.to_string()),
-                    _ => api_key_env
-                        .as_deref()
-                        .map(|var| read_api_key(name, var))
-                        .transpose()?,
-                };
+            ProviderConfig::OpenAiCompat { base_url, .. } => {
+                let api_key = config.api_key(name)?;
                 let provider =
                     OpenAiCompatProvider::new(base_url, api_key, Vec::new()).map_err(built)?;
                 Ok(Box::new(provider))

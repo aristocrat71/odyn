@@ -2,8 +2,11 @@
 //! the providers view's writes — which go through `config_edit`, so the file
 //! stays hand-editable and the two never disagree.
 
+use odyn_core::catalog;
+use odyn_core::chat::ChatError;
 use odyn_core::config::{config_path, read_config_file, Config, ConfigError, ProviderConfig};
 use odyn_core::config_edit;
+use odyn_core::providers::openai_compat::OpenAiCompatProvider;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -84,6 +87,147 @@ pub async fn provider_save(
         config_edit::set(&path, "default_provider", &draft.name).map_err(say)?;
     }
     reloaded(&state)
+}
+
+/// One catalog entry as the connect panel offers it.
+#[derive(serde::Serialize)]
+pub struct CatalogItem {
+    id: &'static str,
+    label: &'static str,
+    kind: &'static str,
+    base_url: &'static str,
+    needs_key: bool,
+    keys_url: &'static str,
+    /// So a pasted key can name its own provider without a round trip.
+    key_prefixes: &'static [&'static str],
+    /// Already in `odyn.toml` under this name: the tile says so rather than
+    /// offering to add it twice.
+    configured: bool,
+}
+
+/// What a connection came to: the name it took, the model it starts on, and —
+/// when the endpoint would not list its models — why that list is empty.
+#[derive(serde::Serialize)]
+pub struct Connected {
+    name: String,
+    model: Option<String>,
+    models: usize,
+    note: Option<String>,
+    providers: Vec<ProviderEntry>,
+}
+
+#[tauri::command]
+pub async fn provider_catalog(state: State<'_, AppState>) -> Result<Vec<CatalogItem>, String> {
+    let names: Vec<String> = {
+        let ready = state.ready()?;
+        ready.config.providers.keys().cloned().collect()
+    };
+    Ok(catalog::PROVIDERS
+        .iter()
+        .map(|provider| CatalogItem {
+            id: provider.id,
+            label: provider.label,
+            kind: provider.kind,
+            base_url: provider.base_url,
+            needs_key: provider.needs_key(),
+            keys_url: provider.keys_url,
+            key_prefixes: provider.key_prefixes,
+            configured: names.iter().any(|name| name == provider.id),
+        })
+        .collect())
+}
+
+/// A catalog entry plus a key is a whole provider: the endpoint is asked what
+/// it serves, the answer picks the starting model, and the table is written.
+///
+/// A key the endpoint rejects is the one refusal — nothing is written, so a
+/// typo cannot quietly become a provider that fails at the first question.
+/// Every other failure still connects: an endpoint that is merely unreachable
+/// now says nothing about whether the key is good.
+#[tauri::command]
+pub async fn provider_connect(
+    state: State<'_, AppState>,
+    id: String,
+    api_key: String,
+    make_default: bool,
+) -> Result<Connected, String> {
+    let entry = catalog::find(&id).ok_or_else(|| format!("no provider named `{id}` is known"))?;
+    let key = api_key.trim().to_string();
+    if entry.needs_key() && key.is_empty() {
+        return Err(format!("{} needs an api key", entry.label));
+    }
+
+    let (models, note) = if entry.needs_key() {
+        probe(entry, &key).await?
+    } else {
+        (Vec::new(), None)
+    };
+    // Read fresh: what the entry already says is what a second connection
+    // carries across, and the file may have been edited since load.
+    let existing = Config::load()
+        .ok()
+        .and_then(|mut config| config.providers.remove(entry.id));
+    let provider = catalog::connected(entry, &key, &models, existing.as_ref());
+    let model = provider.default_model().map(str::to_string);
+
+    let path = config_path().map_err(say)?;
+    config_edit::upsert_provider(&path, entry.id, &provider).map_err(say)?;
+    if make_default {
+        config_edit::set(&path, "default_provider", entry.id).map_err(say)?;
+    }
+    Ok(Connected {
+        name: entry.id.to_string(),
+        model,
+        models: models.len(),
+        note,
+        providers: reloaded(&state)?,
+    })
+}
+
+/// Asks the endpoint what it serves. `Ok` carries the model names and, when
+/// the listing failed in a way that is not the key's fault, the reason the
+/// list is empty. `Err` is a key the endpoint refused.
+async fn probe(
+    entry: &catalog::Provider,
+    key: &str,
+) -> Result<(Vec<String>, Option<String>), String> {
+    let built = OpenAiCompatProvider::new(entry.base_url, Some(key.to_string()), Vec::new());
+    let provider = match built {
+        Ok(provider) => provider,
+        // A key with a newline or a stray byte in it: the header will not carry
+        // it, and no request was ever made.
+        Err(err) => return Err(format!("{}: {err}", entry.label)),
+    };
+    match provider.list_models().await {
+        Ok(models) if models.is_empty() => {
+            Ok((models, Some(format!("{} listed no models", entry.label))))
+        }
+        Ok(models) => Ok((models, None)),
+        Err(ChatError::Api { status, message }) if status == 401 || status == 403 => {
+            Err(format!("{} rejected that key: {message}", entry.label))
+        }
+        Err(ChatError::Api { status, .. }) => Ok((
+            Vec::new(),
+            Some(format!(
+                "connected — {} answered {status} to a model listing, so pick a model yourself",
+                entry.label
+            )),
+        )),
+        Err(err) => Ok((
+            Vec::new(),
+            Some(format!("key saved — {} did not answer: {err}", entry.label)),
+        )),
+    }
+}
+
+/// The catalog entry's key page, opened from Rust: the url is a constant of
+/// this build, so nothing the frontend says decides where the browser goes.
+#[tauri::command]
+pub fn open_keys_page(app: AppHandle, id: String) -> Result<(), String> {
+    let entry = catalog::find(&id).ok_or_else(|| format!("no provider named `{id}` is known"))?;
+    app.opener()
+        .open_url(entry.keys_url, None::<&str>)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

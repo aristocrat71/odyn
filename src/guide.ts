@@ -143,8 +143,12 @@ brevity = "full"`,
           "any number of `kind = \"openai_compat\"` entries. `base_url` is the endpoint root, `default_model` the model new sessions start on. The name is yours: it is what `--provider` and `/model` refer to.",
         ],
         [
+          "api_key",
+          "the key itself, which is what the providers view writes when you paste one. It wins over `api_key_env`.",
+        ],
+        [
           "api_key_env",
-          "names an environment variable holding the key — the key itself is never stored in the file. Omit it for keyless endpoints; no auth header is sent then. It is read only when that provider is actually built, so an unset key stops only that provider.",
+          "names an environment variable holding the key instead, for a file that must never contain one. Omit both for keyless endpoints; no auth header is sent then. Either is read only when that provider is actually built, so an unset key stops only that provider.",
         ],
       ]),
       p("First run, from the repository root:"),
@@ -156,6 +160,34 @@ odyn chat`),
       p(
         "The app opens on an empty chat. Pick a model in the top right, and type. The CLI " +
           "reads the same config and the same database.",
+      ),
+    ],
+  },
+  {
+    id: "providers",
+    title: "providers",
+    body: () => [
+      p(
+        "The providers view lists what is configured and connects what is not. Odyn " +
+          "already knows the endpoint and the model list for the open-weight providers " +
+          "in its catalog — OpenRouter, Groq, Cerebras, DeepSeek, Together, Mistral, " +
+          "OpenCode Zen and a local Ollama — so a key is the whole of what you have to " +
+          "give it.",
+      ),
+      sub("connecting"),
+      list([
+        "Paste a key. A key whose shape belongs to one provider and no other — `sk-or-` is OpenRouter's, `gsk_` is Groq's — names its own; anything else is one click on a tile.",
+        "`connect` asks the endpoint what models it serves, starts you on a sensible one, and writes `[providers.<name>]` into `odyn.toml`. The name is the catalog's, so `--provider openrouter` works from the CLI immediately.",
+        "A key the endpoint rejects is the one refusal: nothing is written, and the key stays in the field to be fixed. An endpoint that is merely unreachable still connects — being offline now says nothing about whether the key is good.",
+        "`use by default` points `default_provider` at it. It starts ticked when nothing but a local Ollama is configured, since the first key is usually the one meant to answer.",
+        "Connecting an endpoint that is already there replaces its key, which is how a rotated one gets in.",
+      ]),
+      sub("everything else"),
+      p(
+        "`+ custom endpoint` is the long way round: name, kind, base url, key or key " +
+          "env, and default model, for any OpenAI-compatible endpoint the catalog has " +
+          "never heard of. It writes the same table the catalog does, and so does a " +
+          "text editor — nothing about the file depends on how it got there.",
       ),
     ],
   },
@@ -190,16 +222,19 @@ odyn chat`),
       ),
       sub("model picker"),
       p(
-        "Top right, reading `provider / model ▾`. It lists every " +
-          "configured provider whether it answers or not — one that is down is labelled " +
-          "`· offline` and its models are dimmed and unclickable, because a picker that " +
-          "hides what is down explains nothing. Ollama entries carry their on-disk size. " +
-          "Reachability is re-probed every 30 seconds while the menu is open. Choosing a " +
-          "model writes it onto the conversation.",
+        "Two menus in the composer's footer, `provider <name> ▾` and `model <name> ▾`, " +
+          "because one list of every provider's whole catalog is too long to find anything " +
+          "in. The provider menu lists every configured provider whether it answers or not " +
+          "— one that is down is labelled `offline` and its models are dimmed and " +
+          "unclickable, because a picker that hides what is down explains nothing. The " +
+          "model menu shows that provider's models, free ones first, Ollama entries with " +
+          "their on-disk size. Switching provider keeps the model when the new provider " +
+          "serves it too. Reachability is re-probed every 30 seconds while a menu is open. " +
+          "Choosing a model writes it onto the conversation.",
       ),
       sub("brevity"),
       p(
-        "Beside the picker, reading `brevity <level> ▾`. Each level injects one " +
+        "Beside the picker in the same footer, reading `brevity <level> ▾`. Each level injects one " +
           "fixed directive under a `## Style` heading in the same system message as memory; " +
           "every level tells the model to reproduce code blocks, shell commands, file paths, " +
           "identifiers and error messages byte-exact.",
@@ -483,7 +518,7 @@ core 10/500 tk, episodic 8/900 tk
       ),
       list([
         "Outbound traffic goes to the providers you configured, and nowhere else — plus one download of the embedding model, once, the first time an embedding is needed.",
-        "API keys are never written to the config file, or to any log. `api_key_env` names an environment variable, and it is read only when that provider is actually built.",
+        "A key you paste is written to `odyn.toml` as `api_key`, and nowhere else — never to a log, and never over the wire except to the provider it belongs to. `api_key_env` keeps it out of the file entirely by naming an environment variable instead; either is read only when that provider is actually built.",
         "Conversations, memories and injection records live only in `odyn.db`. Deleting a conversation takes its messages with it.",
         "Spotlight asks are never stored unless you promote them; dismissing drops the exchange.",
         "`odyn ask` without `--save` will not create a database on a machine that never saved anything.",
@@ -512,7 +547,7 @@ core 10/500 tk, episodic 8/900 tk
         ],
         [
           "empty model picker",
-          "an Ollama provider can only offer what Ollama names, so a group marked `· offline` lists nothing. Start Ollama, or check its `base_url`. OpenAI-compatible entries list only their `default_model`.",
+          "every group lists what its endpoint names: Ollama what it has installed, an OpenAI-compatible entry what its `/models` answers. A group marked `· offline` reached nothing — start Ollama, or check the `base_url`. An endpoint that answers but serves no listing shows only its `default_model`.",
         ],
         [
           "stream failed: …",

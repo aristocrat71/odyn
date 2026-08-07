@@ -2,6 +2,10 @@ import * as api from "./api";
 
 export type View = "home" | "chat" | "brain" | "providers" | "config" | "guide";
 
+// Provider and model are picked apart: one list of both is as long as every
+// provider's catalog put together.
+export type PickerMenu = "provider" | "model" | null;
+
 export type Stream = {
   conversation: number;
   requestId: number | null;
@@ -27,7 +31,8 @@ export const state = {
   tokens: null as number | null,
   stream: null as Stream | null,
   picker: {
-    open: false,
+    // Which of the two menus is open, if either.
+    open: null as PickerMenu,
     loading: false,
     groups: [] as api.ProviderGroup[],
   },
@@ -60,6 +65,13 @@ export const state = {
     entries: null as api.ProviderEntry[] | null,
     // `{ name: null }` is the add form; a string names the row being edited.
     editing: null as { name: string | null } | null,
+    catalog: null as api.CatalogItem[] | null,
+    // The catalog entry the connect panel is aimed at. A recognised key aims
+    // it on its own; a tile is how the rest get aimed.
+    pick: null as string | null,
+    connecting: false,
+    // What the last connection came to, shown until the next one starts.
+    connected: null as string | null,
   },
   error: "",
 };
@@ -126,22 +138,27 @@ export function setView(view: View): void {
   render();
 }
 
-export function togglePicker(): void {
-  if (state.picker.open) {
+export function togglePicker(which: PickerMenu): void {
+  if (state.picker.open === which) {
     closePicker();
     return;
   }
-  state.picker.open = true;
-  // Reachability from a minute ago is not a fact, so nothing stale is shown.
-  state.picker.loading = true;
-  state.picker.groups = [];
-  void loadProviders();
-  timer = window.setInterval(() => void loadProviders(), PICKER_REFRESH_MS);
+  // Only the first open probes: stepping from the provider menu to the model
+  // one is the same listing, read twice.
+  const first = state.picker.open === null;
+  state.picker.open = which;
+  if (first) {
+    // Reachability from a minute ago is not a fact, so nothing stale is shown.
+    state.picker.loading = true;
+    state.picker.groups = [];
+    void loadProviders();
+    timer = window.setInterval(() => void loadProviders(), PICKER_REFRESH_MS);
+  }
   render();
 }
 
 export function closePicker(): void {
-  if (!state.picker.open) return;
+  if (state.picker.open === null) return;
   shut();
   render();
 }
@@ -166,7 +183,7 @@ export const chooseModel = (provider: string, model: string): Promise<void> =>
 let timer: number | null = null;
 
 function shut(): void {
-  state.picker.open = false;
+  state.picker.open = null;
   state.brevityMenu = false;
   if (timer !== null) {
     clearInterval(timer);
@@ -202,7 +219,7 @@ const loadProviders = (): Promise<void> =>
     const groups = await api.providersOverview().finally(() => {
       state.picker.loading = false;
     });
-    if (state.picker.open) state.picker.groups = groups;
+    if (state.picker.open !== null) state.picker.groups = groups;
   });
 
 export function startRename(id: number): void {
@@ -438,8 +455,53 @@ export const loadConfig = (): Promise<void> =>
 
 export const loadProvidersConfig = (): Promise<void> =>
   guard(async () => {
+    // What the last visit connected is not news on this one.
+    state.providers.connected = null;
     state.providers.entries = await api.providersConfig();
+    state.providers.catalog = await api.providerCatalog();
   });
+
+// Which endpoint the key in the panel is for. Aiming is not connecting: the
+// key stays where it is, and nothing is written until connect is asked for.
+export function pickCatalogProvider(id: string | null): void {
+  if (state.providers.pick === id) return;
+  state.providers.pick = id;
+  render();
+}
+
+/// One paste, one write: the endpoint is asked what it serves, the answer
+/// picks the starting model, and the table lands in `odyn.toml`.
+export const connectProvider = (
+  id: string,
+  apiKey: string,
+  makeDefault: boolean,
+): Promise<void> =>
+  guard(async () => {
+    state.providers.connecting = true;
+    state.providers.connected = null;
+    render();
+    try {
+      const result = await api.providerConnect(id, apiKey, makeDefault);
+      state.providers.entries = result.providers;
+      state.providers.catalog = await api.providerCatalog();
+      state.providers.pick = null;
+      state.providers.connected = summarise(result);
+    } finally {
+      state.providers.connecting = false;
+    }
+    void refreshStatus();
+  });
+
+function summarise(result: api.Connected): string {
+  const models =
+    result.models === 0 ? "" : ` · ${result.models} model${result.models === 1 ? "" : "s"}`;
+  const model = result.model === null ? "" : ` · starting on ${result.model}`;
+  const note = result.note === null ? "" : ` · ${result.note}`;
+  return `${result.name} connected${models}${model}${note}`;
+}
+
+export const openKeysPage = (id: string): Promise<void> =>
+  guard(() => api.openKeysPage(id));
 
 export function startProviderEdit(name: string | null): void {
   state.providers.editing = { name };
@@ -456,6 +518,7 @@ export function cancelProviderEdit(): void {
 export const saveProvider = (draft: api.ProviderDraft): Promise<void> =>
   guard(async () => {
     state.providers.entries = await api.providerSave(draft);
+    state.providers.catalog = await api.providerCatalog();
     state.providers.editing = null;
     void refreshStatus();
   });
@@ -463,6 +526,7 @@ export const saveProvider = (draft: api.ProviderDraft): Promise<void> =>
 export const deleteProvider = (name: string): Promise<void> =>
   guard(async () => {
     state.providers.entries = await api.providerRemove(name);
+    state.providers.catalog = await api.providerCatalog();
     void refreshStatus();
   });
 
