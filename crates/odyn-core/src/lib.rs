@@ -12,10 +12,10 @@ pub mod notes;
 pub mod providers;
 pub mod reasoning;
 pub mod storage;
+pub mod tools;
 
-/// Tests that read or set environment variables run one at a time: the
-/// environment is process-wide, and the crate's tests share a process with each
-/// other and with the developer's own shell.
+/// Serializes tests that read or set environment variables: the environment is
+/// process-wide and the crate's tests share a process.
 #[cfg(test)]
 pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -21,7 +21,7 @@ const INJECTED_TAG_S = 5 * 60;
 const SORTS = ["recent", "hits", "created"] as const;
 
 // Persistent inputs: a search being typed and an edit in progress survive the
-// redraws that background refreshes cause.
+// redraws background refreshes cause.
 const search = el("input", "brain-search");
 search.placeholder = "search memories…";
 search.addEventListener("input", () => scheduleBrainSearch(search.value));
@@ -49,7 +49,6 @@ export function renderBrain(): HTMLElement {
   return root;
 }
 
-// The model picker outlives redraws, like every other persistent control.
 const models = dropdown({
   label: "model",
   empty: "…",
@@ -80,9 +79,8 @@ function header(): HTMLElement {
   return row;
 }
 
-// Which model embeds this brain. Changing it re-embeds every note, so the
-// control says so while that runs, and a remote model is marked as one —
-// it is the only kind that sends note text off the machine.
+// Changing the model re-embeds every note, so the control says so while that
+// runs. A remote model is marked: only that kind sends note text off-machine.
 function modelPicker(): HTMLElement {
   const wrap = el("span", "brain-model");
   const overview = state.brain.overview;
@@ -114,8 +112,6 @@ function modelPicker(): HTMLElement {
   return wrap;
 }
 
-// One flat pool: every memory is a markdown note in the brain folder,
-// recalled only when a message mentions /brain.
 function listColumn(): HTMLElement {
   const column = el("div", "brain-col brain-list");
   const overview = state.brain.overview;
@@ -175,8 +171,7 @@ function memRow(row: MemoryRow): HTMLElement {
   return line;
 }
 
-// The row becomes an input in place; `null` is the add-new row. The inline
-// editor is for quick one-line notes — the folder is where long ones live.
+// The row becomes an input in place; `null` is the add-new one.
 function editRow(row: MemoryRow | null): HTMLElement {
   const line = el("div", "mem-row editing");
   if (row !== null) line.append(el("span", "mem-id epi", row.slug));
@@ -189,7 +184,7 @@ function editRow(row: MemoryRow | null): HTMLElement {
   return line;
 }
 
-// A multi-line note flattens to one row line; the graph tip shows it whole.
+// A multi-line note flattens to one row; the graph tip shows it whole.
 const flat = (content: string): string => content.split("\n").join(" ⏎ ");
 
 const date = (seconds: number): string =>

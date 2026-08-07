@@ -1,32 +1,26 @@
 //! The endpoints most people connect, with everything but the key already
-//! known — so connecting one is a paste rather than a form.
+//! known, so connecting one is a paste rather than a form.
 //!
-//! Every entry serves open-weight models, which is the only kind Odyn talks to.
-//! Nothing here is otherwise privileged: an entry supplies the `base_url`,
-//! `kind` and starting model that a hand-written `[providers.*]` table would
-//! have spelled out, and an endpoint the catalog has never heard of is still
-//! reachable the long way round.
+//! Every entry serves open-weight models, the only kind Odyn talks to. An entry
+//! is otherwise just the `[providers.*]` table a user could have written, and an
+//! unlisted endpoint is still reachable the long way round.
 
 use crate::config::ProviderConfig;
 use crate::providers::openai_compat::is_free;
 
-/// One known endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Provider {
-    /// The name its table takes in `odyn.toml`, so `--provider openrouter`
-    /// works without the user having had to invent anything.
+    /// The name its table takes in `odyn.toml`, and what `--provider` accepts.
     pub id: &'static str,
     pub label: &'static str,
-    /// The `kind` its table declares.
     pub kind: &'static str,
     pub base_url: &'static str,
-    /// Key shapes that belong to this endpoint and to no other, so a pasted
-    /// key can name its own provider. Empty where the keys look like anyone
-    /// else's — guessing wrong is worse than asking.
+    /// Key shapes unique to this endpoint, so a pasted key can name its own
+    /// provider. Empty where they look like anyone else's.
     pub key_prefixes: &'static [&'static str],
-    /// Substrings that pick a starting model out of whatever the endpoint
-    /// lists, best first. A miss falls back to the listing itself, so nothing
-    /// here can go stale enough to break a connection.
+    /// Substrings that pick a starting model out of the endpoint's listing, best
+    /// first. A miss falls back to the listing, so these cannot go stale enough
+    /// to break a connection.
     pub model_hints: &'static [&'static str],
     /// The model to start on when the endpoint lists none at all.
     pub fallback_model: Option<&'static str>,
@@ -35,14 +29,12 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// Local endpoints authenticate nobody.
     pub fn needs_key(&self) -> bool {
         self.kind != "ollama"
     }
 }
 
-/// Ordered as the connect panel offers them: the ones with a free tier first,
-/// then the rest, then local.
+/// Ordered as the connect panel offers them: free tier first, then local last.
 pub const PROVIDERS: &[Provider] = &[
     Provider {
         id: "openrouter",
@@ -130,8 +122,8 @@ pub fn find(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|provider| provider.id == id)
 }
 
-/// The provider a pasted key belongs to, by the longest prefix that matches —
-/// `sk-or-` is OpenRouter's before it is anyone's `sk-`.
+/// The provider a pasted key belongs to, by longest matching prefix: `sk-or-`
+/// is OpenRouter's before it is anyone's `sk-`.
 pub fn detect(key: &str) -> Option<&'static Provider> {
     let key = key.trim();
     if key.is_empty() {
@@ -151,10 +143,9 @@ pub fn detect(key: &str) -> Option<&'static Provider> {
         .map(|(_, provider)| provider)
 }
 
-/// The table a connection writes. `models` is what the endpoint just said it
-/// serves, and `existing` is the entry already under this name — everything a
-/// connection has no opinion about is carried across from it, so a second
-/// connection is a new key rather than a reset of a hand-edited table.
+/// The table a connection writes. Anything the connection has no opinion about
+/// is carried across from `existing`, so reconnecting is a new key rather than a
+/// reset of a hand-edited table.
 pub fn connected(
     provider: &Provider,
     api_key: &str,
@@ -181,19 +172,16 @@ pub fn connected(
     ProviderConfig::OpenAiCompat {
         base_url: provider.base_url.to_string(),
         api_key: Some(api_key.to_string()),
-        // Harmless beside a literal key, which wins — and deleting a line the
-        // user wrote is no part of connecting one.
+        // Harmless beside a literal key, which wins; deleting a line the user
+        // wrote is no part of connecting one.
         api_key_env: kept_env,
-        // A listing that came back empty is no reason to forget the model the
-        // entry was already on.
         default_model: starting_model(provider, models).or(kept_model),
     }
 }
 
 /// The model a fresh connection starts on: the first hint any listed model
-/// carries, else the first model listed, else whatever the entry falls back to.
-/// A free model wins even on a later hint — hints say which model is sensible,
-/// not what it is worth paying for.
+/// carries, else the first model listed, else the entry's fallback. A free model
+/// wins even on a later hint.
 pub fn starting_model(provider: &Provider, models: &[String]) -> Option<String> {
     let hinted = |free_only: bool| {
         provider.model_hints.iter().find_map(|hint| {
@@ -214,8 +202,6 @@ pub fn starting_model(provider: &Provider, models: &[String]) -> Option<String> 
 mod tests {
     use super::*;
 
-    /// An id is written into `odyn.toml` as a table name and typed back at
-    /// `--provider`, so it lives under the same rules as a hand-picked one.
     #[test]
     fn every_id_is_a_name_the_config_and_the_cli_accept() {
         let mut seen = Vec::new();
@@ -248,8 +234,7 @@ mod tests {
         assert_eq!(named("  gsk_0123456789  "), Some("groq"));
         assert_eq!(named("csk-0123"), Some("cerebras"));
 
-        // A shape half the industry issues belongs to nobody: a wrong guess
-        // costs more than the click it saves.
+        // A shape half the industry issues belongs to nobody.
         assert_eq!(named("sk-0123456789"), None);
         assert_eq!(named(""), None);
         assert_eq!(named("   "), None);
@@ -268,7 +253,6 @@ mod tests {
             Some("llama-3.3-70b-versatile".to_string())
         );
 
-        // No hint matches: the listing decides.
         let unfamiliar = ["something-else".to_string()];
         assert_eq!(
             starting_model(groq, &unfamiliar),
@@ -297,7 +281,6 @@ mod tests {
             Some("qwen/qwen3-next:free".to_string())
         );
 
-        // Nothing free: the hint order decides as it always did.
         let paid = [
             "qwen/qwen3-next".to_string(),
             "openai/gpt-oss-120b".to_string(),
@@ -335,8 +318,7 @@ mod tests {
             }
         );
 
-        // Reconnecting: the key is replaced, the env reference the user wrote
-        // survives, and a listing that came back empty leaves the model alone.
+        // Reconnecting with an empty listing must leave the model alone.
         let hand_edited = ProviderConfig::OpenAiCompat {
             base_url: groq.base_url.to_string(),
             api_key: Some("gsk_old".to_string()),
@@ -352,7 +334,6 @@ mod tests {
                 default_model: Some("a-model-i-chose".to_string()),
             }
         );
-        // A listing that did come back is what the entry starts on.
         assert_eq!(
             connected(groq, "gsk_new", &listed, Some(&hand_edited)),
             ProviderConfig::OpenAiCompat {
@@ -382,8 +363,7 @@ mod tests {
         assert_eq!(connected(ollama, "", &[], Some(&tuned)), tuned);
     }
 
-    /// Odyn talks to open-weight models only, so the catalog is where that
-    /// rule would leak first — CLAUDE.md §3.
+    /// Odyn talks to open-weight models only — CLAUDE.md §3.
     #[test]
     fn no_closed_weight_endpoint_is_offered() {
         for provider in PROVIDERS {

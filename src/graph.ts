@@ -5,7 +5,7 @@ import { state } from "./state";
 const SVG = "http://www.w3.org/2000/svg";
 const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 6;
-// Labels on episodic nodes appear from this zoom on.
+// Labels appear from this zoom on.
 const LABEL_ZOOM = 0.8;
 // The layout fits [-450, 450]; the viewBox leaves a margin around it.
 const VIEW = 470;
@@ -138,8 +138,7 @@ export function renderGraph(): HTMLElement {
   return wrap;
 }
 
-// The count is only known once the overview has landed; until then it is left
-// out rather than guessed.
+// The count is unknown until the overview lands, so it is left out.
 function laying(): string {
   const overview = state.brain.overview;
   if (overview === null) return "laying out memories…";

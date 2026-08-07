@@ -9,9 +9,8 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-// Between the send and the first token there is recall, then the provider's
-// own latency — seconds of nothing to draw. Chat and spotlight both show this
-// line until text starts arriving, so neither ever sits blank.
+// Recall then provider latency leave seconds of nothing to draw before the
+// first token. Chat and spotlight both show this, so neither sits blank.
 export function waiting(): HTMLElement {
   const line = el("div", "waiting");
   line.append(el("span", "waiting-word", "thinking"));

@@ -1,8 +1,8 @@
 //! The brain graph: nodes for memories, weighted edges for wikilinks,
-//! similarity and co-injection, positions from a force layout. Built on
-//! demand, cached in `graph_cache`, invalidated by every sync or injection
-//! write. The recall walk in `brain` runs over these same edges — what the
-//! graph view draws is what retrieval traverses.
+//! similarity and co-injection, positions from a force layout. Cached in
+//! `graph_cache` and invalidated by every sync or injection write. The recall
+//! walk runs over these same edges: what the graph view draws is what
+//! retrieval traverses.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +21,6 @@ const EXTENT: f32 = 450.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: i64,
-    /// The note's slug.
     pub display_id: String,
     pub content: String,
     pub hits: i64,
@@ -32,7 +31,6 @@ pub struct GraphNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EdgeKind {
-    /// An authored `[[wikilink]]` between two notes.
     Link,
     Similarity,
     CoInjection,
@@ -105,8 +103,7 @@ fn compute(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphE
     }
     for node in nodes.iter() {
         for (other, distance) in storage.neighbors(node.id, NEIGHBORS)? {
-            // Embeddings are unit vectors, so L2 and cosine agree:
-            // cos = 1 - d²/2.
+            // Embeddings are unit vectors, so cos = 1 - d²/2.
             let similarity = 1.0 - (distance * distance) as f32 / 2.0;
             if similarity >= similarity_threshold && node.id < other {
                 edges.push(GraphEdge {
@@ -133,9 +130,9 @@ fn compute(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphE
 }
 
 /// Fruchterman–Reingold: all-pairs repulsion, springs on link and similarity
-/// edges, gravity to the center, cooling over the run. Deterministic — the
-/// seed positions are a golden-angle spiral, not random — so the same brain
-/// always draws the same map.
+/// edges, gravity to the center, cooling over the run. Deterministic — seed
+/// positions are a golden-angle spiral, not random — so the same brain always
+/// draws the same map.
 fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
     let count = nodes.len();
     if count == 0 {
@@ -233,7 +230,7 @@ mod tests {
         values
     }
 
-    /// Three notes: two close in meaning, one far, with a link far→close-a.
+    /// Two notes close in meaning, one far, with a link far→close-a.
     fn seeded(label: &str) -> (TempDir, Storage) {
         let dir = TempDir::new(label);
         let storage = Storage::open(dir.db()).expect("open");
@@ -286,12 +283,10 @@ mod tests {
                 .map(|edge| (edge.a, edge.b, edge.weight))
                 .collect()
         };
-        // The authored link: far-away (3) → close-a (1), normalized a<b.
         let links = by_kind(EdgeKind::Link);
         assert_eq!(links.len(), 1);
         assert_eq!((links[0].0, links[0].1), (1, 3));
         assert!((links[0].2 - LINK_WEIGHT).abs() < 1e-6);
-        // cos(a, b) ≈ 0.994 passes the threshold; everything near "far" fails.
         let similar = by_kind(EdgeKind::Similarity);
         assert_eq!(similar.len(), 1);
         assert_eq!((similar[0].0, similar[0].1), (1, 2));

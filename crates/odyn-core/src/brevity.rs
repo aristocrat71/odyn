@@ -1,8 +1,7 @@
 //! Brevity mode: a per-level style directive injected under `## Style`.
 //!
-//! The native form of the caveman idea — compress the answer, never the
-//! substance. Each directive is hand-written, ≤80 tokens by the same chars/4
-//! heuristic the brain uses, and snapshot-tested so it cannot drift silently.
+//! Compress the answer, never the substance. Each directive is ≤80 tokens by
+//! the brain's chars/4 heuristic, and snapshot-tested so it cannot drift.
 
 use std::fmt;
 use std::str::FromStr;
@@ -79,7 +78,7 @@ impl FromStr for Brevity {
 mod tests {
     use super::*;
 
-    /// The snapshot: any edit to a directive has to be made twice, on purpose.
+    /// Deliberately duplicated: an edit to a directive has to be made twice.
     #[test]
     fn the_directives_are_exactly_these_words() {
         assert_eq!(

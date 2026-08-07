@@ -32,9 +32,7 @@ pub struct BrainOverview {
     count: i64,
     top_k: u32,
     cap_tokens: u32,
-    /// The brain folder, spelled out so the view can say where the files live.
     path: String,
-    /// What `[brain] model` names, exactly as the config spells it.
     model: String,
     /// Whether that model sends note text off the machine.
     model_remote: bool,
@@ -74,9 +72,8 @@ impl From<MemoryStats> for MemoryRow {
     }
 }
 
-/// Opening the brain view re-reads the folder, so a file dropped in by any
-/// editor or agent appears here without ceremony. A folder that cannot be
-/// synced still shows what the index has.
+/// Re-reads the folder, so a file dropped in by any editor appears here. A
+/// folder that cannot be synced still shows what the index has.
 #[tauri::command]
 pub async fn brain_overview(app: AppHandle) -> Result<BrainOverview, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -100,9 +97,8 @@ pub async fn brain_overview(app: AppHandle) -> Result<BrainOverview, String> {
     .map_err(|err| err.to_string())?
 }
 
-/// Everything selectable: the bundled fastembed catalog, whatever the local
-/// Ollama has that can embed, and — flagged, because it is the only one that
-/// sends note text off the machine — each configured endpoint's models.
+/// Everything selectable; remote entries are flagged — only those send note
+/// text off-machine.
 #[tauri::command]
 pub async fn embed_catalog(state: State<'_, AppState>) -> Result<Vec<EmbedOption>, String> {
     let (ollama_url, providers) = {
@@ -162,9 +158,8 @@ pub async fn embed_catalog(state: State<'_, AppState>) -> Result<Vec<EmbedOption
     Ok(options)
 }
 
-/// Writes `[brain] model` and re-indexes on the spot, so the answer already
-/// reflects a brain that has been re-embedded rather than one about to be.
-/// Long by nature: it may download a model and embed the whole folder.
+/// Writes `[brain] model` and re-indexes on the spot, so the answer reflects a
+/// re-embedded brain. Long by nature: it may download a model.
 #[tauri::command]
 pub async fn brain_set_model(app: AppHandle, model: String) -> Result<BrainOverview, String> {
     let path = config_path().map_err(|err| err.to_string())?;
@@ -199,8 +194,7 @@ pub async fn brain_memories(
     .map_err(|err| err.to_string())?
 }
 
-/// The same embedding pipeline as chat recall and `odyn mem search`, so all
-/// three return the same order for the same query.
+/// The same pipeline as chat recall and `odyn mem search`: same query, same order.
 #[tauri::command]
 pub async fn brain_search(app: AppHandle, query: String) -> Result<Vec<MemoryRow>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -209,8 +203,8 @@ pub async fn brain_search(app: AppHandle, query: String) -> Result<Vec<MemoryRow
         if ready.storage().count_memories().map_err(say)? == 0 {
             return Ok(Vec::new());
         }
-        // The embed happens without the storage lock: it can take seconds on
-        // a cold model and a send must not queue behind it.
+        // The embed runs without the storage lock: a cold model takes seconds
+        // and a send must not queue behind it.
         let mut embedder = load_embedder(&ready.config, &ready.config.brain.model)
             .map_err(|err| err.to_string())?;
         let embedding = embedder
@@ -277,8 +271,7 @@ pub async fn brain_delete_note(app: AppHandle, slug: String) -> Result<(), Strin
     .map_err(|err| err.to_string())?
 }
 
-/// The cached graph, or a fresh compute — KNN sweeps and 300 layout
-/// iterations are CPU work, so they run off the async workers.
+/// KNN sweeps and 300 layout iterations are CPU work, so they run off-thread.
 #[tauri::command]
 pub async fn brain_graph(app: AppHandle) -> Result<odyn_core::graph::Graph, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -292,8 +285,7 @@ pub async fn brain_graph(app: AppHandle) -> Result<odyn_core::graph::Graph, Stri
     .map_err(|err| err.to_string())?
 }
 
-/// Reading views stay additive: a folder that cannot be synced is reported
-/// to the console, and the view renders what the index already has.
+/// Reading views stay additive: an unsyncable folder still renders the index.
 fn warn_on_sync_failure(ready: &Ready) {
     if let Err(err) = sync_index(ready) {
         eprintln!("odyn: brain folder not synced: {err}");

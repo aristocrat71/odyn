@@ -1,8 +1,6 @@
-//! `odyn mem`: the brain folder's front door on the command line.
-//!
-//! Memories are markdown files; these commands write and remove them, then
-//! mirror the folder into the retrieval index. Anything they can do, a plain
-//! text editor in the brain folder does too.
+//! `odyn mem`: the brain folder's front door on the command line. Memories are
+//! markdown files; these commands write them, then mirror the folder into the
+//! retrieval index. A text editor in the brain folder does the same job.
 
 use std::io::Write;
 
@@ -14,8 +12,7 @@ use odyn_core::storage::{Memory, Storage};
 
 use crate::session::{config_failure, write_failure, Failure};
 
-/// Semantic search shows more than one recall injects: browsing is not
-/// injecting.
+/// Browsing is not injecting: search shows more than recall injects.
 const SEARCH_LIMIT: usize = 20;
 
 #[derive(clap::Subcommand)]
@@ -99,8 +96,7 @@ pub fn run(action: Action) -> Result<(), Failure> {
     }
 }
 
-/// Mirrors the folder into the index; the model loads only when a note is
-/// new or edited.
+/// Mirrors the folder into the index; the model loads only for new or edited notes.
 fn sync(storage: &Storage, config: &Config) -> Result<(), Failure> {
     brain::sync(storage, &config.brain, || {
         load_embedder(config, &config.brain.model)
@@ -118,7 +114,6 @@ fn find(storage: &Storage, slug: &str) -> Result<Memory, Failure> {
         .ok_or_else(|| Failure::run(format!("note `{slug}` did not survive the sync")))
 }
 
-/// Loads the model, embeds one text, drops the model.
 fn embed_one(config: &Config, text: &str) -> Result<Vec<f32>, Failure> {
     let mut embedder = load_embedder(config, &config.brain.model)
         .map_err(|err| Failure::run(format!("could not load the embedding model: {err}")))?;
@@ -129,7 +124,6 @@ fn embed_one(config: &Config, text: &str) -> Result<Vec<f32>, Failure> {
         .ok_or_else(|| Failure::run("the embedder returned no vector"))
 }
 
-/// One row per note: the slug, the cost, the first line of the content.
 fn line(memory: &Memory) -> String {
     let mut first = memory
         .content

@@ -5,10 +5,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
-use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
+use odyn_core::chat::{ChatError, ChatProvider, Message, Role, Usage};
 use odyn_core::config::{config_path, ConfigError, ProviderConfig};
 use odyn_core::config_edit;
+use odyn_core::tools::{TurnError, TurnEvent};
 use tauri::async_runtime::JoinHandle;
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindow,
@@ -22,21 +22,19 @@ use crate::state::AppState;
 const LABEL: &str = "spotlight";
 const MAIN: &str = "main";
 const EVENT: &str = "spotlight-event";
-/// A rate limit, a bad request, a dropped connection and a wordless reply are
-/// one thing from here: this model cannot answer. The raw text rides `detail`.
+/// Every way a model fails to answer reads the same; the raw text rides `detail`.
 const UNAVAILABLE: &str = "model unavailable";
 /// 640px field plus room for its 80px shadow to bleed inside the window.
 const WIDTH: f64 = 720.0;
 
 /// Registered only while spotlight shows, so Esc dismisses it even when the
-/// webview never sees the key. Released again on hide — the asklight pattern.
+/// webview never sees the key; released again on hide.
 fn esc() -> Shortcut {
     Shortcut::new(None, Code::Escape)
 }
 
-/// The real Spotlight behavior is an NSPanel, not a window: non-activating —
-/// the app in front keeps focus while the panel takes keys — floating at
-/// status level on every space. Ported from asklight.
+/// Spotlight behavior needs an NSPanel, not a window: non-activating (the app
+/// in front keeps focus), floating at status level on every space.
 #[cfg(target_os = "macos")]
 mod panel {
     use tauri::{AppHandle, Manager, WebviewWindow};
@@ -54,9 +52,8 @@ mod panel {
         })
     }
 
-    /// No delegate of our own: tao's stays on the window, so losing key
-    /// status reaches us as Tauri's ordinary `Focused(false)` — the one
-    /// dismissal path shared with the fallback window on other platforms.
+    /// No delegate of our own: tao's stays on the window, so losing key status
+    /// arrives as Tauri's ordinary `Focused(false)` — one dismissal path for all.
     pub fn convert(window: &WebviewWindow) -> bool {
         let Ok(panel) = window.to_panel::<SpotPanel>() else {
             return false;
@@ -114,7 +111,6 @@ struct Ask {
     task: Option<JoinHandle<()>>,
 }
 
-/// What the streaming task and a promote both need to see.
 #[derive(Default)]
 struct Shared {
     answer: Mutex<String>,
@@ -139,8 +135,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub fn setup(app: &AppHandle) {
     let hotkey = match app.state::<AppState>().ready() {
         Ok(ready) => ready.config.spotlight.hotkey.clone(),
-        // Config is broken: the main window already explains that; the default
-        // hotkey still gives spotlight a chance to work.
+        // Config is broken: the default hotkey still gives spotlight a chance.
         Err(_) => odyn_core::config::SpotlightConfig::default().hotkey,
     };
     let error = register(app, &hotkey).err();
@@ -165,9 +160,8 @@ fn register(app: &AppHandle, hotkey: &str) -> Result<(), String> {
 }
 
 /// AppKit window operations silently no-op when run synchronously inside the
-/// hotkey callback (asklight's hard-won lesson). A thread hop makes
-/// `run_on_main_thread` QUEUE onto the run loop instead of executing inline —
-/// this is the difference between spotlight appearing and nothing happening.
+/// hotkey callback. The thread hop makes `run_on_main_thread` QUEUE onto the run
+/// loop instead of executing inline — without it, nothing appears.
 fn defer(app: &AppHandle, act: fn(&AppHandle)) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -214,9 +208,8 @@ pub fn spotlight_toggle(app: AppHandle) {
     toggle(&app);
 }
 
-/// Wayland has no reliable always-on-top/frameless summon; a normal centered
-/// window beats shipping hacks. `ODYN_SPOTLIGHT_FALLBACK=1` forces the same
-/// path for testing anywhere.
+/// Wayland has no reliable always-on-top/frameless summon, so it gets a normal
+/// centered window. `ODYN_SPOTLIGHT_FALLBACK=1` forces that path anywhere.
 fn fallback_mode() -> bool {
     std::env::var_os("ODYN_SPOTLIGHT_FALLBACK").is_some_and(|v| v == "1")
         || (cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some())
@@ -244,9 +237,8 @@ fn build(app: &AppHandle) -> Option<WebviewWindow> {
     if !fallback_mode() {
         panel::convert(&window);
     }
-    // Standard Spotlight dismissal: focus gone — a click into another app, a
-    // ⌘-tab away — hides it. AppKit's resign-key arrives as Tauri's own
-    // focus event, so every platform shares this one path.
+    // Focus gone hides it. AppKit's resign-key arrives as Tauri's own focus
+    // event, so every platform shares this one path.
     let handle = app.clone();
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Focused(false)) {
@@ -260,7 +252,6 @@ fn present(app: &AppHandle, window: &WebviewWindow) {
     if !fallback_mode() {
         place(app, window);
     }
-    // While it shows, Esc reaches it from anywhere.
     let _ = app
         .global_shortcut()
         .on_shortcut(esc(), |app, _shortcut, event| {
@@ -318,8 +309,7 @@ pub fn spotlight_hide(app: AppHandle) {
     dismiss(&app);
 }
 
-/// Streams an ephemeral answer to the spotlight window; a new question
-/// replaces whatever the last one was still doing.
+/// Streams an ephemeral answer; a new question replaces the last.
 #[tauri::command]
 pub fn spotlight_ask(
     app: AppHandle,
@@ -333,8 +323,8 @@ pub fn spotlight_ask(
         abort(&previous);
     }
 
-    // The same `/brain` rule as everywhere: a mention turns recall on for
-    // this ask, and neither the model nor a promoted transcript sees it.
+    // The same `/brain` rule as everywhere: neither the model nor a promoted
+    // transcript sees the mention.
     let parsed = odyn_core::brain::parse_ask(&text);
     let shared = Arc::new(Shared::default());
     let mut ask = Ask {
@@ -355,7 +345,6 @@ pub fn spotlight_ask(
                     parsed,
                 )));
             }
-            // A misconfigured provider is the user's to fix, so it says so.
             Err(err) => emit(&app, request_id, Body::error(err.to_string())),
         },
         Err(message) => emit(&app, request_id, Body::error(message)),
@@ -365,8 +354,8 @@ pub fn spotlight_ask(
     Ok(request_id)
 }
 
-/// Saves the current exchange as a real conversation and hands off to the main
-/// window. Mid-stream, the answer is kept as an interrupted partial.
+/// Saves the exchange as a real conversation; mid-stream, the answer is kept as
+/// an interrupted partial.
 #[tauri::command]
 pub async fn spotlight_promote(
     app: AppHandle,
@@ -462,11 +451,14 @@ async fn run(
 ) {
     // A spotlight ask has no history: the question alone drives retrieval.
     // Brevity comes from `[spotlight]`, never from any conversation.
-    let brevity = app
-        .state::<AppState>()
-        .ready()
-        .map(|ready| ready.config.spotlight.brevity)
-        .unwrap_or_default();
+    let (brevity, brain_dir) = match app.state::<AppState>().ready() {
+        Ok(ready) => (
+            ready.config.spotlight.brevity,
+            odyn_core::notes::brain_dir(ready.config.brain.path.as_deref()).unwrap_or_default(),
+        ),
+        Err(_) => (Default::default(), std::path::PathBuf::new()),
+    };
+    let memorize = ask.memorize;
     let mut history = vec![Message::new(Role::User, ask.message.clone())];
     if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
         *lock(&shared.injected) = context.memory_ids();
@@ -475,35 +467,56 @@ async fn run(
             history.insert(0, Message::new(Role::System, context.system_message));
         }
     }
-    let mut events = provider.chat_stream(ChatRequest::new(&history, &model));
-    // A model that says nothing — filtered, or all reasoning — is as unusable
-    // as one that errored, so it reads the same way.
+    let tools = if memorize {
+        vec![odyn_core::tools::save_memory_tool()]
+    } else {
+        Vec::new()
+    };
+    // A model that says nothing is as unusable as one that errored.
     let mut spoke = false;
-    while let Some(event) = events.next().await {
-        match event {
-            Ok(ChatEvent::TextDelta(delta)) => {
-                spoke = spoke || !delta.trim().is_empty();
-                lock(&shared.answer).push_str(&delta);
-                emit(&app, request_id, Body::Delta { text: delta });
+    let driven = odyn_core::tools::run_turn(
+        provider.as_ref(),
+        &model,
+        history,
+        &tools,
+        &brain_dir,
+        |event| {
+            match event {
+                TurnEvent::Delta(delta) => {
+                    spoke = spoke || !delta.trim().is_empty();
+                    lock(&shared.answer).push_str(delta);
+                    emit(
+                        &app,
+                        request_id,
+                        Body::Delta {
+                            text: delta.to_string(),
+                        },
+                    );
+                }
+                TurnEvent::Saved(slug) => emit(
+                    &app,
+                    request_id,
+                    Body::Saved {
+                        slug: slug.to_string(),
+                    },
+                ),
             }
-            Ok(ChatEvent::Done { usage }) => {
-                *lock(&shared.usage) = usage;
-                shared.finished.store(true, Ordering::Release);
-                emit(&app, request_id, finished(spoke, usage));
-                return;
-            }
-            Err(ChatError::Cancelled) => return,
-            Err(err) => {
-                emit(&app, request_id, unavailable(describe(&err)));
-                return;
-            }
+            Ok(())
+        },
+    )
+    .await;
+    match driven {
+        Ok(reply) => {
+            *lock(&shared.usage) = reply.usage;
+            shared.finished.store(true, Ordering::Release);
+            emit(&app, request_id, finished(spoke, reply.usage));
         }
+        Err(TurnError::Chat(ChatError::Cancelled)) => {}
+        Err(TurnError::Chat(err)) => emit(&app, request_id, unavailable(describe(&err))),
+        Err(TurnError::Write(err)) => emit(&app, request_id, unavailable(err.to_string())),
     }
-    shared.finished.store(true, Ordering::Release);
-    emit(&app, request_id, finished(spoke, None));
 }
 
-/// The end of a stream: an answer, or the report that there wasn't one.
 fn finished(spoke: bool, usage: Option<Usage>) -> Body {
     if spoke {
         Body::Done {
@@ -535,8 +548,6 @@ pub fn spotlight_status(status: State<'_, HotkeyStatus>) -> Option<String> {
         .clone()
 }
 
-/// What the spotlight footer renders: the current target, whether its key is
-/// missing, and everything pickable.
 #[derive(serde::Serialize)]
 pub struct SpotTarget {
     provider: String,
@@ -570,7 +581,7 @@ pub async fn spotlight_target(state: State<'_, AppState>) -> Result<SpotTarget, 
             .or_else(|| ready.config.default_model(&provider).map(str::to_string))
             .unwrap_or_default();
         // A key problem is an intake prompt, not an error: the ask field turns
-        // into the place the key is pasted — asklight's one-time setup.
+        // into the place the key is pasted.
         let needs_key = matches!(
             ready.registry.provider(&provider),
             Err(ConfigError::MissingApiKey { .. } | ConfigError::BadKeyEnvName { .. })
@@ -587,8 +598,6 @@ pub async fn spotlight_target(state: State<'_, AppState>) -> Result<SpotTarget, 
     for (name, config) in configured {
         let kind = config.kind();
         let models = match &config {
-            // What the endpoint itself lists, not just the one model the file
-            // happens to name.
             ProviderConfig::OpenAiCompat {
                 base_url,
                 default_model,
@@ -603,7 +612,6 @@ pub async fn spotlight_target(state: State<'_, AppState>) -> Result<SpotTarget, 
             .into_iter()
             .map(|model| model.name)
             .collect(),
-            // The models Ollama actually has installed, not a guess.
             ProviderConfig::Ollama {
                 base_url,
                 keep_alive,
@@ -624,8 +632,8 @@ pub async fn spotlight_target(state: State<'_, AppState>) -> Result<SpotTarget, 
     })
 }
 
-/// The pick lands in `[spotlight]` in the file, so the CLI, the next launch
-/// and this panel all agree on what spotlight talks to.
+/// The pick lands in `[spotlight]` in the file, so the CLI, the next launch and
+/// this panel all agree.
 #[tauri::command]
 pub async fn spotlight_set_target(
     state: State<'_, AppState>,
@@ -640,8 +648,7 @@ pub async fn spotlight_set_target(
     state.reload()
 }
 
-/// asklight's one-time setup with odyn's storage: the key pasted into the ask
-/// field becomes the target provider's `api_key` in `odyn.toml`.
+/// The key pasted into the ask field becomes the target provider's `api_key`.
 #[tauri::command]
 pub async fn spotlight_save_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
     let key = key.trim().to_string();

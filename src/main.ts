@@ -41,7 +41,7 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 // DESIGN.md §9. Every shortcut is a modifier combo, so a focused input can
-// never swallow one and none of them need a focus guard.
+// never swallow one and none need a focus guard.
 const MAC = navigator.platform.startsWith("Mac");
 const SHORTCUTS: Record<string, () => void> = {
   k: () => void spotlightToggle(),
@@ -74,7 +74,6 @@ watchStream();
 void load();
 void refreshStatus();
 
-// A memory added from the CLI shows up when the window comes back.
 window.addEventListener("focus", refreshLedger);
 
 // A promoted spotlight exchange lands here as a ready-made conversation.

@@ -335,9 +335,21 @@ odyn chat`),
           "walk over the brain graph — links strongest, then embedding similarity, " +
           "then co-use — and the final order blends how well a note matches the " +
           "question with how firmly it sits in the walked neighborhood of notes that " +
-          "do. Notes are kept in that order until the next would push past " +
-          "`cap_tokens` (default 1200). A bare `/brain` recalls on the conversation " +
-          "history alone.",
+          "do. Notes scoring under `min_relevance` of the best match are dropped, at " +
+          "most `top_k` are kept, and the rest fill in rank order until the next " +
+          "would push past `cap_tokens` (default 1200). A bare `/brain` recalls on " +
+          "the conversation history alone.",
+      ),
+      sub("saving — the /memory mention"),
+      p(
+        "Mention `/memory` and the model is handed one tool for that turn: " +
+          "`save_memory`, which writes a new `.md` note into the brain folder. Tell " +
+          "it what to keep — or ask it to save what you just worked out — and it " +
+          "distills the note, links related memories with `[[slug]]`, and confirms. " +
+          "A `✎ saved {slug}` trace appears under the reply; the note is a plain " +
+          "file you can edit or delete like any other. The model never touches the " +
+          "brain without this mention, and saving needs a model that supports tool " +
+          "calls (llama3.2 does).",
       ),
       sub("the ledger"),
       p(
@@ -346,7 +358,7 @@ odyn chat`),
       ),
       pre("CONTEXT   ◈ cern-trip 61   ◈ espresso-order 48        109 / 1,200 tk"),
       list([
-        "Without `/brain` in the draft it reads `mention /brain to recall memory` — and that is the truth: the send injects nothing.",
+        "Without a trigger in the draft it reads `/brain recalls memory · /memory saves one` — and that is the truth: the send injects nothing.",
         "With `/brain`, one teal `◈ {slug} {tk}` chip per recalled note, token counts dim.",
         "Past five chips the tail collapses to `◈ +3 more 122`; clicking expands it.",
         "Hovering a chip shows that note's full text.",

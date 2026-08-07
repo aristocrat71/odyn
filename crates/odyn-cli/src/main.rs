@@ -116,8 +116,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, Failure> {
         .map_err(|err| Failure::run(format!("could not start the async runtime: {err}")))
 }
 
-/// In `--json` mode the error is the stream's last event, so consumers of the
-/// ndjson never have to read stderr.
+/// In `--json` mode the error is the stream's last event, not stderr.
 fn report(failure: &Failure, json: bool) {
     if json {
         let event = serde_json::json!({"type": "error", "message": failure.message});

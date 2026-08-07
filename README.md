@@ -148,15 +148,18 @@ The brain is a folder of markdown notes — one file per memory, the file stem
 as its id, `[[wikilinks]]` as authored graph edges, YAML frontmatter tolerated
 but never injected. Nothing is injected unless a message mentions `/brain`;
 that turn's question then seeds a walk over the brain graph and the
-best-ranked notes are injected up to the cap. A stale `[memory]` section from
-brain v1 still parses and is ignored.
+best-ranked relevant notes are injected up to the cap. A message mentioning
+`/memory` hands the model a `save_memory` tool for that turn, so "remember
+this" becomes a new note. A stale `[memory]` section from brain v1 still
+parses and is ignored.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | data dir | Where the note files live. `~` expands; point it at an Obsidian vault if you like. |
 | `model` | `bge-small` | Which model embeds notes and questions — see below. Changing it re-embeds the whole folder. |
-| `top_k` | `6` | How many nearest notes seed the recall walk. Must be at least 1. |
+| `top_k` | `6` | How many nearest notes seed the recall walk, and the most one recall may inject. Must be at least 1. |
 | `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
+| `min_relevance` | `0.3` | Only notes scoring at least this share of the best match are injected. `0` keeps everything the cap allows. |
 | `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
 Token counts are a chars/4 approximation, in the config and in every ledger
@@ -270,8 +273,10 @@ Ctrl-D leaves.
 | `/quit` | Leave. |
 
 `/brain` is not a command: a message mentioning it — `/brain what did we
-decide about tokio?` — is a chat message with recall on. The token is
-stripped before the model or the transcript sees it.
+decide about tokio?` — is a chat message with recall on. Likewise `/memory`:
+that turn the model is handed a `save_memory` tool and asked to distill what
+you told it into a new note in the brain folder (the model must support tool
+calls). Both tokens are stripped before the model or the transcript sees them.
 
 ### `odyn config`
 

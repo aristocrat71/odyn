@@ -23,29 +23,30 @@ const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 const SLACK = 24;
 // Chips shown before the tail collapses to `◈ +N more`.
 const CHIP_LIMIT = 5;
-// The only thing a message completes to. It is a mention, not a command: it
-// can sit anywhere in the line, so the word under the caret is what is matched.
-const MENTION = "/brain";
+// Mentions can sit anywhere in a line, so the word under the caret is matched.
+const MENTIONS = ["/brain", "/memory"];
 
-// The composer outlives every redraw: a draft being typed, its height and the
-// caret in it survive a render that has nothing to do with the chat.
+// The composer outlives every redraw: draft, height and caret all survive.
 const input = el("textarea", "composer-input");
 input.rows = 1;
 input.placeholder = "Message Odyn…";
 const hint = ghost(input, "composer-ask");
+const drawMention = (): void => {
+  for (const mention of MENTIONS) if (hint.draw(mention)) return;
+};
 input.addEventListener("input", () => {
   grow();
-  hint.draw(MENTION);
+  drawMention();
   schedulePreview(input.value);
 });
 input.addEventListener("keydown", (event) => {
-  // ⇥ takes the completion, → takes it only from the end of the draft. Neither
-  // is swallowed when there is nothing to complete: ⇥ still moves focus on.
+  // → takes the completion only from the end of the draft. Neither key is
+  // swallowed with nothing to complete: ⇥ still moves focus on.
   const end = input.selectionStart === input.value.length;
   if (event.key === "Tab" || (event.key === "ArrowRight" && end)) {
-    if (!accept(input, MENTION)) return;
+    if (MENTIONS.find((mention) => accept(input, mention)) === undefined) return;
     event.preventDefault();
-    hint.draw(MENTION);
+    drawMention();
     // The mention is what turns recall on, so the CONTEXT line answers for it.
     schedulePreview(input.value);
     return;
@@ -96,22 +97,19 @@ export function renderChat(): HTMLElement {
   return column;
 }
 
-// The ledger refreshes when the window regains focus, so a memory added from
-// the CLI shows up without a restart.
+// Refreshed on window focus: a memory added from the CLI needs no restart.
 export function refreshLedger(): void {
   if (state.selected !== null) void refreshPreview(input.value);
 }
 
-// The home input hands its non-command text over as the draft: nothing is
-// sent on someone's behalf, but nothing has to be typed twice either.
+// The home input hands its non-command text over as a draft.
 export function prefillComposer(text: string): void {
   input.value = text;
-  hint.draw(MENTION);
+  drawMention();
   schedulePreview(text);
 }
 
-// One message is redrawn per delta; the transcript follows only if it was
-// already showing the end.
+// One message per delta; the transcript follows only if already at the end.
 function patch(): void {
   const stream = state.stream;
   if (answer === null || transcript === null || stream === null) return;
@@ -137,6 +135,7 @@ function streamed(stream: Stream): HTMLElement {
   if (stream.error === "") answer = text;
   else block.append(failed(stream.error));
   if (stream.used.length > 0) block.append(trace(stream.used));
+  if (stream.saved.length > 0) block.append(saved(stream.saved));
   return block;
 }
 
@@ -150,13 +149,21 @@ function trace(used: string[]): HTMLElement {
   return line;
 }
 
+function saved(slugs: string[]): HTMLElement {
+  const line = el("div", "trace");
+  line.append(el("span", "trace-mark", "✎"), " saved");
+  for (const slug of slugs) {
+    line.append(" ", el("span", "trace-id", slug));
+  }
+  return line;
+}
+
 function speaker(role: Message["role"]): HTMLElement {
   return el("div", "speaker", role === "user" ? "MITUL" : "ᛟ ODYN");
 }
 
 function fill(node: HTMLElement, content: string, cursor: boolean): void {
-  // Nothing has streamed yet: a lone cursor under the speaker reads as idle,
-  // so the wait line stands in until the first token replaces it.
+  // A lone cursor under the speaker reads as idle; the wait line stands in.
   if (cursor && content === "") {
     node.replaceChildren(waiting());
     return;
@@ -182,8 +189,6 @@ function failed(message: string): HTMLElement {
 }
 
 // DESIGN.md §5.1: one mono status line fused to the top of the composer.
-// Nothing is injected without a /brain mention, and the line says so instead
-// of sitting empty.
 function ledger(): HTMLElement {
   const line = el("div", "ledger");
   line.append(el("span", "ledger-label", "CONTEXT"));
@@ -194,7 +199,7 @@ function ledger(): HTMLElement {
   const preview = state.ledger.preview;
   if (preview === null) return line;
   if (!preview.active) {
-    line.append(el("span", "ledger-note", "mention /brain to recall memory"));
+    line.append(el("span", "ledger-note", "/brain recalls memory · /memory saves one"));
     return line;
   }
   if (preview.memories.length === 0) {
@@ -227,8 +232,6 @@ function ledger(): HTMLElement {
 
 const count = (tokens: number): string => tokens.toLocaleString("en-US");
 
-// Spotlight's shape: one surface holding the ledger, the field, and a footer
-// of everything the next message is sent with.
 function composer(): HTMLElement {
   const box = el("div", "composer");
   const field = el("div", "composer-field");
@@ -262,7 +265,7 @@ function submit(): void {
   if (text === "" || streaming()) return;
   input.value = "";
   grow();
-  hint.draw(MENTION);
+  drawMention();
   void send(text);
 }
 

@@ -16,7 +16,6 @@ mod memory;
 
 pub use memory::{Injection, Memory, MemorySort, MemoryStats, NotePlan};
 
-/// Note and sync helpers shared by other modules' tests.
 #[cfg(test)]
 pub(crate) use memory::tests as memory_tests;
 
@@ -75,10 +74,9 @@ CREATE TABLE graph_cache (
     r"
 ALTER TABLE conversations ADD COLUMN brevity TEXT;
 ",
-    // The brain v2 wipe: memories move out of SQLite into a folder of
-    // markdown notes, and these tables become an index derived from it —
-    // one flat pool, no tiers, slugs for ids, wikilinks as edges. Old rows
-    // are dropped, not migrated (authorized: dev-stage data).
+    // The brain v2 wipe: memories move to a folder of markdown notes and these
+    // tables become an index derived from it. Old rows are dropped, not
+    // migrated (authorized: dev-stage data).
     r"
 DROP TABLE injections;
 DROP TABLE memories;
@@ -107,10 +105,8 @@ CREATE TABLE injections (
     injected_at     INTEGER NOT NULL
 );
 ",
-    // Which embedding model built the index. The vector table's width is that
-    // model's, so it can no longer be declared here — `ensure_index` owns it
-    // from now on. The row states what migration 5 created, so an existing
-    // index stays valid and nothing re-embeds just for this upgrade.
+    // Which embedding model built the index. The seed row states what migration
+    // 5 created, so an existing index stays valid and nothing re-embeds.
     r"
 CREATE TABLE brain_meta (
     id    INTEGER PRIMARY KEY CHECK (id = 1),
@@ -202,8 +198,8 @@ impl Storage {
         Self::open(default_db_path()?)
     }
 
-    /// Opens the default database only if it already exists: reading memory
-    /// must not conjure a database on a machine that never saved anything.
+    /// Opens the default database only if it exists: reading memory must not
+    /// conjure a database on a machine that never saved anything.
     pub fn open_default_existing() -> Result<Option<Self>, StorageError> {
         let path = default_db_path()?;
         if !path.exists() {
@@ -245,8 +241,8 @@ impl Storage {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// The most recently active conversation — the head of `list_conversations`,
-    /// read on its own so a new chat can open on the last one's target.
+    /// The head of `list_conversations`, read on its own so a new chat can open
+    /// on the last one's provider and model.
     pub fn latest_conversation(&self) -> Result<Option<Conversation>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, model, provider, created_at, updated_at, brevity
@@ -326,10 +322,8 @@ impl Storage {
         })
     }
 
-    /// A question and the answer to it are one write: a failure between the two
-    /// rows would leave a question on disk that nothing ever answers. The
-    /// memories injected for the question commit in the same transaction, so a
-    /// saved turn can never disagree with its recorded injections.
+    /// A question, its answer and the memories injected for it are one write, so
+    /// a saved turn can never disagree with its recorded injections.
     pub fn append_turn(
         &self,
         conversation_id: i64,
@@ -371,11 +365,9 @@ impl Storage {
     }
 }
 
-/// The version that decides what to run is read under the write lock: two
-/// processes opening the same fresh file would otherwise both read 0 and both
-/// run the DDL, and the loser would fail on a table the winner just created.
-/// The unlocked read before it keeps an up-to-date database from taking the
-/// write lock at all, so opening never queues behind someone else's write.
+/// The deciding version is read under the write lock: two processes opening the
+/// same fresh file would otherwise both read 0 and both run the DDL. The
+/// unlocked read before it keeps an up-to-date database off the write lock.
 fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
     if user_version(conn)? >= MIGRATIONS.len() as i64 {
         return Ok(());
@@ -503,6 +495,7 @@ impl ToSql for Role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         }))
     }
 }
@@ -513,6 +506,7 @@ impl FromSql for Role {
             "system" => Ok(Role::System),
             "user" => Ok(Role::User),
             "assistant" => Ok(Role::Assistant),
+            "tool" => Ok(Role::Tool),
             other => Err(FromSqlError::Other(
                 format!("unknown message role {other:?}").into(),
             )),
@@ -525,8 +519,8 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// A unique directory under the system temp dir, removed on drop — the
-    /// `-wal` and `-shm` sidecars go with it.
+    /// A unique directory under the system temp dir, removed on drop with its
+    /// `-wal` and `-shm` sidecars.
     pub(crate) struct TempDir(pub(crate) PathBuf);
 
     impl TempDir {
@@ -588,8 +582,6 @@ pub(crate) mod tests {
         assert_eq!(reopened.list_conversations().expect("list"), vec![created]);
     }
 
-    /// The brain v2 migration wipes the old tiered memory rows but must keep
-    /// every conversation, and the reborn index must accept notes.
     #[test]
     fn upgrading_a_tiered_database_wipes_memories_and_keeps_conversations() {
         odyn_vec::register().expect("register sqlite-vec");
@@ -627,14 +619,11 @@ pub(crate) mod tests {
             0,
             "old tiered rows are wiped, not migrated"
         );
-        // The reborn index accepts a note under the new schema.
         let notes = vec![memory::tests::note("fresh", "works after the wipe")];
         memory::tests::sync_spread(&storage, &notes);
         assert_eq!(storage.list_memories().expect("list")[0].slug, "fresh");
     }
 
-    /// Two processes reaching a fresh file at once: the one that loses the race
-    /// must find the migration applied, not run it again.
     #[test]
     fn opening_while_another_connection_migrates_waits_for_it() {
         // The raw holder connection runs the vec0 DDL of migration 2 itself.
@@ -723,7 +712,6 @@ pub(crate) mod tests {
         assert_eq!(messages, vec![question, answer]);
         assert!(storage.messages(second.id).expect("messages").is_empty());
 
-        // Appending bumped `updated_at` to now, well past the backdated value.
         let listed = storage.list_conversations().expect("list after append");
         assert_eq!(
             listed.iter().map(|row| row.id).collect::<Vec<_>>(),
@@ -741,7 +729,6 @@ pub(crate) mod tests {
         assert!(storage.list_conversations().expect("list").is_empty());
     }
 
-    /// What a new chat inherits its provider and model from.
     #[test]
     fn the_latest_conversation_is_the_head_of_the_list() {
         let dir = TempDir::new("latest");
@@ -763,7 +750,6 @@ pub(crate) mod tests {
             Some(("deepseek".to_string(), "deepseek-chat".to_string()))
         );
 
-        // Answering in the older one makes it the one a new chat follows.
         storage
             .append_message(older.id, Role::User, "hi", None, None)
             .expect("append");
@@ -791,8 +777,7 @@ pub(crate) mod tests {
                 &[],
             )
             .expect("append a turn");
-        // A count SQLite cannot hold fails the answer, with the question of the
-        // same turn already inserted.
+        // A count SQLite cannot hold fails the answer, after its question row.
         storage
             .append_turn(
                 conversation.id,

@@ -8,8 +8,7 @@ import {
   type PickerMenu,
 } from "./state";
 
-// Two menus, not one. A single list of every provider's whole catalog is long
-// enough that the model you want is never on screen when it opens.
+// Two menus, not one: a combined catalog is too long to find a model in.
 const provider = control("provider");
 const model = control("model");
 
@@ -57,8 +56,7 @@ export function renderPickers(current: Conversation): HTMLElement[] {
   return [provider.wrap, model.wrap];
 }
 
-// The trigger and the menu outlive every redraw, so a click that opens the
-// menu and the redraw that follows do not race each other.
+// Trigger and menu outlive redraws, so a click and its redraw do not race.
 function control(which: "provider" | "model") {
   const wrap = el("div", "picker-wrap");
   const trigger = el("button", "picker");
@@ -75,9 +73,8 @@ function control(which: "provider" | "model") {
   return { wrap, trigger, menu };
 }
 
-// Every configured provider, whether it answers or not: one that is down is
-// labelled `offline` rather than hidden, because a menu that hides what is
-// down explains nothing.
+// A provider that is down is labelled `offline` rather than hidden: a menu
+// that hides what is down explains nothing.
 function fillProviders(current: Conversation): void {
   if (state.picker.loading) {
     provider.menu.replaceChildren(el("div", "picker-loading", "checking providers…"));
@@ -99,7 +96,6 @@ function fillProviders(current: Conversation): void {
   );
 }
 
-// Only the current provider's models, which is the whole point of the split.
 function fillModels(current: Conversation): void {
   if (state.picker.loading) {
     model.menu.replaceChildren(el("div", "picker-loading", "checking providers…"));
@@ -137,8 +133,8 @@ function fillModels(current: Conversation): void {
   );
 }
 
-// Switching provider keeps the model when the new one serves it too, so a
-// change of endpoint is not silently a change of model.
+// The model is kept when the new provider serves it too, so a change of
+// endpoint is not silently a change of model.
 function switchProvider(group: ProviderGroup, current: Conversation): Promise<void> {
   const names = group.models.map((row) => row.name);
   const kept = names.includes(current.model) ? current.model : (names[0] ?? "");
@@ -152,8 +148,7 @@ function step(delta: number): void {
   choices[active]?.focus();
 }
 
-// Ollama reports on-disk bytes and rounds them decimally in its own `list`, so
-// the number here matches the one the terminal shows.
+// Ollama rounds decimally in its own `list`, so this matches the terminal.
 function size(bytes: number): string {
   if (bytes < 1e9) return `${Math.round(bytes / 1e6)}MB`;
   return `${(bytes / 1e9).toFixed(1)}GB`;

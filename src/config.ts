@@ -46,8 +46,7 @@ function toml(text: string): HTMLElement {
   return block;
 }
 
-// Line-based on purpose: v1 config has no multi-line values, and a real parser
-// would buy nothing a comment, a header and `key = value` do not already give.
+// Line-based on purpose: v1 config has no multi-line values.
 function scan(line: string): Token[] {
   const start = line.trimStart();
   if (start.startsWith("#")) return [{ kind: "comment", text: line }];
@@ -69,8 +68,7 @@ function scan(line: string): Token[] {
   ];
 }
 
-// Quotes and `#` only mean what they mean outside a string: `keep_alive = "5m"
-// # "0" unloads it` is one string, then a comment that contains none.
+// Quotes and `#` only mean what they mean outside a string.
 function value(text: string): Token[] {
   const tokens: Token[] = [];
   let plain = "";

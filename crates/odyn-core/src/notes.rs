@@ -1,10 +1,8 @@
 //! The brain's source of truth: a folder of markdown files.
 //!
-//! One memory is one `.md` note. The file's stem is its identity (its slug),
-//! the text is the memory, `[[wikilinks]]` are deliberate edges in the brain
-//! graph, and YAML frontmatter is tolerated but never embedded or injected.
-//! SQLite holds only an index derived from these files — anything that
-//! disagrees with the folder is the index's bug, never the folder's.
+//! One memory is one `.md` note, its file stem the slug, `[[wikilinks]]` its
+//! edges; YAML frontmatter is tolerated but never embedded. The folder is the
+//! truth — anything in the SQLite index that disagrees is the index's bug.
 
 use std::path::{Path, PathBuf};
 
@@ -39,11 +37,9 @@ pub enum NotesError {
     EmptyNote,
 }
 
-/// One memory as its file holds it, ready for the index: frontmatter already
-/// stripped, links already parsed, hash and token count already computed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteFile {
-    /// The file stem, case preserved — what every surface shows.
+    /// The file stem, case preserved.
     pub slug: String,
     /// The note without frontmatter, edge-trimmed. Never empty.
     pub content: String,
@@ -56,8 +52,7 @@ pub struct NoteFile {
     pub tokens: i64,
 }
 
-/// The brain folder: the configured path (`~` expanded), or `brain/` in the
-/// platform data dir, next to the database.
+/// The configured path (`~` expanded), or `brain/` in the platform data dir.
 pub fn brain_dir(configured: Option<&Path>) -> Result<PathBuf, NotesError> {
     if let Some(path) = configured {
         return Ok(expand_home(path));
@@ -66,9 +61,8 @@ pub fn brain_dir(configured: Option<&Path>) -> Result<PathBuf, NotesError> {
     Ok(dirs.data_dir().join(BRAIN_DIR_NAME))
 }
 
-/// Every note in the folder, sorted by slug so callers see a stable order.
-/// A folder that does not exist yet is an empty brain, not an error. Files
-/// whose content is empty once frontmatter is stripped are not memories.
+/// Every note in the folder, sorted by slug. A missing folder is an empty brain,
+/// not an error; a file empty once frontmatter is stripped is not a memory.
 pub fn read_notes(dir: &Path) -> Result<Vec<NoteFile>, NotesError> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -106,9 +100,40 @@ pub fn read_notes(dir: &Path) -> Result<Vec<NoteFile>, NotesError> {
     Ok(notes)
 }
 
-/// Writes a new note, deriving a slug from the content unless one is given.
-/// A derived slug dodges collisions with a numeric suffix; an explicit name
-/// that already exists is an error — overwriting is `update_note`'s job.
+/// The slugs in the folder, sorted. A missing folder is an empty brain.
+pub fn list_slugs(dir: &Path) -> Result<Vec<String>, NotesError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(NotesError::Read {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let mut slugs = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|source| NotesError::Read {
+                path: dir.to_path_buf(),
+                source,
+            })?
+            .path();
+        if !is_note(&path) {
+            continue;
+        }
+        if let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) {
+            slugs.push(slug.to_string());
+        }
+    }
+    slugs.sort();
+    Ok(slugs)
+}
+
+/// Writes a new note, deriving a slug from the content unless one is given. A
+/// derived slug dodges collisions with a numeric suffix; an explicit name that
+/// already exists is an error — overwriting is `update_note`'s job.
 pub fn write_note(dir: &Path, name: Option<&str>, content: &str) -> Result<String, NotesError> {
     let content = content.trim();
     if content.is_empty() {
@@ -135,8 +160,8 @@ pub fn write_note(dir: &Path, name: Option<&str>, content: &str) -> Result<Strin
     Ok(slug)
 }
 
-/// Replaces a note's content, keeping its slug — and with it, its index id,
-/// its hit history and its edges by name.
+/// Replaces a note's content, keeping its slug and so its index id, hit history
+/// and edges by name.
 pub fn update_note(dir: &Path, slug: &str, content: &str) -> Result<(), NotesError> {
     let content = content.trim();
     if content.is_empty() {
@@ -162,7 +187,6 @@ pub fn note_path(dir: &Path, slug: &str) -> PathBuf {
 
 fn write(dir: &Path, slug: &str, content: &str) -> Result<(), NotesError> {
     let path = note_path(dir, slug);
-    // A trailing newline, as every well-behaved text tool leaves one.
     std::fs::write(&path, format!("{content}\n"))
         .map_err(|source| NotesError::Write { path, source })
 }
@@ -189,8 +213,8 @@ fn parse_note(slug: &str, raw: &str) -> Option<NoteFile> {
     })
 }
 
-/// YAML frontmatter — a leading `---` line closed by another — is metadata
-/// for other tools; the memory is what follows.
+/// YAML frontmatter (a leading `---` line closed by another) is metadata for
+/// other tools; the memory is what follows.
 fn strip_frontmatter(raw: &str) -> &str {
     let mut lines = raw.split_inclusive('\n');
     let Some(first) = lines.next() else {
@@ -238,8 +262,8 @@ fn parse_links(content: &str) -> Vec<String> {
     links
 }
 
-/// FNV-1a, 64-bit: deterministic across runs and toolchains forever, which is
-/// exactly what a stored change-detection hash must be.
+/// FNV-1a, 64-bit: deterministic across runs and toolchains, as a stored
+/// change-detection hash must be.
 fn fnv1a(content: &str) -> i64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in content.bytes() {
@@ -253,7 +277,7 @@ pub(crate) fn approx_tokens(content: &str) -> i64 {
     content.chars().count().div_ceil(4) as i64
 }
 
-/// The first line's words, kebab-cased and capped — a readable id, not a title.
+/// The first line's words, kebab-cased and capped: a readable id, not a title.
 fn slugify_content(content: &str) -> String {
     let first_line = content.lines().next().unwrap_or_default();
     let slug = slugify(first_line);

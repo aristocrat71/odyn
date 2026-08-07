@@ -1,17 +1,9 @@
-//! Text embeddings for memory retrieval, from any of three backends.
+//! Text embeddings for memory retrieval, from three backends: bundled
+//! fastembed, the local Ollama daemon, or a configured OpenAI-compatible
+//! endpoint — the last being the only one that sends note text off the machine.
 //!
-//! - **builtin** — fastembed, bundled and local. Zero setup, works offline,
-//!   downloads its weights once into the data dir.
-//! - **ollama** — the local daemon's embedding models, over `/api/embed`.
-//!   Also local and offline, and nothing has to be loaded into this process.
-//! - **a configured provider** — an OpenAI-compatible `/embeddings` route.
-//!   This one sends note text off the machine; callers are expected to say so
-//!   out loud, because it is the only backend that does.
-//!
-//! Vectors from two different models are not comparable — not even at equal
-//! width — so changing the model means re-embedding every note. `storage`
-//! enforces that; this module only produces the vectors, and reports how wide
-//! they are by [`probe_dim`] rather than by a hard-coded table.
+//! Vectors from two models are not comparable even at equal width, so changing
+//! the model means re-embedding every note; `storage` enforces that.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -24,22 +16,17 @@ use crate::config::{Config, ProviderConfig};
 
 const MODEL_CACHE_DIR_NAME: &str = "models";
 
-/// The input window Odyn asks for. fastembed's own default is one constant for
-/// every model, which would clip a long-context model down to a short model's
-/// window; asking for the largest on offer and letting `load_tokenizer` clamp
-/// it to each model's real `model_max_length` is what makes an 8k model
-/// actually see 8k. Text past a model's window is truncated before embedding,
-/// so it cannot influence whether that note is recalled.
+/// Asking for the largest window on offer lets each model clamp to its own
+/// maximum; fastembed's default would clip a long-context model to a short
+/// one's. Text past that window is truncated and cannot affect recall.
 const REQUESTED_INPUT_TOKENS: usize = 8192;
 
-/// What [`probe_dim`] embeds to learn a model's width. Any short text does.
 const PROBE_TEXT: &str = "odyn";
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Short, friendly spellings for the models people actually reach for. These
-/// are aliases, never a gate: any name fastembed knows is accepted too, so no
-/// model is excluded by this table being short.
+/// Friendly spellings for common models. Aliases, never a gate: any name
+/// fastembed knows is accepted too.
 const ALIASES: &[(&str, EmbeddingModel)] = &[
     ("bge-small", EmbeddingModel::BGESmallENV15),
     ("bge-base", EmbeddingModel::BGEBaseENV15),
@@ -76,17 +63,14 @@ pub enum EmbedError {
 /// Where an embedding model runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmbedBackend {
-    /// fastembed, in this process.
     Builtin,
-    /// The local Ollama daemon.
     Ollama,
-    /// A configured OpenAI-compatible provider, by name. The only backend
-    /// that sends note text off this machine.
+    /// The only backend that sends note text off this machine.
     Provider(String),
 }
 
-/// Which model embeds this brain: a backend and a name within it. Written in
-/// `odyn.toml` as `bge-small`, `ollama:nomic-embed-text` or `zen:some-model`.
+/// Written in `odyn.toml` as `bge-small`, `ollama:nomic-embed-text` or
+/// `zen:some-model`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedModel {
     pub backend: EmbedBackend,
@@ -103,9 +87,8 @@ impl Default for EmbedModel {
 }
 
 impl EmbedModel {
-    /// Never fails: an unresolvable name is a brain that cannot embed, which
-    /// is reported when something tries to — not a config file that refuses
-    /// to load and takes chat down with it.
+    /// Never fails: an unresolvable name is reported when something tries to
+    /// embed, not by refusing to load the config.
     pub fn parse(text: &str) -> Self {
         let text = text.trim();
         match text.split_once(':') {
@@ -141,7 +124,7 @@ impl EmbedModel {
         matches!(self.backend, EmbedBackend::Provider(_))
     }
 
-    /// The width, when it is knowable without asking the model — fastembed
+    /// The width when it is knowable without asking the model: fastembed
     /// publishes it, an HTTP endpoint does not.
     pub fn known_dim(&self) -> Option<usize> {
         match self.backend {
@@ -192,9 +175,8 @@ pub struct EmbedOption {
     pub remote: bool,
 }
 
-/// Every fastembed model, by its friendly alias where one exists and by
-/// fastembed's own canonical name otherwise — the whole catalog, not a
-/// hand-picked slice of it.
+/// Every fastembed model, by alias where one exists and by fastembed's own name
+/// otherwise.
 pub fn builtin_catalog() -> Vec<EmbedOption> {
     let mut options: Vec<EmbedOption> = TextEmbedding::list_supported_models()
         .into_iter()
@@ -216,7 +198,6 @@ fn catalog_entry(model: EmbeddingModel) -> Option<fastembed::ModelInfo<Embedding
         .find(|info| info.model == model)
 }
 
-/// The alias if this model has one, else fastembed's own canonical spelling.
 fn builtin_name(model: EmbeddingModel) -> String {
     ALIASES
         .iter()
@@ -235,14 +216,12 @@ fn builtin_model(name: &str) -> Option<EmbeddingModel> {
 }
 
 pub trait Embedder {
-    /// One vector per input text, in input order, each as wide as the model
-    /// that produced it.
+    /// One vector per input text, in input order.
     fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError>;
 }
 
-/// How wide this embedder's vectors are, learned by embedding one short text.
-/// The only way to know for a backend that does not publish a catalog, and
-/// cheap enough to be the uniform answer for all of them.
+/// How wide this embedder's vectors are, learned by embedding one short text —
+/// the only way to know for a backend that publishes no catalog.
 pub fn probe_dim(embedder: &mut dyn Embedder) -> Result<usize, EmbedError> {
     let vector = embedder
         .embed(&[PROBE_TEXT])?
@@ -257,9 +236,8 @@ pub fn probe_dim(embedder: &mut dyn Embedder) -> Result<usize, EmbedError> {
     Ok(vector.len())
 }
 
-/// Builds the embedder `model` names, reading endpoints and keys from
-/// `config`. Nothing is downloaded or connected to until this is called, so
-/// an unused model costs nothing.
+/// Builds the embedder `model` names, reading endpoints and keys from `config`.
+/// Nothing is downloaded or connected to before this is called.
 pub fn load_embedder(config: &Config, model: &EmbedModel) -> Result<Box<dyn Embedder>, EmbedError> {
     match &model.backend {
         EmbedBackend::Builtin => {
@@ -290,8 +268,8 @@ pub fn load_embedder(config: &Config, model: &EmbedModel) -> Result<Box<dyn Embe
     }
 }
 
-/// The configured Ollama endpoint, or the default. `ollama:` means the local
-/// daemon whichever entry in the file happens to describe it.
+/// The configured Ollama endpoint, or the default: `ollama:` means the local
+/// daemon whichever entry in the file describes it.
 fn ollama_base_url(config: &Config) -> String {
     config
         .providers
@@ -328,8 +306,8 @@ impl Embedder for FastEmbedder {
     }
 }
 
-/// Ollama's `/api/embed` and the OpenAI-compatible `/embeddings` differ only
-/// in the shape of one request and one response, so they share a client.
+/// Ollama's `/api/embed` and the OpenAI `/embeddings` differ only in response
+/// shape, so they share a client.
 enum Wire {
     Ollama,
     OpenAi,
@@ -377,7 +355,6 @@ fn client() -> Result<reqwest::Client, EmbedError> {
 
 impl Embedder for HttpEmbedder {
     fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
-        // Both wires take the same request; they differ in what comes back.
         let body = serde_json::json!({ "model": self.model, "input": texts });
         let mut request = self.client.post(&self.url).json(&body);
         if let Some(key) = &self.api_key {
@@ -460,11 +437,9 @@ fn numbers(value: &serde_json::Value) -> Option<Vec<f32>> {
         .collect()
 }
 
-/// Runs one request to completion from a synchronous caller. The whole brain
-/// pipeline is sync — it runs inside `spawn_blocking` in the app and inside a
-/// current-thread runtime in the CLI — and starting a runtime inside either
-/// would panic, so the work goes to a scratch thread that has no runtime of
-/// its own to collide with.
+/// Runs one request to completion from a synchronous caller. The brain pipeline
+/// is sync but may already sit inside a runtime, where starting another would
+/// panic — so the work goes to a scratch thread with no runtime of its own.
 fn blocking<T, F>(future: F) -> Result<T, EmbedError>
 where
     F: std::future::Future<Output = Result<T, EmbedError>> + Send,
@@ -484,14 +459,12 @@ where
     })
 }
 
-/// Where model files live: the platform data dir, next to the database.
 pub fn embedding_cache_dir() -> Result<PathBuf, EmbedError> {
     let dirs = directories::ProjectDirs::from("", "", "odyn").ok_or(EmbedError::NoDataDir)?;
     Ok(dirs.data_dir().join(MODEL_CACHE_DIR_NAME))
 }
 
-/// Deterministic stand-in for tests: an LCG seeded from the text's bytes,
-/// L2-normalized like the real model's output.
+/// Deterministic stand-in: an LCG seeded from the text's bytes, L2-normalized.
 #[cfg(test)]
 pub(crate) struct FakeEmbedder;
 
@@ -560,7 +533,6 @@ mod tests {
         assert!(!builtin.is_remote());
         assert_eq!(builtin.known_dim(), Some(384));
 
-        // Ollama tags carry their own colon; only the first one splits.
         let ollama = EmbedModel::parse("ollama:nomic-embed-text:latest");
         assert_eq!(ollama.backend, EmbedBackend::Ollama);
         assert_eq!(ollama.name, "nomic-embed-text:latest");
@@ -573,7 +545,6 @@ mod tests {
         assert_eq!(remote.name, "text-embedding-3-small");
         assert!(remote.is_remote(), "note text would leave the machine");
 
-        // Every form survives a round trip through its config spelling.
         for text in [
             "bge-small",
             "ollama:nomic-embed-text:latest",
@@ -584,14 +555,12 @@ mod tests {
         assert_eq!(EmbedModel::default().canonical(), "bge-small");
     }
 
-    /// The aliases are a convenience, not the list of what is allowed.
     #[test]
     fn any_fastembed_name_resolves_even_without_an_alias() {
         for (alias, model) in ALIASES {
             assert_eq!(builtin_model(alias).expect("alias"), *model);
             assert_eq!(builtin_name(model.clone()), *alias);
         }
-        // Named the way fastembed spells it, with no alias in sight.
         let canonical = EmbeddingModel::AllMiniLML12V2.to_string();
         assert!(!ALIASES.iter().any(|(alias, _)| *alias == canonical));
         assert_eq!(
@@ -601,7 +570,6 @@ mod tests {
         assert!(builtin_model("bge-enormous").is_none());
     }
 
-    /// The picker offers the whole catalog, aliased where that reads better.
     #[test]
     fn the_catalog_covers_every_model_fastembed_ships() {
         let catalog = builtin_catalog();
@@ -620,7 +588,7 @@ mod tests {
         }
     }
 
-    /// Downloads the real model on first run. Run manually:
+    /// Run manually:
     /// `cargo test -p odyn-core live_fastembed_smoke -- --ignored --nocapture`
     #[test]
     #[ignore = "downloads the bge model from the network"]
@@ -639,7 +607,7 @@ mod tests {
         assert!(cosine(&embeddings[0], &embeddings[1]) > cosine(&embeddings[0], &embeddings[2]));
     }
 
-    /// Talks to a local Ollama. Run manually with the daemon up:
+    /// Run manually with the daemon up:
     /// `cargo test -p odyn-core live_ollama_embed -- --ignored --nocapture`
     #[test]
     #[ignore = "needs a running ollama with an embedding model pulled"]

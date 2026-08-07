@@ -109,7 +109,7 @@ fn ollama_config(addr: SocketAddr) -> String {
     )
 }
 
-/// An OpenAI-compatible stream, split the way a server flushes it.
+/// Split the way a server flushes it.
 fn sse_frames() -> Vec<String> {
     vec![
         ": keep-alive\n\n".to_string(),
@@ -138,7 +138,6 @@ fn chunked_sse_response() -> Vec<Vec<u8>> {
     pieces
 }
 
-/// Answers `requests` requests with the canned stream, one at a time.
 fn spawn_provider(requests: usize) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
     let addr = listener.local_addr().expect("mock provider address");
@@ -463,9 +462,7 @@ fn spawn_capturing_provider() -> (SocketAddr, std::sync::mpsc::Receiver<String>)
     (addr, receiver)
 }
 
-/// The gate itself: notes on disk mean nothing without a `/brain` mention —
-/// no sync, no injection, no embedding model. (A synced note would need the
-/// real model, so this staying offline is itself the assertion.)
+/// Staying offline is itself the assertion: a sync would need the real model.
 #[test]
 fn without_a_brain_mention_notes_are_never_injected() {
     let dir = TempDir::new("gated");
@@ -491,9 +488,6 @@ fn without_a_brain_mention_notes_are_never_injected() {
     );
 }
 
-/// A `/brain` mention on an empty brain: the trigger is stripped from what
-/// the model and the transcript see, nothing is injected, nothing recorded,
-/// and the embedding model is never loaded.
 #[test]
 fn a_brain_mention_is_stripped_and_an_empty_brain_stays_silent() {
     let dir = TempDir::new("stripped");
@@ -570,9 +564,7 @@ fn show_context_json_is_an_event_on_the_stream() {
     );
 }
 
-/// The offline half of `mem`: paths, empty listings and file errors. Adding
-/// or editing a note embeds it, which needs the real model — covered by the
-/// core crate's unit tests instead.
+/// Adding or editing a note needs the real model; core's unit tests cover that.
 #[test]
 fn mem_path_list_and_rm_work_without_the_model() {
     let dir = TempDir::new("memcli");
@@ -635,4 +627,34 @@ fn the_brevity_flag_injects_the_style_directive() {
 
     let output = odyn(&dir, &["ask", "--brevity", "caveman", "2+2"], None);
     assert_eq!(code(&output), Some(2), "a bad level is a usage error");
+}
+
+/// The folder's slugs ride along as link targets, all without the embedding model.
+#[test]
+fn a_memory_mention_offers_the_tool_and_the_saving_section() {
+    let dir = TempDir::new("memorize");
+    let (addr, request) = spawn_capturing_provider();
+    dir.write_config(&dir.brain_dir(&openai_config(addr)));
+    let brain = dir.0.join("brain");
+    std::fs::create_dir_all(&brain).expect("create brain dir");
+    std::fs::write(brain.join("espresso.md"), "espresso notes\n").expect("write note");
+
+    let output = odyn(
+        &dir,
+        &["ask", "--show-context", "/memory I now drink flat whites"],
+        None,
+    );
+    assert_eq!(code(&output), Some(0), "{}", stderr(&output));
+    let shown = stderr(&output);
+    assert!(shown.contains("## Saving"), "{shown}");
+    assert!(shown.contains("Existing memories: espresso."), "{shown}");
+
+    let request = request.recv().expect("the provider saw the request");
+    assert!(request.contains(r#""tools""#), "{request}");
+    assert!(request.contains("save_memory"), "{request}");
+    assert!(request.contains("## Saving"), "{request}");
+    assert!(
+        !request.contains("/memory"),
+        "the trigger must not reach the model: {request}"
+    );
 }

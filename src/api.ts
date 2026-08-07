@@ -22,7 +22,7 @@ export type ConversationView = Conversation & {
 export type Message = {
   role: "system" | "user" | "assistant";
   content: string;
-  // Assistant rows: the note slugs injected for the question this answers.
+  // Assistant rows: the slugs injected for the question this answers.
   used: string[];
 };
 
@@ -31,6 +31,7 @@ export type Usage = { input_tokens: number; output_tokens: number };
 export type ChatEvent = { request_id: number } & (
   | { kind: "context"; used: string[]; tokens: number }
   | { kind: "delta"; text: string }
+  | { kind: "saved"; slug: string }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );
@@ -125,9 +126,7 @@ export type BrainOverview = {
   count: number;
   top_k: number;
   cap_tokens: number;
-  // The brain folder of .md notes, spelled out.
   path: string;
-  // What [brain] model names, exactly as the config spells it.
   model: string;
   // Whether that model sends note text off the machine.
   model_remote: boolean;
@@ -135,7 +134,6 @@ export type BrainOverview = {
   dim: number;
 };
 
-// One selectable embedding model.
 export type EmbedOption = {
   id: string;
   backend: "builtin" | "ollama" | "provider";

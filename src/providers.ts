@@ -14,8 +14,7 @@ import {
   state,
 } from "./state";
 
-// The open form outlives redraws, rebuilt only when what it edits changes: a
-// redraw must not eat a half-typed key.
+// The open form outlives redraws: one must not eat a half-typed key.
 let formBox: HTMLElement | null = null;
 let formFor: string | null | undefined;
 
@@ -113,10 +112,8 @@ function key(entry: ProviderEntry): HTMLElement {
 
 // ── connect ───────────────────────────────────────────────────────────────
 //
-// One field. The endpoint and the model list are already known for everything
-// in the catalog, so a key is the whole of what a person has that Odyn does
-// not. Built once and refilled in place: a redraw between the paste and the
-// click must not take the key with it.
+// Built once and refilled in place, so a redraw between the paste and the
+// click cannot take the key with it.
 
 const panel = el("div", "conn");
 const keyField = el("input", "conn-key");
@@ -136,8 +133,7 @@ keyField.spellcheck = false;
 defaultBox.type = "checkbox";
 defaultLabel.append(defaultBox, el("span", "conn-default-text", "use by default"));
 
-// A key that names its own provider aims the panel as it is typed; one that
-// names nobody leaves whatever tile was picked alone.
+// A pasted key that names its own provider aims the panel as it is typed.
 keyField.addEventListener("input", () => {
   const found = detect(keyField.value);
   if (found !== null) pickCatalogProvider(found.id);
@@ -165,14 +161,12 @@ keysLink.addEventListener("click", () => {
   panel.append(head, keyField, aim, tiles, foot, notice);
 }
 
-// Whether the box below is the user's answer or ours, so a redraw never
-// re-ticks what they just cleared.
+// The user's answer or ours, so a redraw never re-ticks what they cleared.
 let defaultTouched = false;
 defaultBox.addEventListener("change", () => (defaultTouched = true));
 
 function connectPanel(entries: ProviderEntry[]): HTMLElement {
-  // Nothing but a local Ollama yet: the first key is also the one that should
-  // answer by default, so the box starts ticked and the choice stays visible.
+  // Nothing but a local Ollama yet: the first key should answer by default.
   const first = entries.every((entry) => entry.kind === "ollama");
   if (first && !defaultTouched) defaultBox.checked = true;
   fill();
@@ -185,9 +179,8 @@ function picked(): CatalogItem | null {
   return catalog.find((item) => item.id === state.providers.pick) ?? null;
 }
 
-/// The provider a pasted key belongs to, by the longest prefix that matches.
-/// A shape half the industry issues belongs to nobody: guessing wrong costs
-/// more than the click it saves.
+/// The provider a pasted key belongs to, by longest matching prefix. A shape
+/// half the industry issues belongs to nobody.
 function detect(text: string): CatalogItem | null {
   const value = text.trim();
   if (value === "") return null;
@@ -241,8 +234,7 @@ function fill(): void {
 function tile(item: CatalogItem, chosen: CatalogItem | null): HTMLElement {
   const button = el("button", "conn-tile", item.label);
   if (item.id === chosen?.id) button.classList.add("on");
-  // Already in the file: connecting again is how a rotated key gets in, so the
-  // tile stays live and only says what it already is.
+  // Connecting again is how a rotated key gets in, so the tile stays live.
   if (item.configured) button.append(el("span", "conn-have", "●"));
   if (!item.needs_key) button.append(el("span", "conn-local", "local"));
   button.disabled = state.providers.connecting;
@@ -269,10 +261,8 @@ function submit(): void {
 function run(item: CatalogItem, apiKey: string): void {
   if (state.providers.connecting) return;
   void connectProvider(item.id, apiKey, defaultBox.checked).then(() => {
-    // The field empties only once the key it held has reached the config file:
-    // a key the endpoint refused stays where it is, to be fixed rather than
-    // found and pasted a second time, and a local endpoint that wanted no key
-    // has no business clearing one meant for somewhere else.
+    // The field empties only once the key has reached the config file: a key
+    // the endpoint refused stays put, to be fixed rather than pasted again.
     if (state.providers.connected === null) return;
     if (apiKey !== "") keyField.value = "";
     defaultBox.checked = false;
