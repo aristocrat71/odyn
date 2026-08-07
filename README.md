@@ -150,7 +150,9 @@ but never injected. Nothing is injected unless a message mentions `/brain`;
 that turn's question then seeds a walk over the brain graph and the
 best-ranked relevant notes are injected up to the cap. A message mentioning
 `/memory` hands the model a `save_memory` tool for that turn, so "remember
-this" becomes a new note. A stale `[memory]` section from brain v1 still
+this" becomes a new note; `/update-memory` hands it `update_memory` instead,
+so "this changed" rewrites the note it belongs to. One tool per mention —
+the save-or-update choice is yours, not the model's. A stale `[memory]` section from brain v1 still
 parses and is ignored.
 
 | Key | Default | Meaning |
@@ -276,9 +278,10 @@ Ctrl-D leaves.
 `/brain` is not a command: a message mentioning it — `/brain what did we
 decide about tokio?` — is a chat message with recall on. Likewise `/memory`:
 that turn the model is handed a `save_memory` tool and asked to distill what
-you told it into a new note in the brain folder (the model must support tool
-calls). A `/memory` turn also recalls the notes nearest your message, so the
-new note can `[[link]]` what already exists. Both tokens are stripped before
+you told it into a new note in the brain folder, and `/update-memory` hands it
+`update_memory` to rewrite the note a changed fact belongs to (the model must
+support tool calls). Both turns also recall the notes nearest your message, so
+the model sees what exists to `[[link]]` or rewrite. Both tokens are stripped before
 the model or the transcript sees them.
 
 ### `odyn config`

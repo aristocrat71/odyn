@@ -105,20 +105,17 @@ pub struct Reply {
     pub usage: Option<Usage>,
 }
 
-/// Drives one reply — several provider requests when the turn saves memories.
+/// Drives one reply — several provider requests when the turn touches memory.
 pub async fn stream_reply(
     provider: &dyn ChatProvider,
     model: &str,
     messages: Vec<Message>,
     config: &Config,
     memorize: bool,
+    update: bool,
     emit: impl FnMut(TurnEvent<'_>) -> std::io::Result<()>,
 ) -> Result<Reply, Failure> {
-    let tools = if memorize {
-        vec![tools::save_memory_tool()]
-    } else {
-        Vec::new()
-    };
+    let tools = tools::offered(memorize, update);
     let dir = notes::brain_dir(config.brain.path.as_deref())
         .map_err(|err| Failure::run(err.to_string()))?;
     let temperature = config.brain.save_temperature;
@@ -154,7 +151,7 @@ pub fn memory_context(
     brevity: Brevity,
 ) -> Option<InjectedContext> {
     let brain_config = &config.brain;
-    if ask.recall || ask.memorize {
+    if ask.recall || ask.memorize || ask.update {
         if let Some(storage) = storage {
             // The folder is the truth: recall reads the files as they are now.
             if let Err(err) = brain::sync(storage, brain_config, || {

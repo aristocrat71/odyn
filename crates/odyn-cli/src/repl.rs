@@ -49,12 +49,12 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
         }
         let _ = editor.add_history_entry(line);
 
-        // `/brain` and `/memory` look like commands but are chat messages, so
-        // they must never fall into the command parser.
+        // `/brain`, `/memory` and `/update-memory` look like commands but are
+        // chat messages, so they must never fall into the command parser.
         let ask = odyn_core::brain::parse_ask(line);
         if let Some(command) = line
             .strip_prefix('/')
-            .filter(|_| !ask.recall && !ask.memorize)
+            .filter(|_| !ask.recall && !ask.memorize && !ask.update)
         {
             let (name, arg) = match command.split_once(char::is_whitespace) {
                 Some((name, arg)) => (name, arg.trim()),
@@ -109,7 +109,8 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
                 },
                 _ => warn(&format!(
                     "unknown command: /{name}; try /model, /brevity, /new, /quit — \
-                     or mention /brain to recall memory, /memory to save one"
+                     or mention /brain to recall memory, /memory to save one, \
+                     /update-memory to rewrite one"
                 )),
             }
             continue;
@@ -128,6 +129,7 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
             outgoing,
             &session.config,
             ask.memorize,
+            ask.update,
             |event| {
                 match event {
                     TurnEvent::Delta(delta) => {
@@ -135,6 +137,7 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
                         write!(out, "{delta}")?;
                     }
                     TurnEvent::Saved(slug) => trace(&format!("saved {slug}")),
+                    TurnEvent::Updated(slug) => trace(&format!("updated {slug}")),
                 }
                 out.flush()
             },

@@ -20,6 +20,7 @@ type SpotEvent =
     }
   | { request_id: number; kind: "delta"; text: string }
   | { request_id: number; kind: "saved"; slug: string }
+  | { request_id: number; kind: "updated"; slug: string }
   | { request_id: number; kind: "done" }
   // `detail` present means `message` stands in for the provider's own words.
   | { request_id: number; kind: "error"; message: string; detail?: string };
@@ -64,6 +65,7 @@ const COMMANDS: Command[] = [
   { cmd: "/view-brain", view: "brain", hint: "what odyn remembers" },
   { cmd: "/brain", view: null, hint: "ask with what odyn remembers" },
   { cmd: "/memory", view: null, hint: "tell odyn something to remember" },
+  { cmd: "/update-memory", view: null, hint: "tell odyn something changed" },
 ];
 
 let current: number | null = null;
@@ -71,6 +73,7 @@ let answer = "";
 let streaming = false;
 let used: string[] = [];
 let saved: string[] = [];
+let updated: string[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
 let keyMode = false;
@@ -159,6 +162,9 @@ function draw(): void {
   if (!streaming && saved.length > 0) {
     results.append(trace("✎", "saved", saved, "saved"));
   }
+  if (!streaming && updated.length > 0) {
+    results.append(trace("✎", "updated", updated, "updated"));
+  }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
 
@@ -181,6 +187,7 @@ function clearScreen(): void {
   streaming = false;
   used = [];
   saved = [];
+  updated = [];
   forgetTraces();
   commandMode = false;
   cursor = 0;
@@ -280,6 +287,8 @@ async function ask(): Promise<void> {
   answer = "";
   streaming = true;
   used = [];
+  saved = [];
+  updated = [];
   forgetTraces();
   ledger.hidden = true;
   ledger.replaceChildren();
@@ -346,9 +355,9 @@ function cycleModel(): void {
   if (next !== undefined) void pick(target.provider, next);
 }
 
-// A `/brain` or `/memory` mention is a message, never a command.
+// A `/brain`, `/memory` or `/update-memory` mention is a message, never a command.
 const mentionAsk = (text: string): boolean =>
-  /(^|\s)\/(brain|memory)([\s.,;:!?]|$)/i.test(text);
+  /(^|\s)\/(brain|memory|update-memory)([\s.,;:!?]|$)/i.test(text);
 
 input.addEventListener("input", () => {
   if (!keyMode && input.value.startsWith("/") && !mentionAsk(input.value)) {
@@ -430,6 +439,8 @@ void listen<SpotEvent>("spotlight-event", (event) => {
     draw();
   } else if (data.kind === "saved") {
     saved.push(data.slug);
+  } else if (data.kind === "updated") {
+    updated.push(data.slug);
   } else if (data.kind === "done") {
     streaming = false;
     draw();

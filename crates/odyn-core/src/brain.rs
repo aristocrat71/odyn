@@ -19,6 +19,8 @@ use crate::storage::{Memory, Storage, StorageError};
 pub const TRIGGER: &str = "/brain";
 /// The mention that asks the model to save a memory this turn.
 pub const MEMORIZE: &str = "/memory";
+/// The mention that asks the model to rewrite a memory this turn.
+pub const UPDATE: &str = "/update-memory";
 
 /// Two turns of history join the retrieval query.
 const QUERY_MESSAGES: usize = 4;
@@ -52,44 +54,59 @@ pub struct Ask {
     pub recall: bool,
     /// Whether the model is handed `save_memory` this turn.
     pub memorize: bool,
+    /// Whether the model is handed `update_memory` this turn.
+    pub update: bool,
 }
 
-/// Finds a whitespace-delimited `/brain` or `/memory` anywhere in the message,
-/// case insensitively, tolerating trailing punctuation. Each token and the
-/// whitespace after it are removed; everything else stays byte-for-byte.
+/// Finds a whitespace-delimited `/brain`, `/memory` or `/update-memory`
+/// anywhere in the message, case insensitively, tolerating trailing
+/// punctuation. Each token and the whitespace after it are removed; everything
+/// else stays byte-for-byte.
 pub fn parse_ask(text: &str) -> Ask {
     let mut cleaned = String::with_capacity(text.len());
     let mut token = String::new();
     let mut recall = false;
     let mut memorize = false;
+    let mut update = false;
     let mut swallow_gap = false;
-    let flush =
-        |token: &mut String, cleaned: &mut String, recall: &mut bool, memorize: &mut bool| {
-            if token.is_empty() {
-                return false;
-            }
-            let trailer = token.trim_end_matches([',', '.', ';', ':', '!', '?']);
-            let flag = if trailer.eq_ignore_ascii_case(TRIGGER) {
-                Some(&mut *recall)
-            } else if trailer.eq_ignore_ascii_case(MEMORIZE) {
-                Some(&mut *memorize)
-            } else {
-                None
-            };
-            let dropped = flag.is_some();
-            if let Some(flag) = flag {
-                *flag = true;
-                // The sentence keeps its punctuation, not the token's letters.
-                cleaned.push_str(&token[trailer.len()..]);
-            } else {
-                cleaned.push_str(token);
-            }
-            token.clear();
-            dropped
+    let flush = |token: &mut String,
+                 cleaned: &mut String,
+                 recall: &mut bool,
+                 memorize: &mut bool,
+                 update: &mut bool| {
+        if token.is_empty() {
+            return false;
+        }
+        let trailer = token.trim_end_matches([',', '.', ';', ':', '!', '?']);
+        let flag = if trailer.eq_ignore_ascii_case(TRIGGER) {
+            Some(&mut *recall)
+        } else if trailer.eq_ignore_ascii_case(MEMORIZE) {
+            Some(&mut *memorize)
+        } else if trailer.eq_ignore_ascii_case(UPDATE) {
+            Some(&mut *update)
+        } else {
+            None
         };
+        let dropped = flag.is_some();
+        if let Some(flag) = flag {
+            *flag = true;
+            // The sentence keeps its punctuation, not the token's letters.
+            cleaned.push_str(&token[trailer.len()..]);
+        } else {
+            cleaned.push_str(token);
+        }
+        token.clear();
+        dropped
+    };
     for ch in text.chars() {
         if ch.is_whitespace() {
-            if flush(&mut token, &mut cleaned, &mut recall, &mut memorize) {
+            if flush(
+                &mut token,
+                &mut cleaned,
+                &mut recall,
+                &mut memorize,
+                &mut update,
+            ) {
                 swallow_gap = true;
             }
             if swallow_gap {
@@ -101,14 +118,21 @@ pub fn parse_ask(text: &str) -> Ask {
             token.push(ch);
         }
     }
-    flush(&mut token, &mut cleaned, &mut recall, &mut memorize);
+    flush(
+        &mut token,
+        &mut cleaned,
+        &mut recall,
+        &mut memorize,
+        &mut update,
+    );
     let cleaned = cleaned.trim().to_string();
-    if !recall && !memorize {
+    if !recall && !memorize && !update {
         return Ask {
             query: text.to_string(),
             message: text.to_string(),
             recall,
             memorize,
+            update,
         };
     }
     Ask {
@@ -120,6 +144,7 @@ pub fn parse_ask(text: &str) -> Ask {
         query: cleaned,
         recall,
         memorize,
+        update,
     }
 }
 
@@ -148,7 +173,7 @@ impl InjectedContext {
 pub fn empty_context(brevity: Brevity) -> InjectedContext {
     InjectedContext {
         memories: Vec::new(),
-        system_message: render(&[], brevity, None),
+        system_message: render(&[], brevity, false, false),
         tokens: 0,
     }
 }
@@ -244,10 +269,11 @@ pub fn embed_notes(
 }
 
 /// Assembles the context for one turn: recalled notes for `/brain` — and for
-/// `/memory`, which recalls too so the model can see what it should link —
-/// the saving section, and the style directive always. `history` excludes the
-/// ask. A turn with no triggers never loads the embedder. `None` storage
-/// means no database: saving still works, recall has nothing to read.
+/// `/memory` and `/update-memory`, which recall too so the model can see what
+/// it should link or rewrite — the saving or updating section, and the style
+/// directive always. `history` excludes the ask. A turn with no triggers
+/// never loads the embedder. `None` storage means no database: saving still
+/// works, recall has nothing to read.
 pub fn build_context<F>(
     storage: Option<&Storage>,
     config: &BrainConfig,
@@ -259,16 +285,9 @@ pub fn build_context<F>(
 where
     F: FnOnce() -> Result<Box<dyn Embedder>, EmbedError>,
 {
-    let saving = if ask.memorize {
-        Some(notes::list_slugs(&notes::brain_dir(
-            config.path.as_deref(),
-        )?)?)
-    } else {
-        None
-    };
     let mut kept = Vec::new();
     let mut tokens = 0;
-    if let Some(storage) = storage.filter(|_| ask.recall || ask.memorize) {
+    if let Some(storage) = storage.filter(|_| ask.recall || ask.memorize || ask.update) {
         let count = storage.count_memories()?;
         if count > 0 {
             let query = query_text(history, &ask.query);
@@ -289,7 +308,7 @@ where
         }
     }
     Ok(InjectedContext {
-        system_message: render(&kept, brevity, saving.as_deref()),
+        system_message: render(&kept, brevity, ask.memorize, ask.update),
         memories: kept,
         tokens,
     })
@@ -429,18 +448,24 @@ that you were told earlier. [[name]] links one memory to another. Use what \
 is relevant and ignore the rest.";
 
 const SAVING: &str = "The user asked you to save a memory. Call save_memory \
-with the fact to remember, distilled to a short third-person note. Name the \
-user if a memory gives their name, and write every mention of a person or \
-topic that already has a memory as a [[slug]] link — for example: \
-\"[[anna]] left her car keys on the desk.\" The memories above show what \
-exists. Then confirm in one line.";
+with the fact distilled to a short third-person note. Never save a second \
+note about a topic a memory above already covers — if that fact changed, \
+answer that /update-memory rewrites it instead. Name the user if a memory \
+gives their name, and write every mention of a person or topic that already \
+has a memory as a [[slug]] link — for example: \"[[anna]] left her car keys \
+on the desk.\" Then confirm in one line without repeating the other memories.";
 
-/// Link targets offered to the model; past this, a link can dangle — harmless.
-const SAVING_SLUGS: usize = 50;
+const UPDATING: &str = "The user asked you to update a memory. Pick the \
+memory above that is about this fact, rewrite that whole note with the \
+change applied, and call update_memory with its exact slug and the rewritten \
+note. Keep [[slug]] links that still hold. If none of the memories above is \
+about this fact, say so in one line and call nothing. Otherwise confirm in \
+one line without repeating the other memories.";
 
 /// The injected system message, golden-tested byte for byte: `## Memories`
-/// (omitted when empty), `## Saving` on a `/memory` turn, then `## Style`.
-fn render(memories: &[Memory], brevity: Brevity, saving: Option<&[String]>) -> String {
+/// (omitted when empty), `## Saving` on a `/memory` turn, `## Updating` on an
+/// `/update-memory` turn, then `## Style`.
+fn render(memories: &[Memory], brevity: Brevity, saving: bool, updating: bool) -> String {
     let mut sections = Vec::new();
     if !memories.is_empty() {
         let mut lines = vec![format!("## Memories\n{PREAMBLE}")];
@@ -451,17 +476,11 @@ fn render(memories: &[Memory], brevity: Brevity, saving: Option<&[String]>) -> S
         );
         sections.push(lines.join("\n"));
     }
-    if let Some(slugs) = saving {
-        let mut section = format!("## Saving\n{SAVING}");
-        if !slugs.is_empty() {
-            let listed: Vec<&str> = slugs
-                .iter()
-                .take(SAVING_SLUGS)
-                .map(String::as_str)
-                .collect();
-            section.push_str(&format!("\nExisting memories: {}.", listed.join(", ")));
-        }
-        sections.push(section);
+    if saving {
+        sections.push(format!("## Saving\n{SAVING}"));
+    }
+    if updating {
+        sections.push(format!("## Updating\n{UPDATING}"));
     }
     if let Some(directive) = brevity.directive() {
         sections.push(format!("## Style\n{directive}"));
@@ -546,6 +565,7 @@ mod tests {
             query: message.to_string(),
             recall: true,
             memorize: false,
+            update: false,
         }
     }
 
@@ -568,6 +588,7 @@ mod tests {
                 query: "my brainstorm about /brains".to_string(),
                 recall: false,
                 memorize: false,
+                update: false,
             }
         );
         // Only the trigger: recall runs on history alone, message stays non-empty.
@@ -578,6 +599,7 @@ mod tests {
                 query: String::new(),
                 recall: true,
                 memorize: false,
+                update: false,
             }
         );
     }
@@ -591,6 +613,7 @@ mod tests {
                 query: "I take espresso, no sugar".to_string(),
                 recall: false,
                 memorize: true,
+                update: false,
             }
         );
         assert_eq!(
@@ -600,6 +623,7 @@ mod tests {
                 query: "update what you know about coffee".to_string(),
                 recall: true,
                 memorize: true,
+                update: false,
             }
         );
         assert_eq!(
@@ -609,6 +633,32 @@ mod tests {
                 query: String::new(),
                 recall: false,
                 memorize: true,
+                update: false,
+            }
+        );
+    }
+
+    /// `/update-memory` is its own token: it never trips the `/memory` flag.
+    #[test]
+    fn the_update_trigger_parses_and_never_reads_as_memorize() {
+        assert_eq!(
+            parse_ask("/update-memory my car keys are on the fridge"),
+            Ask {
+                message: "my car keys are on the fridge".to_string(),
+                query: "my car keys are on the fridge".to_string(),
+                recall: false,
+                memorize: false,
+                update: true,
+            }
+        );
+        assert_eq!(
+            parse_ask("the keys moved, /UPDATE-MEMORY."),
+            Ask {
+                message: "the keys moved, .".to_string(),
+                query: "the keys moved, .".to_string(),
+                recall: false,
+                memorize: false,
+                update: true,
             }
         );
     }
@@ -631,22 +681,50 @@ mod tests {
             query: "remember this".to_string(),
             recall: false,
             memorize: true,
+            update: false,
         };
         let context =
             build_context(Some(&storage), &config, &[], &ask, Brevity::Off, never).expect("build");
         assert!(context.is_empty());
-        assert_eq!(
-            context.system_message,
-            format!("## Saving\n{SAVING}\nExisting memories: birthday, espresso.")
-        );
+        // Unindexed notes stay out of the prompt: recall is the only window
+        // into what exists, never a folder listing for the model to recite.
+        assert_eq!(context.system_message, format!("## Saving\n{SAVING}"));
 
-        // An empty folder still explains the task, without a slug line.
+        // An empty folder still explains the task.
         let empty = BrainConfig {
             path: Some(brain.0.join("missing")),
             ..BrainConfig::default()
         };
         let context = build_context(None, &empty, &[], &ask, Brevity::Off, never).expect("build");
         assert_eq!(context.system_message, format!("## Saving\n{SAVING}"));
+    }
+
+    /// An update turn recalls like a save turn and gets its own section — the
+    /// recalled notes are the only slugs it can rewrite.
+    #[test]
+    fn an_update_turn_recalls_and_gets_the_updating_section() {
+        let (_dir, storage) = seeded("updating");
+        let ask = Ask {
+            message: "the keys moved to the fridge".to_string(),
+            query: "the keys moved to the fridge".to_string(),
+            recall: false,
+            memorize: false,
+            update: true,
+        };
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(!context.is_empty(), "an update must see what it can rewrite");
+        assert!(context
+            .system_message
+            .contains("## Updating\nThe user asked you to update a memory."));
+        assert!(!context.system_message.contains("## Saving"));
     }
 
     /// The linking fix: a save is informed. `/memory` alone recalls the notes
@@ -667,6 +745,7 @@ mod tests {
             query: "remember the cern talk".to_string(),
             recall: false,
             memorize: true,
+            update: false,
         };
         let context = build_context(
             Some(&storage),
@@ -682,9 +761,6 @@ mod tests {
         assert!(context
             .system_message
             .contains("## Saving\nThe user asked you to save a memory."));
-        assert!(context
-            .system_message
-            .contains("Existing memories: cern-trip."));
     }
 
     #[test]

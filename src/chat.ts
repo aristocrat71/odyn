@@ -21,7 +21,7 @@ const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 // How far from the end still counts as reading the end of the stream.
 const SLACK = 24;
 // Mentions can sit anywhere in a line, so the word under the caret is matched.
-const MENTIONS = ["/brain", "/memory"];
+const MENTIONS = ["/brain", "/memory", "/update-memory"];
 
 // The composer outlives every redraw: draft, height and caret all survive.
 const input = el("textarea", "composer-input");
@@ -139,6 +139,9 @@ function streamed(stream: Stream): HTMLElement {
   if (stream.saved.length > 0) {
     block.append(trace("✎", "saved", stream.saved, "stream-saved"));
   }
+  if (stream.updated.length > 0) {
+    block.append(trace("✎", "updated", stream.updated, "stream-updated"));
+  }
   return block;
 }
 
@@ -184,7 +187,13 @@ function ledger(): HTMLElement {
   const preview = state.ledger.preview;
   if (preview === null) return line;
   if (!preview.active) {
-    line.append(el("span", "ledger-note", "/brain recalls memory · /memory saves one"));
+    line.append(
+      el(
+        "span",
+        "ledger-note",
+        "/brain recalls memory · /memory saves one · /update-memory rewrites one",
+      ),
+    );
     return line;
   }
   if (preview.memories.length === 0) {

@@ -342,18 +342,21 @@ odyn chat`),
           "would push past `cap_tokens` (default 1200). A bare `/brain` recalls on " +
           "the conversation history alone.",
       ),
-      sub("saving — the /memory mention"),
+      sub("saving and updating — /memory and /update-memory"),
       p(
         "Mention `/memory` and the model is handed one tool for that turn: " +
-          "`save_memory`, which writes a new `.md` note into the brain folder. The " +
-          "turn also recalls the notes nearest your message — that is how the model " +
-          "knows what `[[slug]]` links to write. Tell it what to keep — or ask it to " +
-          "save what you just worked out — and it distills the note, links related " +
-          "memories, and confirms. " +
-          "A `✎ saved {slug}` trace appears under the reply; the note is a plain " +
-          "file you can edit or delete like any other. The model never touches the " +
-          "brain without this mention, and saving needs a model that supports tool " +
-          "calls (llama3.2 does).",
+          "`save_memory`, which writes a new `.md` note into the brain folder. " +
+          "Mention `/update-memory` instead and it gets `update_memory`, which " +
+          "rewrites the matching note in place — same slug, same graph edges, new " +
+          "fact. One tool per mention, on purpose: a small model asked to choose " +
+          "between saving and updating picks wrong, so the choice stays with you. " +
+          "Either turn also recalls the notes nearest your message — that is how " +
+          "the model knows what `[[slug]]` links to write, or which note your " +
+          "change belongs to. " +
+          "A `✎ saved {slug}` or `✎ updated {slug}` trace appears under the reply; " +
+          "the note is a plain file you can edit or delete like any other. The " +
+          "model never touches the brain without these mentions, and both need a " +
+          "model that supports tool calls (llama3.2 does).",
       ),
       sub("the ledger"),
       p(

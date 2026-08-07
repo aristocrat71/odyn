@@ -66,7 +66,8 @@ input.addEventListener("keydown", (event) => {
     run(chosen);
     return;
   }
-  // Not a command: `/brain <question>` and `/memory <fact>` are messages.
+  // Not a command: `/brain <question>`, `/memory <fact>` and
+  // `/update-memory <change>` are messages.
   if (text !== "" && (!text.startsWith("/") || mentionAsk(text))) {
     prefillComposer(text);
     input.value = "";
@@ -77,7 +78,7 @@ input.addEventListener("keydown", (event) => {
 
 // A bare `/brain` opens the brain view; with text after it, it is a message.
 const mentionAsk = (text: string): boolean =>
-  /(^|\s)\/(brain|memory)([\s.,;:!?]|$)/i.test(text);
+  /(^|\s)\/(brain|memory|update-memory)([\s.,;:!?]|$)/i.test(text);
 
 export function renderHome(): HTMLElement {
   const view = el("div", "home");

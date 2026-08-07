@@ -1,8 +1,10 @@
 //! The tool loop: one user turn that may span several provider requests.
 //!
-//! Tools are offered only when the message asked for them (`/memory`), and the
-//! only one is `save_memory`. The index is not touched here — the folder is the
-//! truth, and the next recall or preview syncs it.
+//! Tools are offered only when the message asked for them: `/memory` earns
+//! `save_memory`, `/update-memory` earns `update_memory`. One tool per
+//! trigger — small models misroute a save-or-update choice, so the user makes
+//! it. The index is not touched here — the folder is the truth, and the next
+//! recall or preview syncs it.
 
 use std::path::Path;
 
@@ -14,6 +16,7 @@ use crate::chat::{
 use crate::notes::{self, NotesError};
 
 pub const SAVE_MEMORY: &str = "save_memory";
+pub const UPDATE_MEMORY: &str = "update_memory";
 
 /// A model that keeps asking for tools is looping, not working.
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -30,6 +33,7 @@ pub enum TurnError {
 pub enum TurnEvent<'a> {
     Delta(&'a str),
     Saved(&'a str),
+    Updated(&'a str),
 }
 
 pub struct TurnReply {
@@ -37,12 +41,17 @@ pub struct TurnReply {
     pub usage: Option<Usage>,
     /// Slugs of the notes saved this turn, in save order.
     pub saved: Vec<String>,
+    /// Slugs of the notes rewritten this turn, in call order.
+    pub updated: Vec<String>,
 }
 
 pub fn save_memory_tool() -> ToolDef {
     ToolDef {
         name: SAVE_MEMORY.to_string(),
-        description: "Save one new memory to the user's personal notes.".to_string(),
+        description: "Save one new memory to the user's personal notes. Only \
+                      for a fact no memory covers yet — never a second note \
+                      about a topic that already has one."
+            .to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -53,10 +62,48 @@ pub fn save_memory_tool() -> ToolDef {
                 },
                 "slug": {
                     "type": "string",
-                    "description": "Optional short kebab-case name for the note."
+                    "description": "Optional short kebab-case name for the note's \
+                                    subject, never its current value: car-keys, \
+                                    not car-keys-on-desk."
                 }
             },
             "required": ["content"]
+        }),
+    }
+}
+
+/// The tools a turn's mentions earn. Update leads when both are offered: a
+/// misrouted update errors and self-corrects, a misrouted save duplicates.
+pub fn offered(memorize: bool, update: bool) -> Vec<ToolDef> {
+    let mut tools = Vec::new();
+    if update {
+        tools.push(update_memory_tool());
+    }
+    if memorize {
+        tools.push(save_memory_tool());
+    }
+    tools
+}
+
+pub fn update_memory_tool() -> ToolDef {
+    ToolDef {
+        name: UPDATE_MEMORY.to_string(),
+        description: "Rewrite one existing memory whose fact changed.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "slug": {
+                    "type": "string",
+                    "description": "The memory to rewrite — its exact slug from \
+                                    the ### heading above."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The whole replacement note; it overwrites \
+                                    the old content."
+                }
+            },
+            "required": ["slug", "content"]
         }),
     }
 }
@@ -78,6 +125,7 @@ pub async fn run_turn(
     let mut text = String::new();
     let mut usage: Option<Usage> = None;
     let mut saved = Vec::new();
+    let mut updated = Vec::new();
     for _ in 0..=MAX_TOOL_ROUNDS {
         let mut round_text = String::new();
         let mut calls = Vec::new();
@@ -108,48 +156,84 @@ pub async fn run_turn(
         }
         messages.push(Message::tool_request(round_text, calls.clone()));
         for call in calls {
-            let (result, slug) = run_tool(brain_dir, &call);
-            if let Some(slug) = slug {
-                emit(TurnEvent::Saved(&slug)).map_err(TurnError::Write)?;
-                saved.push(slug);
+            let (result, written) = run_tool(brain_dir, &call);
+            match written {
+                Some(Written::Saved(slug)) => {
+                    emit(TurnEvent::Saved(&slug)).map_err(TurnError::Write)?;
+                    saved.push(slug);
+                }
+                Some(Written::Updated(slug)) => {
+                    emit(TurnEvent::Updated(&slug)).map_err(TurnError::Write)?;
+                    updated.push(slug);
+                }
+                None => {}
             }
             messages.push(Message::tool_result(call, result));
         }
     }
-    Ok(TurnReply { text, usage, saved })
+    Ok(TurnReply {
+        text,
+        usage,
+        saved,
+        updated,
+    })
+}
+
+/// What a call did to the folder, for the trace events.
+enum Written {
+    Saved(String),
+    Updated(String),
 }
 
 /// Answers the call with a result the model can read; a bad call gets its error
 /// the same way, never a failed turn.
-fn run_tool(brain_dir: &Path, call: &ToolCall) -> (String, Option<String>) {
-    if call.name != SAVE_MEMORY {
-        return (format!("error: no tool named `{}`", call.name), None);
+fn run_tool(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
+    match call.name.as_str() {
+        SAVE_MEMORY => save(brain_dir, call),
+        UPDATE_MEMORY => update(brain_dir, call),
+        other => (format!("error: no tool named `{other}`"), None),
     }
-    let Some(content) = call
-        .arguments
-        .get("content")
-        .and_then(serde_json::Value::as_str)
-        .filter(|content| !content.trim().is_empty())
-    else {
+}
+
+fn save(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
+    let Some(content) = text_arg(call, "content") else {
         return (
             "error: save_memory needs a non-empty string `content`".to_string(),
             None,
         );
     };
-    let slug = call
-        .arguments
-        .get("slug")
-        .and_then(serde_json::Value::as_str)
-        .filter(|slug| !slug.trim().is_empty());
-    let written = match notes::write_note(brain_dir, slug, content) {
+    let written = match notes::write_note(brain_dir, text_arg(call, "slug"), content) {
         // A taken name derives a new slug rather than overwriting a note.
         Err(NotesError::Exists(_)) => notes::write_note(brain_dir, None, content),
         written => written,
     };
     match written {
-        Ok(slug) => (format!("saved as {slug}"), Some(slug)),
+        Ok(slug) => (format!("saved as {slug}"), Some(Written::Saved(slug))),
         Err(err) => (format!("error: {err}"), None),
     }
+}
+
+fn update(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
+    let (Some(slug), Some(content)) = (text_arg(call, "slug"), text_arg(call, "content")) else {
+        return (
+            "error: update_memory needs non-empty strings `slug` and `content`".to_string(),
+            None,
+        );
+    };
+    match notes::update_note(brain_dir, slug, content) {
+        Ok(()) => (
+            format!("updated {slug}"),
+            Some(Written::Updated(slug.to_string())),
+        ),
+        Err(err) => (format!("error: {err}"), None),
+    }
+}
+
+fn text_arg<'a>(call: &'a ToolCall, name: &str) -> Option<&'a str> {
+    call.arguments
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn add_usage(total: Option<Usage>, reported: Option<Usage>) -> Option<Usage> {
@@ -239,11 +323,21 @@ mod tests {
     }
 
     fn call(arguments: serde_json::Value) -> ToolCall {
+        named_call(SAVE_MEMORY, arguments)
+    }
+
+    fn named_call(name: &str, arguments: serde_json::Value) -> ToolCall {
         ToolCall {
             id: "call_1".to_string(),
-            name: SAVE_MEMORY.to_string(),
+            name: name.to_string(),
             arguments,
         }
+    }
+
+    fn slug_of(written: Option<Written>) -> Option<String> {
+        written.map(|written| match written {
+            Written::Saved(slug) | Written::Updated(slug) => slug,
+        })
     }
 
     #[test]
@@ -270,6 +364,7 @@ mod tests {
                 seen.push(match event {
                     TurnEvent::Delta(delta) => format!("delta:{delta}"),
                     TurnEvent::Saved(slug) => format!("saved:{slug}"),
+                    TurnEvent::Updated(slug) => format!("updated:{slug}"),
                 });
                 Ok(())
             },
@@ -278,6 +373,7 @@ mod tests {
 
         assert_eq!(reply.text, "Saved.");
         assert_eq!(reply.saved, vec!["espresso".to_string()]);
+        assert!(reply.updated.is_empty());
         assert_eq!(
             reply.usage,
             Some(Usage {
@@ -342,16 +438,76 @@ mod tests {
     fn a_taken_slug_falls_back_to_a_derived_one() {
         let dir = TempDir::new("taken");
         notes::write_note(&dir.0, Some("espresso"), "already here").expect("seed");
-        let (result, slug) = run_tool(
+        let (result, written) = run_tool(
             &dir.0,
             &call(serde_json::json!({"content": "Fresh note.", "slug": "espresso"})),
         );
-        assert_eq!(slug.as_deref(), Some("fresh-note"));
+        assert_eq!(slug_of(written).as_deref(), Some("fresh-note"));
         assert_eq!(result, "saved as fresh-note");
         assert_eq!(
             std::fs::read_to_string(dir.0.join("espresso.md")).expect("kept"),
             "already here\n"
         );
+    }
+
+    #[test]
+    fn an_update_call_rewrites_the_note_in_place() {
+        let dir = TempDir::new("update");
+        notes::write_note(&dir.0, Some("car-keys"), "Car keys are on the desk.").expect("seed");
+        let asked = named_call(
+            UPDATE_MEMORY,
+            serde_json::json!({"slug": "car-keys", "content": "Car keys are above the fridge."}),
+        );
+        let provider = Scripted::new(vec![
+            vec![Ok(ChatEvent::ToolCall(asked.clone())), done()],
+            vec![Ok(ChatEvent::TextDelta("Updated.".to_string())), done()],
+        ]);
+        let mut seen = Vec::new();
+        let reply = block_on(run_turn(
+            &provider,
+            "llama3.2:3b",
+            vec![Message::new(Role::User, "my keys moved")],
+            &[save_memory_tool(), update_memory_tool()],
+            &dir.0,
+            0.3,
+            |event| {
+                seen.push(match event {
+                    TurnEvent::Delta(delta) => format!("delta:{delta}"),
+                    TurnEvent::Saved(slug) => format!("saved:{slug}"),
+                    TurnEvent::Updated(slug) => format!("updated:{slug}"),
+                });
+                Ok(())
+            },
+        ))
+        .expect("turn");
+
+        assert!(reply.saved.is_empty());
+        assert_eq!(reply.updated, vec!["car-keys".to_string()]);
+        assert_eq!(seen, vec!["updated:car-keys", "delta:Updated."]);
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("car-keys.md")).expect("note"),
+            "Car keys are above the fridge.\n"
+        );
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(
+            requests[1].0[2],
+            Message::tool_result(asked, "updated car-keys")
+        );
+    }
+
+    #[test]
+    fn an_update_of_a_missing_note_answers_with_an_error() {
+        let dir = TempDir::new("update-missing");
+        let (result, written) = run_tool(
+            &dir.0,
+            &named_call(
+                UPDATE_MEMORY,
+                serde_json::json!({"slug": "nowhere", "content": "anything"}),
+            ),
+        );
+        assert!(slug_of(written).is_none());
+        assert!(result.starts_with("error:"), "{result}");
+        assert_eq!(std::fs::read_dir(&dir.0).expect("dir").count(), 0);
     }
 
     #[test]

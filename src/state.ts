@@ -26,6 +26,7 @@ export type Stream = {
   // Note slugs the backend injected for this reply.
   used: string[];
   saved: string[];
+  updated: string[];
 };
 
 // The backend's refusal when a conversation has no model; picking one clears it.
@@ -302,6 +303,7 @@ async function start(prompt: string, retry: boolean): Promise<void> {
     error: "",
     used: [],
     saved: [],
+    updated: [],
   };
   state.stream = stream;
   render();
@@ -342,6 +344,11 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   if (event.kind === "saved") {
     stream.saved.push(event.slug);
+    render();
+    return;
+  }
+  if (event.kind === "updated") {
+    stream.updated.push(event.slug);
     render();
     return;
   }

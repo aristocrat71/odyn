@@ -480,6 +480,7 @@ async fn run(
         ),
     };
     let memorize = ask.memorize;
+    let update = ask.update;
     let mut history = vec![Message::new(Role::User, ask.message.clone())];
     if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
         *lock(&shared.injected) = context.memory_ids();
@@ -504,11 +505,7 @@ async fn run(
             history.insert(0, Message::new(Role::System, context.system_message));
         }
     }
-    let tools = if memorize {
-        vec![odyn_core::tools::save_memory_tool()]
-    } else {
-        Vec::new()
-    };
+    let tools = odyn_core::tools::offered(memorize, update);
     // A model that says nothing is as unusable as one that errored.
     let mut spoke = false;
     let driven = odyn_core::tools::run_turn(
@@ -535,6 +532,13 @@ async fn run(
                     &app,
                     request_id,
                     Body::Saved {
+                        slug: slug.to_string(),
+                    },
+                ),
+                TurnEvent::Updated(slug) => emit(
+                    &app,
+                    request_id,
+                    Body::Updated {
                         slug: slug.to_string(),
                     },
                 ),

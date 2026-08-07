@@ -629,15 +629,16 @@ fn the_brevity_flag_injects_the_style_directive() {
     assert_eq!(code(&output), Some(2), "a bad level is a usage error");
 }
 
-/// The folder's slugs ride along as link targets, all without the embedding model.
+/// Each mention earns exactly its own tool and section, all without the
+/// embedding model.
 #[test]
-fn a_memory_mention_offers_the_tool_and_the_saving_section() {
+fn a_memory_mention_offers_the_save_tool_and_the_saving_section() {
     let dir = TempDir::new("memorize");
     let (addr, request) = spawn_capturing_provider();
     dir.write_config(&dir.brain_dir(&openai_config(addr)));
 
     // The brain folder stays empty: `/memory` recalls, and a synced note would
-    // need the real embedding model. Slug listing is covered in core.
+    // need the real embedding model.
     let output = odyn(
         &dir,
         &["ask", "--show-context", "/memory I now drink flat whites"],
@@ -650,9 +651,46 @@ fn a_memory_mention_offers_the_tool_and_the_saving_section() {
     let request = request.recv().expect("the provider saw the request");
     assert!(request.contains(r#""tools""#), "{request}");
     assert!(request.contains("save_memory"), "{request}");
+    // The prompt names the `/update-memory` mention; the tool must be absent.
+    assert!(
+        !request.contains("update_memory"),
+        "a save turn offers only the save tool: {request}"
+    );
     assert!(request.contains("## Saving"), "{request}");
     assert!(
         !request.contains("/memory"),
+        "the trigger must not reach the model: {request}"
+    );
+}
+
+#[test]
+fn an_update_mention_offers_the_update_tool_and_the_updating_section() {
+    let dir = TempDir::new("update");
+    let (addr, request) = spawn_capturing_provider();
+    dir.write_config(&dir.brain_dir(&openai_config(addr)));
+
+    let output = odyn(
+        &dir,
+        &[
+            "ask",
+            "--show-context",
+            "/update-memory my keys moved to the fridge",
+        ],
+        None,
+    );
+    assert_eq!(code(&output), Some(0), "{}", stderr(&output));
+    let shown = stderr(&output);
+    assert!(shown.contains("## Updating"), "{shown}");
+
+    let request = request.recv().expect("the provider saw the request");
+    assert!(request.contains("update_memory"), "{request}");
+    assert!(
+        !request.contains("save_memory"),
+        "an update turn offers only the update tool: {request}"
+    );
+    assert!(request.contains("## Updating"), "{request}");
+    assert!(
+        !request.contains("/update-memory"),
         "the trigger must not reach the model: {request}"
     );
 }

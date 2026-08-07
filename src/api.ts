@@ -32,6 +32,7 @@ export type ChatEvent = { request_id: number } & (
   | { kind: "context"; used: string[]; tokens: number }
   | { kind: "delta"; text: string }
   | { kind: "saved"; slug: string }
+  | { kind: "updated"; slug: string }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );
