@@ -6,6 +6,7 @@ import {
   chooseDefaultProvider,
   connectProvider,
   deleteProvider,
+  openConnect,
   openKeysPage,
   pickCatalogProvider,
   saveProvider,
@@ -13,8 +14,8 @@ import {
   state,
 } from "./state";
 
-// The open form outlives redraws — the 30s status refresh must not eat a
-// half-typed key — so it is rebuilt only when what it edits changes.
+// The open form outlives redraws, rebuilt only when what it edits changes: a
+// redraw must not eat a half-typed key.
 let formBox: HTMLElement | null = null;
 let formFor: string | null | undefined;
 
@@ -43,12 +44,12 @@ export function renderProviders(): HTMLElement {
       view.append(row(entry));
     }
   }
-  // The custom form and the connect panel edit the same file; only one of them
-  // is on screen at a time.
   if (editing !== null && editing.name === null && formBox !== null) {
     view.append(formBox);
+  } else if (state.providers.connect) {
+    view.append(connectPanel(entries));
   } else {
-    view.append(connectPanel(entries), customLink());
+    view.append(links());
   }
   view.append(
     el(
@@ -154,16 +155,14 @@ keysLink.addEventListener("click", () => {
 });
 
 {
+  const head = el("div", "conn-head");
+  const shut = el("button", "conn-shut", "✕");
+  shut.setAttribute("aria-label", "close");
+  shut.addEventListener("click", () => openConnect(false));
+  head.append(el("span", undefined, "connect a provider"), shut);
   const foot = el("div", "conn-foot");
   foot.append(go, keysLink, defaultLabel);
-  panel.append(
-    el("div", "conn-head", "connect a provider"),
-    keyField,
-    aim,
-    tiles,
-    foot,
-    notice,
-  );
+  panel.append(head, keyField, aim, tiles, foot, notice);
 }
 
 // Whether the box below is the user's answer or ours, so a redraw never
@@ -282,10 +281,14 @@ function run(item: CatalogItem, apiKey: string): void {
   });
 }
 
-function customLink(): HTMLElement {
-  const link = el("button", "prov-add", "+ custom endpoint");
-  link.addEventListener("click", () => startProviderEdit(null));
-  return link;
+function links(): HTMLElement {
+  const box = el("div", "prov-links");
+  const connect = el("button", "prov-add", "+ connect a provider");
+  connect.addEventListener("click", () => openConnect(true));
+  const custom = el("button", "prov-add", "+ custom endpoint");
+  custom.addEventListener("click", () => startProviderEdit(null));
+  box.append(connect, custom);
+  return box;
 }
 
 function form(entry: ProviderEntry | null): HTMLElement {

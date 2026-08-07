@@ -61,9 +61,6 @@ export type ProviderGroup = {
 };
 
 export type Status = {
-  provider_name: string;
-  provider_reachable: boolean;
-  ollama_reachable: boolean | null;
   brevity_default: BrevityLevel;
 };
 

@@ -541,11 +541,7 @@ core 10/500 tk, episodic 8/900 tk
     body: () => [
       rows([
         [
-          "a red dot in the footer",
-          "the named provider did not answer a probe. A second dot appears only when a local Ollama is configured beside a different default provider. Both are re-probed every 30 seconds; the number beside them is this process's resident memory.",
-        ],
-        [
-          "a red line under the footer",
+          "a red line at the foot of the sidebar",
           "the global hotkey could not be registered — usually another app owns the combination. Change `[spotlight] hotkey`. Spotlight still opens with " +
             `${MOD}K from the main window.`,
         ],

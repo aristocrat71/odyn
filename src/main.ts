@@ -22,8 +22,6 @@ import {
 } from "./state";
 import { renderView } from "./view";
 
-const STATUS_INTERVAL_MS = 30_000;
-
 const app = el("div", "app");
 const sidebar = el("aside", "sidebar");
 const main = el("main", "main");
@@ -75,7 +73,6 @@ renderView(main);
 watchStream();
 void load();
 void refreshStatus();
-setInterval(() => void refreshStatus(), STATUS_INTERVAL_MS);
 
 // A memory added from the CLI shows up when the window comes back.
 window.addEventListener("focus", refreshLedger);

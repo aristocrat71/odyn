@@ -128,23 +128,8 @@ function newLink(): HTMLElement {
 
 function footer(): HTMLElement {
   const box = el("div");
-  const line = el("div", "status");
-  box.append(line);
-  const status = state.status;
-  if (status === null) return box;
-  line.append(probe(status.provider_name, status.provider_reachable));
-  // A second dot only when a local Ollama runs beside the default provider.
-  if (status.ollama_reachable !== null) {
-    line.append(probe("ollama", status.ollama_reachable));
-  }
   if (state.hotkeyError !== null) {
     box.append(el("div", "status status-warn", state.hotkeyError));
   }
-  return box;
-}
-
-function probe(name: string, reachable: boolean): HTMLElement {
-  const box = el("span");
-  box.append(el("span", reachable ? "dot" : "dot down", "●"), name);
   return box;
 }
