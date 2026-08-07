@@ -82,14 +82,16 @@ function recent(): Conversation[] {
 
 function conversation(row: Conversation): HTMLElement {
   const line = el("div", "row");
-  if (row.id === state.selected) line.classList.add("active");
+  // Selected is not the same as open: only the chat view is inside it.
+  const open = state.view === "chat" && row.id === state.selected;
+  if (open) line.classList.add("active");
   if (row.id === state.editing) {
     line.append(rename(row));
     return line;
   }
 
   const title = el("button", "row-title");
-  if (row.id === state.selected) title.append(el("span", "mark", "—"), ` ${row.title}`);
+  if (open) title.append(el("span", "mark", "—"), ` ${row.title}`);
   else title.textContent = row.title;
   title.addEventListener("click", () => void selectConversation(row.id));
   title.addEventListener("dblclick", () => startRename(row.id));
