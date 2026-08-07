@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 
 const BRAIN_DIR_NAME: &str = "brain";
+/// Model-trashed notes live here; a subfolder is invisible to `is_note`.
+const TRASH_DIR_NAME: &str = ".trash";
 /// A derived slug stays short enough to read as an id in the ledger.
 const SLUG_MAX_CHARS: usize = 48;
 
@@ -179,6 +181,24 @@ pub fn delete_note(dir: &Path, slug: &str) -> Result<(), NotesError> {
         std::io::ErrorKind::NotFound => NotesError::NotFound(slug.to_string()),
         _ => NotesError::Write { path, source },
     })
+}
+
+/// Model-driven deletion: the note moves to `.trash/` in the brain folder
+/// rather than vanishing, so a wrong slug from a small model stays
+/// recoverable. Human paths (`mem rm`, the brain view) delete outright.
+pub fn trash_note(dir: &Path, slug: &str) -> Result<(), NotesError> {
+    let path = note_path(dir, slug);
+    if !path.exists() {
+        return Err(NotesError::NotFound(slug.to_string()));
+    }
+    let trash = dir.join(TRASH_DIR_NAME);
+    std::fs::create_dir_all(&trash).map_err(|source| NotesError::Create {
+        path: trash.clone(),
+        source,
+    })?;
+    // A re-trashed slug replaces the older copy: the latest deletion wins.
+    std::fs::rename(&path, trash.join(format!("{slug}.md")))
+        .map_err(|source| NotesError::Write { path, source })
 }
 
 pub fn note_path(dir: &Path, slug: &str) -> PathBuf {
@@ -460,6 +480,27 @@ mod tests {
             Err(NotesError::NotFound(_))
         ));
         assert!(read_notes(&dir.0).expect("read").is_empty());
+    }
+
+    #[test]
+    fn trash_moves_the_note_out_of_the_brain_but_keeps_the_file() {
+        let dir = TempDir::new("trash");
+        let slug = write_note(&dir.0, Some("car-keys"), "on the desk").expect("write");
+        trash_note(&dir.0, &slug).expect("trash");
+        assert!(read_notes(&dir.0).expect("read").is_empty());
+        let kept = dir.0.join(TRASH_DIR_NAME).join("car-keys.md");
+        assert_eq!(std::fs::read_to_string(&kept).expect("kept"), "on the desk\n");
+        // A recreated then re-trashed slug replaces the older copy.
+        write_note(&dir.0, Some("car-keys"), "on the fridge").expect("rewrite");
+        trash_note(&dir.0, "car-keys").expect("retrash");
+        assert_eq!(
+            std::fs::read_to_string(&kept).expect("kept"),
+            "on the fridge\n"
+        );
+        assert!(matches!(
+            trash_note(&dir.0, "ghost"),
+            Err(NotesError::NotFound(_))
+        ));
     }
 
     #[test]

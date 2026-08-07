@@ -27,6 +27,7 @@ export type Stream = {
   used: string[];
   saved: string[];
   updated: string[];
+  deleted: string[];
 };
 
 // The backend's refusal when a conversation has no model; picking one clears it.
@@ -304,6 +305,7 @@ async function start(prompt: string, retry: boolean): Promise<void> {
     used: [],
     saved: [],
     updated: [],
+    deleted: [],
   };
   state.stream = stream;
   render();
@@ -349,6 +351,11 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   if (event.kind === "updated") {
     stream.updated.push(event.slug);
+    render();
+    return;
+  }
+  if (event.kind === "deleted") {
+    stream.deleted.push(event.slug);
     render();
     return;
   }

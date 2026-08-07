@@ -1,10 +1,10 @@
 //! The tool loop: one user turn that may span several provider requests.
 //!
 //! Tools are offered only when the message asked for them: `/memory` earns
-//! `save_memory`, `/update-memory` earns `update_memory`. One tool per
-//! trigger — small models misroute a save-or-update choice, so the user makes
-//! it. The index is not touched here — the folder is the truth, and the next
-//! recall or preview syncs it.
+//! `save_memory`, `/update-memory` earns `update_memory`, `/delete-memory`
+//! earns `delete_memory`. One tool per trigger — small models misroute a
+//! choice between tools, so the user makes it. The index is not touched here
+//! — the folder is the truth, and the next recall or preview syncs it.
 
 use std::path::Path;
 
@@ -17,6 +17,7 @@ use crate::notes::{self, NotesError};
 
 pub const SAVE_MEMORY: &str = "save_memory";
 pub const UPDATE_MEMORY: &str = "update_memory";
+pub const DELETE_MEMORY: &str = "delete_memory";
 
 /// A model that keeps asking for tools is looping, not working.
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -34,6 +35,7 @@ pub enum TurnEvent<'a> {
     Delta(&'a str),
     Saved(&'a str),
     Updated(&'a str),
+    Deleted(&'a str),
 }
 
 pub struct TurnReply {
@@ -43,6 +45,8 @@ pub struct TurnReply {
     pub saved: Vec<String>,
     /// Slugs of the notes rewritten this turn, in call order.
     pub updated: Vec<String>,
+    /// Slugs of the notes trashed this turn, in call order.
+    pub deleted: Vec<String>,
 }
 
 pub fn save_memory_tool() -> ToolDef {
@@ -72,9 +76,9 @@ pub fn save_memory_tool() -> ToolDef {
     }
 }
 
-/// The tools a turn's mentions earn. Update leads when both are offered: a
+/// The tools a turn's mentions earn. Update leads when several are offered: a
 /// misrouted update errors and self-corrects, a misrouted save duplicates.
-pub fn offered(memorize: bool, update: bool) -> Vec<ToolDef> {
+pub fn offered(memorize: bool, update: bool, delete: bool) -> Vec<ToolDef> {
     let mut tools = Vec::new();
     if update {
         tools.push(update_memory_tool());
@@ -82,7 +86,28 @@ pub fn offered(memorize: bool, update: bool) -> Vec<ToolDef> {
     if memorize {
         tools.push(save_memory_tool());
     }
+    if delete {
+        tools.push(delete_memory_tool());
+    }
     tools
+}
+
+pub fn delete_memory_tool() -> ToolDef {
+    ToolDef {
+        name: DELETE_MEMORY.to_string(),
+        description: "Delete one memory the user asked to forget.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "slug": {
+                    "type": "string",
+                    "description": "The memory to delete — its exact slug from \
+                                    the ### heading above."
+                }
+            },
+            "required": ["slug"]
+        }),
+    }
 }
 
 pub fn update_memory_tool() -> ToolDef {
@@ -108,11 +133,13 @@ pub fn update_memory_tool() -> ToolDef {
     }
 }
 
-/// Streams, runs any tool calls, follows up with the results, and repeats until
-/// the model answers in text. An empty `tools` slice makes this exactly one
-/// request at the provider's default temperature; tool turns sample at
-/// `temperature` instead (`brain.save_temperature`) — saving is transcription,
-/// not creativity. Every delta and save reaches `emit` as it happens.
+/// Streams, runs any tool calls, follows up with the results, and repeats
+/// until the model answers in text — except after a round whose calls all
+/// succeeded, which ends the turn on a synthesized confirmation instead of
+/// another request. An empty `tools` slice makes this exactly one request at
+/// the provider's default temperature; tool turns sample at `temperature`
+/// instead (`brain.save_temperature`) — saving is transcription, not
+/// creativity. Every delta and write reaches `emit` as it happens.
 pub async fn run_turn(
     provider: &dyn ChatProvider,
     model: &str,
@@ -126,6 +153,7 @@ pub async fn run_turn(
     let mut usage: Option<Usage> = None;
     let mut saved = Vec::new();
     let mut updated = Vec::new();
+    let mut deleted = Vec::new();
     for _ in 0..=MAX_TOOL_ROUNDS {
         let mut round_text = String::new();
         let mut calls = Vec::new();
@@ -155,27 +183,52 @@ pub async fn run_turn(
             break;
         }
         messages.push(Message::tool_request(round_text, calls.clone()));
+        let mut clean = Vec::new();
+        let mut failed = false;
         for call in calls {
             let (result, written) = run_tool(brain_dir, &call);
             match written {
                 Some(Written::Saved(slug)) => {
                     emit(TurnEvent::Saved(&slug)).map_err(TurnError::Write)?;
                     saved.push(slug);
+                    clean.push(result.clone());
                 }
                 Some(Written::Updated(slug)) => {
                     emit(TurnEvent::Updated(&slug)).map_err(TurnError::Write)?;
                     updated.push(slug);
+                    clean.push(result.clone());
                 }
-                None => {}
+                Some(Written::Deleted(slug)) => {
+                    emit(TurnEvent::Deleted(&slug)).map_err(TurnError::Write)?;
+                    deleted.push(slug);
+                    clean.push(result.clone());
+                }
+                None => failed = true,
             }
             messages.push(Message::tool_result(call, result));
         }
+        // A failed call keeps the loop so the model can read the error and
+        // retry. A clean round of writes ends the turn on Odyn's own
+        // confirmation: handing a small model another round over the recalled
+        // notes invites it to recite them instead of confirming.
+        if failed || clean.is_empty() {
+            continue;
+        }
+        let confirmation = if text.is_empty() {
+            clean.join(" · ")
+        } else {
+            format!("\n{}", clean.join(" · "))
+        };
+        emit(TurnEvent::Delta(&confirmation)).map_err(TurnError::Write)?;
+        text.push_str(&confirmation);
+        break;
     }
     Ok(TurnReply {
         text,
         usage,
         saved,
         updated,
+        deleted,
     })
 }
 
@@ -183,6 +236,7 @@ pub async fn run_turn(
 enum Written {
     Saved(String),
     Updated(String),
+    Deleted(String),
 }
 
 /// Answers the call with a result the model can read; a bad call gets its error
@@ -191,6 +245,7 @@ fn run_tool(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
     match call.name.as_str() {
         SAVE_MEMORY => save(brain_dir, call),
         UPDATE_MEMORY => update(brain_dir, call),
+        DELETE_MEMORY => delete(brain_dir, call),
         other => (format!("error: no tool named `{other}`"), None),
     }
 }
@@ -224,6 +279,24 @@ fn update(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
         Ok(()) => (
             format!("updated {slug}"),
             Some(Written::Updated(slug.to_string())),
+        ),
+        Err(err) => (format!("error: {err}"), None),
+    }
+}
+
+/// Trashes rather than removes: `notes::trash_note` keeps the file under
+/// `.trash/`, so a wrong slug from a small model is recoverable.
+fn delete(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
+    let Some(slug) = text_arg(call, "slug") else {
+        return (
+            "error: delete_memory needs a non-empty string `slug`".to_string(),
+            None,
+        );
+    };
+    match notes::trash_note(brain_dir, slug) {
+        Ok(()) => (
+            format!("deleted {slug}"),
+            Some(Written::Deleted(slug.to_string())),
         ),
         Err(err) => (format!("error: {err}"), None),
     }
@@ -336,21 +409,20 @@ mod tests {
 
     fn slug_of(written: Option<Written>) -> Option<String> {
         written.map(|written| match written {
-            Written::Saved(slug) | Written::Updated(slug) => slug,
+            Written::Saved(slug) | Written::Updated(slug) | Written::Deleted(slug) => slug,
         })
     }
 
+    /// A clean write ends the turn on Odyn's own confirmation: one request,
+    /// and the model never speaks over the recalled notes again.
     #[test]
-    fn a_save_call_writes_the_note_and_the_model_hears_the_result() {
+    fn a_save_call_writes_the_note_and_ends_the_turn_with_its_own_confirmation() {
         let dir = TempDir::new("save");
         let asked = call(serde_json::json!({
             "content": "Mitul takes espresso, no sugar.",
             "slug": "espresso"
         }));
-        let provider = Scripted::new(vec![
-            vec![Ok(ChatEvent::ToolCall(asked.clone())), done()],
-            vec![Ok(ChatEvent::TextDelta("Saved.".to_string())), done()],
-        ]);
+        let provider = Scripted::new(vec![vec![Ok(ChatEvent::ToolCall(asked.clone())), done()]]);
         let messages = vec![Message::new(Role::User, "remember my espresso order")];
         let mut seen = Vec::new();
         let reply = block_on(run_turn(
@@ -365,41 +437,76 @@ mod tests {
                     TurnEvent::Delta(delta) => format!("delta:{delta}"),
                     TurnEvent::Saved(slug) => format!("saved:{slug}"),
                     TurnEvent::Updated(slug) => format!("updated:{slug}"),
+                    TurnEvent::Deleted(slug) => format!("deleted:{slug}"),
                 });
                 Ok(())
             },
         ))
         .expect("turn");
 
-        assert_eq!(reply.text, "Saved.");
+        assert_eq!(reply.text, "saved as espresso");
         assert_eq!(reply.saved, vec!["espresso".to_string()]);
         assert!(reply.updated.is_empty());
         assert_eq!(
             reply.usage,
             Some(Usage {
-                input_tokens: 20,
-                output_tokens: 10,
-            }),
-            "usage sums across rounds"
+                input_tokens: 10,
+                output_tokens: 5,
+            })
         );
-        assert_eq!(seen, vec!["saved:espresso", "delta:Saved."]);
+        assert_eq!(seen, vec!["saved:espresso", "delta:saved as espresso"]);
         assert_eq!(
             std::fs::read_to_string(dir.0.join("espresso.md")).expect("note"),
             "Mitul takes espresso, no sugar.\n"
         );
 
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 1, "a clean write asks the model nothing more");
         assert_eq!(requests[0].1, 1, "tools offered on the first request");
         assert_eq!(requests[0].2, Some(0.3));
-        assert_eq!(requests[1].2, Some(0.3));
-        let followup = &requests[1].0;
-        assert_eq!(followup.len(), 3);
-        assert_eq!(followup[1], Message::tool_request("", vec![asked.clone()]));
-        assert_eq!(
-            followup[2],
-            Message::tool_result(asked, "saved as espresso")
+    }
+
+    /// One success and one failure in a round: the loop continues so the model
+    /// can read the error, and the clean write is not double-confirmed.
+    #[test]
+    fn a_failed_call_in_a_round_keeps_the_model_in_the_loop() {
+        let dir = TempDir::new("mixed");
+        let good = call(serde_json::json!({
+            "content": "Espresso, no sugar.",
+            "slug": "espresso"
+        }));
+        let bad = named_call(
+            UPDATE_MEMORY,
+            serde_json::json!({"slug": "ghost", "content": "x"}),
         );
+        let provider = Scripted::new(vec![
+            vec![
+                Ok(ChatEvent::ToolCall(good)),
+                Ok(ChatEvent::ToolCall(bad)),
+                done(),
+            ],
+            vec![
+                Ok(ChatEvent::TextDelta(
+                    "There is no note about that to update.".to_string(),
+                )),
+                done(),
+            ],
+        ]);
+        let reply = block_on(run_turn(
+            &provider,
+            "llama3.2:3b",
+            vec![Message::new(Role::User, "remember and update")],
+            &[save_memory_tool(), update_memory_tool()],
+            &dir.0,
+            0.3,
+            |_| Ok(()),
+        ))
+        .expect("turn");
+
+        assert_eq!(reply.text, "There is no note about that to update.");
+        assert_eq!(reply.saved, vec!["espresso".to_string()]);
+        assert!(reply.updated.is_empty());
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
     }
 
     #[test]
@@ -450,6 +557,8 @@ mod tests {
         );
     }
 
+    /// Model text that preceded the call keeps its place; the synthesized
+    /// confirmation joins it on its own line.
     #[test]
     fn an_update_call_rewrites_the_note_in_place() {
         let dir = TempDir::new("update");
@@ -458,10 +567,11 @@ mod tests {
             UPDATE_MEMORY,
             serde_json::json!({"slug": "car-keys", "content": "Car keys are above the fridge."}),
         );
-        let provider = Scripted::new(vec![
-            vec![Ok(ChatEvent::ToolCall(asked.clone())), done()],
-            vec![Ok(ChatEvent::TextDelta("Updated.".to_string())), done()],
-        ]);
+        let provider = Scripted::new(vec![vec![
+            Ok(ChatEvent::TextDelta("Rewriting.".to_string())),
+            Ok(ChatEvent::ToolCall(asked.clone())),
+            done(),
+        ]]);
         let mut seen = Vec::new();
         let reply = block_on(run_turn(
             &provider,
@@ -475,6 +585,7 @@ mod tests {
                     TurnEvent::Delta(delta) => format!("delta:{delta}"),
                     TurnEvent::Saved(slug) => format!("saved:{slug}"),
                     TurnEvent::Updated(slug) => format!("updated:{slug}"),
+                    TurnEvent::Deleted(slug) => format!("deleted:{slug}"),
                 });
                 Ok(())
             },
@@ -483,16 +594,45 @@ mod tests {
 
         assert!(reply.saved.is_empty());
         assert_eq!(reply.updated, vec!["car-keys".to_string()]);
-        assert_eq!(seen, vec!["updated:car-keys", "delta:Updated."]);
+        assert_eq!(reply.text, "Rewriting.\nupdated car-keys");
+        assert_eq!(
+            seen,
+            vec![
+                "delta:Rewriting.",
+                "updated:car-keys",
+                "delta:\nupdated car-keys"
+            ]
+        );
         assert_eq!(
             std::fs::read_to_string(dir.0.join("car-keys.md")).expect("note"),
             "Car keys are above the fridge.\n"
         );
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(
-            requests[1].0[2],
-            Message::tool_result(asked, "updated car-keys")
+        assert_eq!(requests.len(), 1, "a clean write asks the model nothing more");
+    }
+
+    #[test]
+    fn a_delete_call_trashes_the_note_and_reports_it() {
+        let dir = TempDir::new("delete");
+        notes::write_note(&dir.0, Some("car-keys"), "on the desk").expect("seed");
+        let (result, written) = run_tool(
+            &dir.0,
+            &named_call(DELETE_MEMORY, serde_json::json!({"slug": "car-keys"})),
         );
+        assert_eq!(slug_of(written).as_deref(), Some("car-keys"));
+        assert_eq!(result, "deleted car-keys");
+        assert!(!dir.0.join("car-keys.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join(".trash").join("car-keys.md")).expect("kept"),
+            "on the desk\n"
+        );
+
+        let (result, written) = run_tool(
+            &dir.0,
+            &named_call(DELETE_MEMORY, serde_json::json!({"slug": "ghost"})),
+        );
+        assert!(slug_of(written).is_none());
+        assert!(result.starts_with("error:"), "{result}");
     }
 
     #[test]

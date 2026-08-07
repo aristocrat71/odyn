@@ -21,6 +21,8 @@ pub const TRIGGER: &str = "/brain";
 pub const MEMORIZE: &str = "/memory";
 /// The mention that asks the model to rewrite a memory this turn.
 pub const UPDATE: &str = "/update-memory";
+/// The mention that asks the model to trash a memory this turn.
+pub const DELETE: &str = "/delete-memory";
 
 /// Two turns of history join the retrieval query.
 const QUERY_MESSAGES: usize = 4;
@@ -56,34 +58,46 @@ pub struct Ask {
     pub memorize: bool,
     /// Whether the model is handed `update_memory` this turn.
     pub update: bool,
+    /// Whether the model is handed `delete_memory` this turn.
+    pub delete: bool,
 }
 
-/// Finds a whitespace-delimited `/brain`, `/memory` or `/update-memory`
-/// anywhere in the message, case insensitively, tolerating trailing
-/// punctuation. Each token and the whitespace after it are removed; everything
-/// else stays byte-for-byte.
+#[derive(Default)]
+struct Mentions {
+    recall: bool,
+    memorize: bool,
+    update: bool,
+    delete: bool,
+}
+
+impl Mentions {
+    fn any(&self) -> bool {
+        self.recall || self.memorize || self.update || self.delete
+    }
+}
+
+/// Finds a whitespace-delimited `/brain`, `/memory`, `/update-memory` or
+/// `/delete-memory` anywhere in the message, case insensitively, tolerating
+/// trailing punctuation. Each token and the whitespace after it are removed;
+/// everything else stays byte-for-byte.
 pub fn parse_ask(text: &str) -> Ask {
     let mut cleaned = String::with_capacity(text.len());
     let mut token = String::new();
-    let mut recall = false;
-    let mut memorize = false;
-    let mut update = false;
+    let mut found = Mentions::default();
     let mut swallow_gap = false;
-    let flush = |token: &mut String,
-                 cleaned: &mut String,
-                 recall: &mut bool,
-                 memorize: &mut bool,
-                 update: &mut bool| {
+    let flush = |token: &mut String, cleaned: &mut String, found: &mut Mentions| {
         if token.is_empty() {
             return false;
         }
         let trailer = token.trim_end_matches([',', '.', ';', ':', '!', '?']);
         let flag = if trailer.eq_ignore_ascii_case(TRIGGER) {
-            Some(&mut *recall)
+            Some(&mut found.recall)
         } else if trailer.eq_ignore_ascii_case(MEMORIZE) {
-            Some(&mut *memorize)
+            Some(&mut found.memorize)
         } else if trailer.eq_ignore_ascii_case(UPDATE) {
-            Some(&mut *update)
+            Some(&mut found.update)
+        } else if trailer.eq_ignore_ascii_case(DELETE) {
+            Some(&mut found.delete)
         } else {
             None
         };
@@ -100,13 +114,7 @@ pub fn parse_ask(text: &str) -> Ask {
     };
     for ch in text.chars() {
         if ch.is_whitespace() {
-            if flush(
-                &mut token,
-                &mut cleaned,
-                &mut recall,
-                &mut memorize,
-                &mut update,
-            ) {
+            if flush(&mut token, &mut cleaned, &mut found) {
                 swallow_gap = true;
             }
             if swallow_gap {
@@ -118,21 +126,16 @@ pub fn parse_ask(text: &str) -> Ask {
             token.push(ch);
         }
     }
-    flush(
-        &mut token,
-        &mut cleaned,
-        &mut recall,
-        &mut memorize,
-        &mut update,
-    );
+    flush(&mut token, &mut cleaned, &mut found);
     let cleaned = cleaned.trim().to_string();
-    if !recall && !memorize && !update {
+    if !found.any() {
         return Ask {
             query: text.to_string(),
             message: text.to_string(),
-            recall,
-            memorize,
-            update,
+            recall: found.recall,
+            memorize: found.memorize,
+            update: found.update,
+            delete: found.delete,
         };
     }
     Ask {
@@ -142,9 +145,10 @@ pub fn parse_ask(text: &str) -> Ask {
             cleaned.clone()
         },
         query: cleaned,
-        recall,
-        memorize,
-        update,
+        recall: found.recall,
+        memorize: found.memorize,
+        update: found.update,
+        delete: found.delete,
     }
 }
 
@@ -173,7 +177,7 @@ impl InjectedContext {
 pub fn empty_context(brevity: Brevity) -> InjectedContext {
     InjectedContext {
         memories: Vec::new(),
-        system_message: render(&[], brevity, false, false),
+        system_message: render(&[], brevity, false, false, false),
         tokens: 0,
     }
 }
@@ -269,8 +273,8 @@ pub fn embed_notes(
 }
 
 /// Assembles the context for one turn: recalled notes for `/brain` — and for
-/// `/memory` and `/update-memory`, which recall too so the model can see what
-/// it should link or rewrite — the saving or updating section, and the style
+/// the memory triggers, which recall too so the model can see what it should
+/// link, rewrite or trash — the matching task section, and the style
 /// directive always. `history` excludes the ask. A turn with no triggers
 /// never loads the embedder. `None` storage means no database: saving still
 /// works, recall has nothing to read.
@@ -287,7 +291,8 @@ where
 {
     let mut kept = Vec::new();
     let mut tokens = 0;
-    if let Some(storage) = storage.filter(|_| ask.recall || ask.memorize || ask.update) {
+    if let Some(storage) = storage.filter(|_| ask.recall || ask.memorize || ask.update || ask.delete)
+    {
         let count = storage.count_memories()?;
         if count > 0 {
             let query = query_text(history, &ask.query);
@@ -308,7 +313,7 @@ where
         }
     }
     Ok(InjectedContext {
-        system_message: render(&kept, brevity, ask.memorize, ask.update),
+        system_message: render(&kept, brevity, ask.memorize, ask.update, ask.delete),
         memories: kept,
         tokens,
     })
@@ -462,10 +467,22 @@ note. Keep [[slug]] links that still hold. If none of the memories above is \
 about this fact, say so in one line and call nothing. Otherwise confirm in \
 one line without repeating the other memories.";
 
+const DELETING: &str = "The user asked you to delete a memory. Pick the \
+memory above that is about this fact and call delete_memory with its exact \
+slug. If none of the memories above is about this fact, say so in one line \
+and call nothing. Otherwise confirm in one line without repeating the other \
+memories.";
+
 /// The injected system message, golden-tested byte for byte: `## Memories`
-/// (omitted when empty), `## Saving` on a `/memory` turn, `## Updating` on an
-/// `/update-memory` turn, then `## Style`.
-fn render(memories: &[Memory], brevity: Brevity, saving: bool, updating: bool) -> String {
+/// (omitted when empty), one of `## Saving`, `## Updating` or `## Deleting`
+/// per mentioned trigger, then `## Style`.
+fn render(
+    memories: &[Memory],
+    brevity: Brevity,
+    saving: bool,
+    updating: bool,
+    deleting: bool,
+) -> String {
     let mut sections = Vec::new();
     if !memories.is_empty() {
         let mut lines = vec![format!("## Memories\n{PREAMBLE}")];
@@ -481,6 +498,9 @@ fn render(memories: &[Memory], brevity: Brevity, saving: bool, updating: bool) -
     }
     if updating {
         sections.push(format!("## Updating\n{UPDATING}"));
+    }
+    if deleting {
+        sections.push(format!("## Deleting\n{DELETING}"));
     }
     if let Some(directive) = brevity.directive() {
         sections.push(format!("## Style\n{directive}"));
@@ -566,6 +586,7 @@ mod tests {
             recall: true,
             memorize: false,
             update: false,
+            delete: false,
         }
     }
 
@@ -589,6 +610,7 @@ mod tests {
                 recall: false,
                 memorize: false,
                 update: false,
+                delete: false,
             }
         );
         // Only the trigger: recall runs on history alone, message stays non-empty.
@@ -600,6 +622,7 @@ mod tests {
                 recall: true,
                 memorize: false,
                 update: false,
+                delete: false,
             }
         );
     }
@@ -614,6 +637,7 @@ mod tests {
                 recall: false,
                 memorize: true,
                 update: false,
+                delete: false,
             }
         );
         assert_eq!(
@@ -624,6 +648,7 @@ mod tests {
                 recall: true,
                 memorize: true,
                 update: false,
+                delete: false,
             }
         );
         assert_eq!(
@@ -634,6 +659,22 @@ mod tests {
                 recall: false,
                 memorize: true,
                 update: false,
+                delete: false,
+            }
+        );
+    }
+
+    #[test]
+    fn the_delete_trigger_parses_alone() {
+        assert_eq!(
+            parse_ask("/delete-memory forget where my car keys are"),
+            Ask {
+                message: "forget where my car keys are".to_string(),
+                query: "forget where my car keys are".to_string(),
+                recall: false,
+                memorize: false,
+                update: false,
+                delete: true,
             }
         );
     }
@@ -649,6 +690,7 @@ mod tests {
                 recall: false,
                 memorize: false,
                 update: true,
+                delete: false,
             }
         );
         assert_eq!(
@@ -659,6 +701,7 @@ mod tests {
                 recall: false,
                 memorize: false,
                 update: true,
+                delete: false,
             }
         );
     }
@@ -682,6 +725,7 @@ mod tests {
             recall: false,
             memorize: true,
             update: false,
+            delete: false,
         };
         let context =
             build_context(Some(&storage), &config, &[], &ask, Brevity::Off, never).expect("build");
@@ -710,6 +754,7 @@ mod tests {
             recall: false,
             memorize: false,
             update: true,
+            delete: false,
         };
         let context = build_context(
             Some(&storage),
@@ -725,6 +770,36 @@ mod tests {
             .system_message
             .contains("## Updating\nThe user asked you to update a memory."));
         assert!(!context.system_message.contains("## Saving"));
+    }
+
+    /// A delete turn recalls too — the recalled notes are the only slugs it
+    /// can trash.
+    #[test]
+    fn a_delete_turn_recalls_and_gets_the_deleting_section() {
+        let (_dir, storage) = seeded("deleting");
+        let ask = Ask {
+            message: "forget about the cern trip".to_string(),
+            query: "forget about the cern trip".to_string(),
+            recall: false,
+            memorize: false,
+            update: false,
+            delete: true,
+        };
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(!context.is_empty(), "a delete must see what it can trash");
+        assert!(context
+            .system_message
+            .contains("## Deleting\nThe user asked you to delete a memory."));
+        assert!(!context.system_message.contains("## Saving"));
+        assert!(!context.system_message.contains("## Updating"));
     }
 
     /// The linking fix: a save is informed. `/memory` alone recalls the notes
@@ -746,6 +821,7 @@ mod tests {
             recall: false,
             memorize: true,
             update: false,
+            delete: false,
         };
         let context = build_context(
             Some(&storage),

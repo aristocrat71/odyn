@@ -342,21 +342,25 @@ odyn chat`),
           "would push past `cap_tokens` (default 1200). A bare `/brain` recalls on " +
           "the conversation history alone.",
       ),
-      sub("saving and updating — /memory and /update-memory"),
+      sub("saving, updating, deleting — the memory mentions"),
       p(
         "Mention `/memory` and the model is handed one tool for that turn: " +
           "`save_memory`, which writes a new `.md` note into the brain folder. " +
-          "Mention `/update-memory` instead and it gets `update_memory`, which " +
-          "rewrites the matching note in place — same slug, same graph edges, new " +
-          "fact. One tool per mention, on purpose: a small model asked to choose " +
-          "between saving and updating picks wrong, so the choice stays with you. " +
-          "Either turn also recalls the notes nearest your message — that is how " +
-          "the model knows what `[[slug]]` links to write, or which note your " +
-          "change belongs to. " +
-          "A `✎ saved {slug}` or `✎ updated {slug}` trace appears under the reply; " +
-          "the note is a plain file you can edit or delete like any other. The " +
-          "model never touches the brain without these mentions, and both need a " +
-          "model that supports tool calls (llama3.2 does).",
+          "`/update-memory` hands it `update_memory`, which rewrites the matching " +
+          "note in place — same slug, same graph edges, new fact. " +
+          "`/delete-memory` hands it `delete_memory`, which moves the note into " +
+          "`.trash` inside the brain folder — out of recall, but recoverable " +
+          "until you empty it. One tool per mention, on purpose: a small model " +
+          "asked to choose between them picks wrong, so the choice stays with " +
+          "you. Every such turn also recalls the notes nearest your message — " +
+          "that is how the model knows what `[[slug]]` links to write, or which " +
+          "note your change belongs to. " +
+          "A `✎ saved`, `✎ updated` or `✕ deleted` trace names the note under the " +
+          "reply; each note is a plain file you can edit or delete like any " +
+          "other. A call that succeeds ends the turn on odyn's own one-line " +
+          "confirmation — the model does not get to talk over your notes after a " +
+          "write. It never touches the brain without these mentions, and all of " +
+          "them need a model that supports tool calls (llama3.2 does).",
       ),
       sub("the ledger"),
       p(

@@ -111,11 +111,10 @@ pub async fn stream_reply(
     model: &str,
     messages: Vec<Message>,
     config: &Config,
-    memorize: bool,
-    update: bool,
+    ask: &Ask,
     emit: impl FnMut(TurnEvent<'_>) -> std::io::Result<()>,
 ) -> Result<Reply, Failure> {
-    let tools = tools::offered(memorize, update);
+    let tools = tools::offered(ask.memorize, ask.update, ask.delete);
     let dir = notes::brain_dir(config.brain.path.as_deref())
         .map_err(|err| Failure::run(err.to_string()))?;
     let temperature = config.brain.save_temperature;
@@ -151,7 +150,7 @@ pub fn memory_context(
     brevity: Brevity,
 ) -> Option<InjectedContext> {
     let brain_config = &config.brain;
-    if ask.recall || ask.memorize || ask.update {
+    if ask.recall || ask.memorize || ask.update || ask.delete {
         if let Some(storage) = storage {
             // The folder is the truth: recall reads the files as they are now.
             if let Err(err) = brain::sync(storage, brain_config, || {

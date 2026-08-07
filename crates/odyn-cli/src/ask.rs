@@ -72,8 +72,7 @@ pub async fn run(
         &session.model,
         messages,
         &session.config,
-        ask.memorize,
-        ask.update,
+        &ask,
         |event| {
             match event {
                 TurnEvent::Delta(delta) => {
@@ -108,6 +107,17 @@ pub async fn run(
                         )?;
                     } else {
                         trace(&format!("updated {slug}"));
+                    }
+                }
+                TurnEvent::Deleted(slug) => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "deleted", "slug": slug})
+                        )?;
+                    } else {
+                        trace(&format!("deleted {slug}"));
                     }
                 }
             }

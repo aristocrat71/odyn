@@ -694,3 +694,35 @@ fn an_update_mention_offers_the_update_tool_and_the_updating_section() {
         "the trigger must not reach the model: {request}"
     );
 }
+
+#[test]
+fn a_delete_mention_offers_the_delete_tool_and_the_deleting_section() {
+    let dir = TempDir::new("delete");
+    let (addr, request) = spawn_capturing_provider();
+    dir.write_config(&dir.brain_dir(&openai_config(addr)));
+
+    let output = odyn(
+        &dir,
+        &[
+            "ask",
+            "--show-context",
+            "/delete-memory forget where my keys are",
+        ],
+        None,
+    );
+    assert_eq!(code(&output), Some(0), "{}", stderr(&output));
+    let shown = stderr(&output);
+    assert!(shown.contains("## Deleting"), "{shown}");
+
+    let request = request.recv().expect("the provider saw the request");
+    assert!(request.contains("delete_memory"), "{request}");
+    assert!(
+        !request.contains("save_memory") && !request.contains("update_memory"),
+        "a delete turn offers only the delete tool: {request}"
+    );
+    assert!(request.contains("## Deleting"), "{request}");
+    assert!(
+        !request.contains("/delete-memory"),
+        "the trigger must not reach the model: {request}"
+    );
+}
