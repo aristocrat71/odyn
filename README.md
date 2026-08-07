@@ -71,10 +71,11 @@ the frontend never has to be built by hand. A plain `cargo build --workspace`
 compiles the app crate in dev mode and does not need `dist/` to exist.
 
 The app lives in the tray under its own icon, with two items: **Open Odyn**
-brings the dashboard back, **Quit** ends the process. Closing the dashboard
-window only hides it — the spotlight hotkey has to keep answering — so Quit is
-the way out. If the tray cannot be created the close button quits instead,
-rather than leaving odyn running with no way to reach it.
+brings the dashboard back, **Quit** ends the process. Closing the dashboard only
+hides it — the spotlight hotkey has to keep answering — and on macOS the dock
+icon goes with it, so odyn is a menu bar app until the dashboard is reopened. If
+the tray cannot be created the close button quits instead, rather than leaving
+odyn running with no way to reach it.
 
 ### Checks
 

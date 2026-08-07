@@ -412,11 +412,7 @@ pub async fn spotlight_promote(
     drop(storage);
 
     let _ = app.emit_to(MAIN, "open-conversation", row.id);
-    if let Some(main) = app.get_webview_window(MAIN) {
-        let _ = main.unminimize();
-        let _ = main.show();
-        let _ = main.set_focus();
-    }
+    crate::tray::open_dashboard(&app);
     conceal(&app);
     Ok(row.id)
 }
