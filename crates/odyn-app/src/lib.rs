@@ -43,6 +43,7 @@ pub fn run() {
             brain::embed_catalog,
             brain::brain_set_model,
             brain::brain_set_save_temperature,
+            brain::brain_set_top_k,
             config::config_file,
             config::open_config,
             config::providers_config,

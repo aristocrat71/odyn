@@ -15,6 +15,10 @@ use crate::state::{AppState, Ready};
 const PAGE: usize = 50;
 /// Same breadth as `odyn mem search`, whose order the GUI must reproduce.
 const SEARCH_LIMIT: usize = 20;
+/// What the brain view's field will set. Narrower than the config allows, which
+/// still takes anything from 1 up for hand-edits and `odyn config set`.
+const TOP_K_MIN: u32 = 5;
+const TOP_K_MAX: u32 = 100;
 
 #[derive(serde::Serialize)]
 pub struct MemoryRow {
@@ -190,6 +194,18 @@ pub async fn brain_set_save_temperature(
     let path = config_path().map_err(|err| err.to_string())?;
     config_edit::set(&path, "brain.save_temperature", &format!("{value:?}"))
         .map_err(|err| err.to_string())?;
+    app.state::<AppState>().inner().reload()?;
+    brain_overview(app).await
+}
+
+/// Writes `[brain] top_k`, bounded like the field that sets it.
+#[tauri::command]
+pub async fn brain_set_top_k(app: AppHandle, value: u32) -> Result<BrainOverview, String> {
+    if !(TOP_K_MIN..=TOP_K_MAX).contains(&value) {
+        return Err(format!("top_k must be between {TOP_K_MIN} and {TOP_K_MAX}"));
+    }
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "brain.top_k", &value.to_string()).map_err(|err| err.to_string())?;
     app.state::<AppState>().inner().reload()?;
     brain_overview(app).await
 }

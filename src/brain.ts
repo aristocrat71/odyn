@@ -6,6 +6,7 @@ import {
   cancelMemoryEdit,
   chooseEmbedModel,
   chooseSaveTemperature,
+  chooseTopK,
   commitMemoryEdit,
   loadMoreMemories,
   removeMemory,
@@ -20,6 +21,9 @@ import {
 const NEAR = 160;
 const INJECTED_TAG_S = 5 * 60;
 const SORTS = ["recent", "hits", "created"] as const;
+// Matches the bound brain_set_top_k enforces before anything is written.
+const TOP_K_MIN = 5;
+const TOP_K_MAX = 100;
 
 // Persistent inputs: a search being typed and an edit in progress survive the
 // redraws background refreshes cause.
@@ -33,6 +37,32 @@ editor.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void commitMemoryEdit(editor.value);
   if (event.key === "Escape") cancelMemoryEdit();
 });
+
+const topK = el("input", "brain-topk");
+topK.type = "number";
+topK.min = String(TOP_K_MIN);
+topK.max = String(TOP_K_MAX);
+topK.setAttribute("aria-label", "top-k");
+topK.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") topK.blur();
+  if (event.key === "Escape") {
+    topK.value = shownTopK();
+    topK.blur();
+  }
+});
+// Committed on leaving the field: half-typed numbers never reach the config.
+topK.addEventListener("blur", () => {
+  const current = state.brain.overview?.top_k;
+  if (current === undefined) return;
+  const typed = Number(topK.value);
+  const value = Number.isFinite(typed)
+    ? Math.min(TOP_K_MAX, Math.max(TOP_K_MIN, Math.round(typed)))
+    : current;
+  topK.value = String(value);
+  void chooseTopK(value);
+});
+
+const shownTopK = (): string => String(state.brain.overview?.top_k ?? "");
 
 export function renderBrain(): HTMLElement {
   const root = el("div", "brain");
@@ -93,13 +123,17 @@ function tempPicker(): HTMLElement {
 function header(): HTMLElement {
   const row = el("div", "brain-header");
   const overview = state.brain.overview;
-  const stats =
-    overview === null
-      ? ""
-      : `${overview.count} memories · top-k ${overview.top_k} · ` +
-        `cap ${overview.cap_tokens} tk`;
-  const left = el("div", "brain-stats", stats);
-  if (overview !== null) left.title = overview.path;
+  const left = el("div", "brain-stats");
+  if (overview !== null) {
+    left.title = overview.path;
+    // A redraw mid-entry must not overwrite what is being typed.
+    if (document.activeElement !== topK) topK.value = shownTopK();
+    left.append(
+      `${overview.count} memories · top-k `,
+      topK,
+      ` · cap ${overview.cap_tokens} tk`,
+    );
+  }
   left.append(" ", modelPicker(), " ", tempPicker());
   row.append(left);
   const toggle = el("div", "brain-toggle");

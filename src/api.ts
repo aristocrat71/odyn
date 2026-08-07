@@ -157,6 +157,9 @@ export const brainSetModel = (model: string): Promise<BrainOverview> =>
 export const brainSetSaveTemperature = (value: number): Promise<BrainOverview> =>
   invoke("brain_set_save_temperature", { value });
 
+export const brainSetTopK = (value: number): Promise<BrainOverview> =>
+  invoke("brain_set_top_k", { value });
+
 export const brainMemories = (
   sort: MemorySort,
   offset: number,

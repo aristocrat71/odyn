@@ -759,6 +759,30 @@ button {
   color: var(--dim);
 }
 
+.brain-topk {
+  width: 3.4em;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--faint);
+  outline: none;
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.brain-topk:focus {
+  border-bottom-color: var(--epi);
+}
+
+/* The steppers would be the only chrome on the stats line. */
+.brain-topk::-webkit-inner-spin-button,
+.brain-topk::-webkit-outer-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .brain-toggle {
   font-family: var(--mono);
   font-size: 11px;

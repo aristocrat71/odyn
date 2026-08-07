@@ -59,7 +59,7 @@ save_temperature = 0.3   # sampling on /memory save turns; lower = more literal
 brevity = "off"        # off | lite | full | ultra — default for new conversations
 
 [spotlight]
-hotkey = "Alt+Space"   # Option+Space on macOS, Alt+Space elsewhere
+hotkey = "Ctrl+Space"  # Control+Space on every platform
 brevity = "full"       # spotlight answers should be terse
 # provider = "ollama"    # falls back to default_provider when unset
 # model = "llama3.3:8b"
@@ -201,7 +201,7 @@ impl Default for SpotlightConfig {
         Self {
             // `Alt` is Option on macOS, so one accelerator is the same physical
             // chord on every platform.
-            hotkey: "Alt+Space".to_string(),
+            hotkey: "Ctrl+Space".to_string(),
             provider: None,
             model: None,
             brevity: Brevity::Full,

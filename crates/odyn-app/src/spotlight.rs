@@ -415,8 +415,12 @@ pub async fn spotlight_promote(
     drop(storage);
 
     let _ = app.emit_to(MAIN, "open-conversation", row.id);
-    crate::tray::open_dashboard(&app);
-    conceal(&app);
+    // An async command runs off the main thread, where AppKit aborts the process.
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        crate::tray::open_dashboard(&handle);
+        conceal(&handle);
+    });
     Ok(row.id)
 }
 

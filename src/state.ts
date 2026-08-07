@@ -399,6 +399,13 @@ export const chooseSaveTemperature = (value: number): Promise<void> =>
     render();
   });
 
+export const chooseTopK = (value: number): Promise<void> =>
+  guard(async () => {
+    if (value === state.brain.overview?.top_k) return;
+    state.brain.overview = await api.brainSetTopK(value);
+    render();
+  });
+
 export const chooseEmbedModel = (model: string): Promise<void> =>
   guard(async () => {
     if (model === state.brain.overview?.model) return;

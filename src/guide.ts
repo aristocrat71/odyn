@@ -4,8 +4,8 @@ import { el } from "./dom";
 // bundle until the guide is opened.
 
 const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
-// `Alt+Space` in the config is one chord with two names: Option on macOS.
-const SUMMON = navigator.platform.startsWith("Mac") ? "⌥Space" : "Alt+Space";
+// `Ctrl+Space` in the config; macOS spells the same chord with a glyph.
+const SUMMON = navigator.platform.startsWith("Mac") ? "⌃Space" : "Ctrl+Space";
 
 type Section = { id: string; title: string; body: () => HTMLElement[] };
 
@@ -130,7 +130,7 @@ save_temperature = 0.3
 brevity = "off"
 
 [spotlight]
-hotkey = "Alt+Space"
+hotkey = "Ctrl+Space"
 brevity = "full"`,
       ),
       rows([
@@ -271,7 +271,7 @@ odyn chat`),
       rows([
         [
           SUMMON,
-          "the global hotkey — the default value of `[spotlight] hotkey` (`Alt+Space`, which is Option+Space on macOS), in Tauri accelerator syntax. Pressing it again hides the window.",
+          "the global hotkey — the default value of `[spotlight] hotkey` (`Ctrl+Space`, Control+Space on every platform), in Tauri accelerator syntax. Pressing it again hides the window.",
         ],
         [`${MOD}K`, "the same toggle, from the main window."],
         [
