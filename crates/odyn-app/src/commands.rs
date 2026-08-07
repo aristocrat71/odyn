@@ -4,15 +4,16 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use odyn_core::brain::{self, InjectedContext};
+use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
 use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
-use odyn_core::config::{MemoryConfig, ProviderConfig};
+use odyn_core::config::ProviderConfig;
 use odyn_core::embed::load_default_embedder;
+use odyn_core::notes;
 use odyn_core::providers::ollama::OllamaProvider;
 use odyn_core::providers::openai_compat::OpenAiCompatProvider;
 use odyn_core::providers::{ollama, openai_compat};
-use odyn_core::storage::{Conversation as StoredConversation, MemoryTier, StorageError};
+use odyn_core::storage::{Conversation as StoredConversation, StorageError};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{AppState, Ready, Stream};
@@ -50,7 +51,7 @@ pub struct ConversationView {
 pub struct MessageView {
     role: Role,
     content: String,
-    /// Assistant rows only: the episodic ids injected for the question this
+    /// Assistant rows only: the note slugs injected for the question this
     /// answers — the `◈ used …` trace line.
     used: Vec<String>,
 }
@@ -67,13 +68,12 @@ pub struct LedgerItem {
 /// same call the send path makes, which is the whole point.
 #[derive(serde::Serialize)]
 pub struct ContextPreview {
-    core: Vec<LedgerItem>,
-    episodic: Vec<LedgerItem>,
-    core_tokens: i64,
-    episodic_tokens: i64,
-    /// core budget + episodic cap: the denominator on the right of the line.
+    /// Whether the draft mentions `/brain`: false means the send would
+    /// inject nothing, and the ledger shows the hint instead of chips.
+    active: bool,
+    memories: Vec<LedgerItem>,
+    tokens: i64,
     cap_tokens: u32,
-    over_budget: bool,
     system_message: String,
 }
 
@@ -112,13 +112,12 @@ pub(crate) struct Event {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub(crate) enum Body {
-    /// What was injected for this reply, before its first delta: the episodic
-    /// ids for the trace line, and the totals the spotlight's one-line ledger
-    /// shows.
+    /// What was injected for this reply, before its first delta: the note
+    /// slugs for the trace line, and the total the spotlight's one-line
+    /// ledger shows.
     Context {
         used: Vec<String>,
-        core_tokens: i64,
-        episodic_tokens: i64,
+        tokens: i64,
     },
     Delta {
         text: String,
@@ -256,11 +255,11 @@ pub async fn messages(
     let ready = state.ready()?;
     let storage = ready.storage();
     let rows = storage.messages(conversation_id).map_err(say)?;
-    let episodic: std::collections::HashMap<i64, String> = storage
-        .list_memories(Some(MemoryTier::Episodic))
+    let slugs: std::collections::HashMap<i64, String> = storage
+        .list_memories()
         .map_err(say)?
         .into_iter()
-        .map(|memory| (memory.id, memory.display_id()))
+        .map(|memory| (memory.id, memory.slug))
         .collect();
     let mut by_question: std::collections::HashMap<i64, Vec<String>> =
         std::collections::HashMap::new();
@@ -268,8 +267,11 @@ pub async fn messages(
         let Some(message_id) = injection.message_id else {
             continue;
         };
-        if let Some(id) = episodic.get(&injection.memory_id) {
-            by_question.entry(message_id).or_default().push(id.clone());
+        if let Some(slug) = slugs.get(&injection.memory_id) {
+            by_question
+                .entry(message_id)
+                .or_default()
+                .push(slug.clone());
         }
     }
 
@@ -310,14 +312,17 @@ pub async fn send_message(
 ) -> Result<u64, String> {
     let ready = state.ready()?;
     let row = conversation(&ready, conversation_id)?;
+    // A `/brain` mention turns recall on for this turn; the transcript and
+    // the model both see the message without it.
+    let mut ask = brain::parse_ask(&text);
     if !retry {
         let storage = ready.storage();
         storage
-            .append_message(conversation_id, Role::User, &text, None, None)
+            .append_message(conversation_id, Role::User, &ask.message, None, None)
             .map_err(say)?;
         if row.title == NEW_TITLE {
             storage
-                .rename_conversation(conversation_id, &title_from(&text))
+                .rename_conversation(conversation_id, &title_from(&ask.message))
                 .map_err(say)?;
         }
     }
@@ -328,7 +333,15 @@ pub async fn send_message(
         .rev()
         .find(|row| row.role == Role::User)
         .map(|row| row.id);
-    // Everything before the question feeds retrieval; the question is `text`.
+    // A retry resends the stored, already-cleaned question: whether the
+    // original turn recalled is what its injection record says.
+    if retry && !ask.recall {
+        let injections = ready.storage().injections(conversation_id).map_err(say)?;
+        ask.recall = injections
+            .iter()
+            .any(|injection| injection.message_id == question_id);
+    }
+    // Everything before the question feeds retrieval; the question is `ask`.
     let prior: Vec<Message> = rows
         .iter()
         .take_while(|row| Some(row.id) != question_id)
@@ -351,7 +364,7 @@ pub async fn send_message(
         provider,
         row.model,
         prior,
-        text,
+        ask,
         question_id,
         brevity,
     ));
@@ -494,11 +507,11 @@ async fn run(
     provider: Box<dyn ChatProvider>,
     model: String,
     prior: Vec<Message>,
-    question: String,
+    ask: Ask,
     question_id: Option<i64>,
     brevity: Brevity,
 ) {
-    let context = build_context(&app, prior.clone(), question.clone(), brevity).await;
+    let context = build_context(&app, prior.clone(), ask.clone(), brevity).await;
     if let Some(context) = &context {
         record(&app, &stream, question_id, context);
         emit(&app, request_id, context_body(context));
@@ -510,7 +523,7 @@ async fn run(
         history.push(Message::new(Role::System, context.system_message));
     }
     history.extend(prior);
-    history.push(Message::new(Role::User, question));
+    history.push(Message::new(Role::User, ask.message));
 
     let outcome = drive(
         &app,
@@ -539,32 +552,67 @@ async fn run(
 pub(crate) fn context_body(context: &InjectedContext) -> Body {
     Body::Context {
         used: context
-            .episodic
+            .memories
             .iter()
-            .map(|memory| memory.display_id())
+            .map(|memory| memory.slug.clone())
             .collect(),
-        core_tokens: context.core_tokens,
-        episodic_tokens: context.episodic_tokens,
+        tokens: context.tokens,
     }
 }
 
-/// Memory is additive in the GUI too: a brain failure means an uninjected
-/// turn, not a failed one — the ledger preview is where the error shows.
-/// The embed is CPU work, so it runs off the async workers.
+/// Mirrors the brain folder into the index. The storage mutex is taken one
+/// statement at a time and NEVER across the embed — a guard held into a
+/// second `storage()` call on the same thread is the self-deadlock that
+/// froze the whole app once. Call only from blocking contexts: a changed
+/// folder loads the embedding model.
+pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
+    let config = &ready.config.brain;
+    let dir = notes::brain_dir(config.path.as_deref()).map_err(|err| err.to_string())?;
+    let notes = notes::read_notes(&dir).map_err(|err| err.to_string())?;
+    let plan = ready
+        .storage()
+        .note_sync_plan(&notes)
+        .map_err(|err| err.to_string())?;
+    if !plan.changed {
+        return Ok(());
+    }
+    // The embed runs between the locks, never under one.
+    let embeddings = brain::embed_stale(&notes, &plan.stale, load_default_embedder)
+        .map_err(|err| err.to_string())?;
+    ready
+        .storage()
+        .sync_notes(&notes, &embeddings)
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+/// Memory is opt-in and additive in the GUI too: no `/brain`, no injection —
+/// and a brain failure means an uninjected turn, not a failed one; the
+/// ledger preview is where the error shows. The embed is CPU work, so it
+/// runs off the async workers.
 pub(crate) async fn build_context(
     app: &AppHandle,
     prior: Vec<Message>,
-    question: String,
+    ask: Ask,
     brevity: Brevity,
 ) -> Option<InjectedContext> {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
+        if !ask.recall {
+            return Some(brain::empty_context(brevity));
+        }
+        // The folder is the truth: recall reads the files as they are now.
+        if let Err(err) = sync_index(&ready) {
+            eprintln!("odyn: brain folder not synced: {err}");
+        }
+        // One lock per statement — see `sync_index`.
+        let storage = ready.storage();
         let context = brain::build_context(
-            &ready.storage(),
-            &ready.config.memory,
+            &storage,
+            &ready.config.brain,
             &prior,
-            &question,
+            &ask.query,
             brevity,
             load_default_embedder,
         );
@@ -603,6 +651,7 @@ pub async fn context_preview(
 ) -> Result<ContextPreview, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let ready = app.state::<AppState>().inner().ready()?;
+        let ask = brain::parse_ask(&draft);
         let (prior, chosen): (Vec<Message>, Option<Brevity>) = match conversation_id {
             Some(id) => {
                 // One lock per statement to prevent self-deadlock.
@@ -618,35 +667,45 @@ pub async fn context_preview(
             }
             None => (Vec::new(), None),
         };
-        let memory = &ready.config.memory;
+        let brevity = chosen.unwrap_or(ready.config.style.brevity);
+        let cap_tokens = ready.config.brain.cap_tokens;
+        // A draft without `/brain` previews exactly what it would send:
+        // nothing — rendered as the hint, not as an error.
+        if !ask.recall {
+            return Ok(preview(brain::empty_context(brevity), cap_tokens, false));
+        }
+        sync_index(&ready)?;
+        // One lock per statement — see `sync_index`.
+        let storage = ready.storage();
         let context = brain::build_context(
-            &ready.storage(),
-            memory,
+            &storage,
+            &ready.config.brain,
             &prior,
-            &draft,
-            chosen.unwrap_or(ready.config.style.brevity),
+            &ask.query,
+            brevity,
             load_default_embedder,
         )
         .map_err(|err| err.to_string())?;
-        Ok(preview(context, memory))
+        Ok(preview(context, cap_tokens, true))
     })
     .await
     .map_err(|err| err.to_string())?
 }
 
-fn preview(context: InjectedContext, memory: &MemoryConfig) -> ContextPreview {
-    let chip = |memory: &odyn_core::storage::Memory| LedgerItem {
-        id: memory.display_id(),
-        tokens: memory.tokens,
-        content: memory.content.clone(),
-    };
+fn preview(context: InjectedContext, cap_tokens: u32, active: bool) -> ContextPreview {
     ContextPreview {
-        core: context.core.iter().map(chip).collect(),
-        episodic: context.episodic.iter().map(chip).collect(),
-        core_tokens: context.core_tokens,
-        episodic_tokens: context.episodic_tokens,
-        cap_tokens: memory.core_budget_tokens + memory.episodic_cap_tokens,
-        over_budget: context.core_over_budget,
+        active,
+        memories: context
+            .memories
+            .iter()
+            .map(|memory| LedgerItem {
+                id: memory.slug.clone(),
+                tokens: memory.tokens,
+                content: memory.content.clone(),
+            })
+            .collect(),
+        tokens: context.tokens,
+        cap_tokens,
         system_message: context.system_message,
     }
 }

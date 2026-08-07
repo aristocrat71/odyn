@@ -3,9 +3,11 @@
 Odyn is a personal AI harness: a Rust core, a Tauri desktop app, and an `odyn`
 CLI that share one brain. It talks only to open-weight models — any
 OpenAI-compatible endpoint and local Ollama — and never to closed-weight
-providers. Its memory is two-tier: core memories that are always injected, and
-episodic memories retrieved by meaning for the turn at hand, both accounted for
-token by token before anything is sent.
+providers. The brain is a folder of markdown notes that stays out of the
+context window until asked: mention `/brain` in a message and Odyn walks its
+memory graph — wikilinks, embedding similarity, shared use — for the notes
+that answer you, accounted for token by token before anything is sent. Every
+other message reaches the model bare.
 
 ## Layout
 
@@ -38,7 +40,7 @@ Platform toolchains for the desktop app:
     libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
   ```
 
-The first use of episodic memory downloads the embedding model
+The first memory embedded downloads the embedding model
 (bge-small-en-v1.5, ~100 MB) into the data directory. Nothing else in the build
 or the tests touches the network beyond crates.io and npm.
 
@@ -140,14 +142,21 @@ on a free model when the endpoint serves one. Free means the endpoint said so,
 in the id: OpenRouter suffixes `:free`, OpenCode Zen `-free`. Nothing else is
 inferred, and nothing is badged — the id already says it.
 
-### `[memory]`
+### `[brain]`
+
+The brain is a folder of markdown notes — one file per memory, the file stem
+as its id, `[[wikilinks]]` as authored graph edges, YAML frontmatter tolerated
+but never injected. Nothing is injected unless a message mentions `/brain`;
+that turn's question then seeds a walk over the brain graph and the
+best-ranked notes are injected up to the cap. A stale `[memory]` section from
+brain v1 still parses and is ignored.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `core_budget_tokens` | `500` | Token budget for core memories. Core is never truncated: over budget it is still injected whole and the overrun is reported. |
-| `episodic_top_k` | `6` | How many nearest episodic memories retrieval considers per turn. Must be at least 1. |
-| `episodic_cap_tokens` | `900` | Hard cap on injected episodic tokens. Retrieved memories are kept closest-first until the next one would exceed it. |
-| `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two memories. Greater than 0 and at most 1. |
+| `path` | data dir | Where the note files live. `~` expands; point it at an Obsidian vault if you like. |
+| `top_k` | `6` | How many nearest notes seed the recall walk. Must be at least 1. |
+| `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
+| `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
 Token counts are a chars/4 approximation, in the config and in every ledger
 that reports them.
@@ -200,7 +209,7 @@ read from stdin.
 | --- | --- |
 | `--json` | Emit NDJSON instead of plain text: `{"type":"delta","text":…}` per chunk, then `{"type":"done","usage":…}`. Errors arrive as `{"type":"error","message":…}` on stdout, so consumers never have to read stderr. |
 | `--save` | Keep the exchange as a conversation. Creates the database if it does not exist; without it, `ask` opens an existing database read-only and stays ephemeral. |
-| `--show-context` | Print the injected memory context before the answer: the system message verbatim, then per-item token counts and the core/episodic totals. Goes to stderr in text mode so a piped answer stays clean; in `--json` mode it is one more event, `{"type":"context",…}`. |
+| `--show-context` | Print the injected memory context before the answer: the system message verbatim, then per-note token counts and the total against the cap. Goes to stderr in text mode so a piped answer stays clean; in `--json` mode it is one more event, `{"type":"context",…}`. |
 | `--brevity LEVEL` | `off`, `lite`, `full` or `ultra`. Overrides `[style] brevity` for this invocation. |
 
 ### `odyn chat`
@@ -224,6 +233,10 @@ Ctrl-D leaves.
 | `/brevity <LEVEL>` | Switch to `off`, `lite`, `full` or `ultra` for the rest of the session. |
 | `/quit` | Leave. |
 
+`/brain` is not a command: a message mentioning it — `/brain what did we
+decide about tokio?` — is a chat message with recall on. The token is
+stripped before the model or the transcript sees it.
+
 ### `odyn config`
 
 | Command | Effect |
@@ -234,27 +247,29 @@ Ctrl-D leaves.
 
 ### `odyn mem`
 
+Memories are markdown files; these commands write and remove them, then
+mirror the folder into the retrieval index. Anything they can do, a text
+editor in the brain folder does too — Odyn re-reads the folder on every
+recall and re-embeds only what changed.
+
 | Command | Effect |
 | --- | --- |
-| `odyn mem add <CONTENT>` | Remember something as an episodic memory: content is normalized and embedded. |
-| `odyn mem add <CONTENT> --core` | Store as a core memory instead — always injected, never embedded. |
-| `odyn mem list` | List all memories, oldest first, as `<id>  <tokens> tk  <content>`. |
-| `odyn mem list --tier <core\|episodic>` | Restrict to one tier. |
-| `odyn mem search <QUERY>` | The episodic memories closest in meaning to the query, up to 20 — browsing is deliberately wider than injection. |
-| `odyn mem rm <ID>` | Delete by id. |
-| `odyn mem edit <ID> <CONTENT>` | Replace the content. Episodic memories are re-embedded. |
-
-Ids print as `c-01` (core) and `e-0142` (episodic); the prefix is cosmetic, so
-`e-0142`, `c-0142` and `142` all name the same memory.
+| `odyn mem add <CONTENT>` | Write a new note; the name is derived from the first line, or given with `--name`. |
+| `odyn mem list` | List all notes, oldest first, as `<slug>  <tokens> tk  <first line>`. |
+| `odyn mem search <QUERY>` | The notes closest in meaning to the query, up to 20 — browsing is deliberately wider than injection. |
+| `odyn mem rm <NAME>` | Delete the note's file. |
+| `odyn mem edit <NAME> <CONTENT>` | Replace a note's content; it is re-embedded on sync. |
+| `odyn mem path` | Print the brain folder's path. |
 
 ## Data locations
 
-The config file and the database are independent of each other and of the
-checkout.
+The config file, the brain folder and the database are independent of each
+other and of the checkout.
 
 | What | Where |
 | --- | --- |
 | Config | `<config dir>/odyn.toml` |
+| Brain | `<data dir>/brain/` — the folder of `.md` notes, unless `[brain] path` points elsewhere |
 | Database | `<data dir>/odyn.db` (SQLite in WAL mode, plus its `-wal`/`-shm` sidecars) |
 | Embedding model | `<data dir>/models/` |
 

@@ -15,8 +15,7 @@ type SpotEvent =
       request_id: number;
       kind: "context";
       used: string[];
-      core_tokens: number;
-      episodic_tokens: number;
+      tokens: number;
     }
   | { request_id: number; kind: "delta"; text: string }
   | { request_id: number; kind: "done" }
@@ -123,17 +122,14 @@ function keyCard(): void {
 }
 
 // DESIGN.md §7: a minimal one-line ledger between the field and the answer.
+// It only ever fills on a /brain ask — everything else injects nothing.
 function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.replaceChildren();
-  const total = event.core_tokens + event.episodic_tokens;
-  if (total === 0) return;
-  if (event.core_tokens > 0) {
-    ledger.append(el("span", "chip-core", `● core ${event.core_tokens}`));
-  }
+  if (event.tokens === 0) return;
   for (const id of event.used) {
     ledger.append(el("span", "chip-epi", `◈ ${id}`));
   }
-  ledger.append(el("span", "spot-ledger-total", `${total} tk`));
+  ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
   ledger.hidden = commandMode;
 }
 
@@ -313,8 +309,13 @@ function cycleModel(): void {
   if (next !== undefined) void pick(target.provider, next);
 }
 
+// A `/brain` mention is a question with recall on, never a command — the
+// same rule as chat and the CLI.
+const brainAsk = (text: string): boolean =>
+  /(^|\s)\/brain([\s.,;:!?]|$)/i.test(text);
+
 input.addEventListener("input", () => {
-  if (!keyMode && input.value.startsWith("/")) {
+  if (!keyMode && input.value.startsWith("/") && !brainAsk(input.value)) {
     cursor = 0;
     commandMode = true;
     drawCommands();

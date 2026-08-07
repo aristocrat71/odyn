@@ -333,9 +333,12 @@ pub fn spotlight_ask(
         abort(&previous);
     }
 
+    // The same `/brain` rule as everywhere: a mention turns recall on for
+    // this ask, and neither the model nor a promoted transcript sees it.
+    let parsed = odyn_core::brain::parse_ask(&text);
     let shared = Arc::new(Shared::default());
     let mut ask = Ask {
-        question: text.clone(),
+        question: parsed.message.clone(),
         shared: Arc::clone(&shared),
         task: None,
     };
@@ -343,14 +346,13 @@ pub fn spotlight_ask(
     match target(&ready) {
         Ok((provider, model)) => match ready.registry.provider(&provider) {
             Ok(provider) => {
-                let history = vec![Message::new(Role::User, text)];
                 ask.task = Some(tauri::async_runtime::spawn(run(
                     app.clone(),
                     request_id,
                     shared,
                     provider,
                     model,
-                    history,
+                    parsed,
                 )));
             }
             // A misconfigured provider is the user's to fix, so it says so.
@@ -456,7 +458,7 @@ async fn run(
     shared: Arc<Shared>,
     provider: Box<dyn ChatProvider>,
     model: String,
-    mut history: Vec<Message>,
+    ask: odyn_core::brain::Ask,
 ) {
     // A spotlight ask has no history: the question alone drives retrieval.
     // Brevity comes from `[spotlight]`, never from any conversation.
@@ -465,12 +467,8 @@ async fn run(
         .ready()
         .map(|ready| ready.config.spotlight.brevity)
         .unwrap_or_default();
-    let question = history
-        .last()
-        .map(|last| last.content.clone())
-        .unwrap_or_default();
-    if let Some(context) = crate::commands::build_context(&app, Vec::new(), question, brevity).await
-    {
+    let mut history = vec![Message::new(Role::User, ask.message.clone())];
+    if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
         *lock(&shared.injected) = context.memory_ids();
         emit(&app, request_id, crate::commands::context_body(&context));
         if !context.system_message.is_empty() {

@@ -8,6 +8,7 @@ pub mod config;
 pub mod config_edit;
 pub mod embed;
 pub mod graph;
+pub mod notes;
 pub mod providers;
 pub mod reasoning;
 pub mod storage;

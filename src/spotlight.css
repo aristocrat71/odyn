@@ -129,10 +129,6 @@ button {
   overflow: hidden;
 }
 
-#spot-ledger .chip-core {
-  color: var(--core);
-}
-
 #spot-ledger .chip-epi {
   color: var(--epi);
 }

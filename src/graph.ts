@@ -29,7 +29,7 @@ export function renderGraph(): HTMLElement {
       el(
         "div",
         "brain-empty",
-        "the ravens haven't returned yet — add a memory with odyn mem add",
+        "the ravens haven't returned yet — drop an .md note into the brain folder, or run odyn mem add",
       ),
     );
     return wrap;
@@ -55,7 +55,12 @@ export function renderGraph(): HTMLElement {
     line.setAttribute("y1", String(a.y));
     line.setAttribute("x2", String(b.x));
     line.setAttribute("y2", String(b.y));
-    line.classList.add(edge.kind === "similarity" ? "gedge-sim" : "gedge-co");
+    const kinds = {
+      link: "gedge-link",
+      similarity: "gedge-sim",
+      coinjection: "gedge-co",
+    } as const;
+    line.classList.add(kinds[edge.kind]);
     world.append(line);
   }
   for (const node of graph.nodes) {
@@ -126,7 +131,7 @@ export function renderGraph(): HTMLElement {
   const hud = el(
     "div",
     "graph-hud",
-    "● core   ◈ episodic   — similar   ┄ co-injected   ·   scroll to zoom · drag to pan",
+    "◈ memory   ━ linked   — similar   ┄ co-injected   ·   scroll to zoom · drag to pan",
   );
 
   wrap.append(svg, hud, controls, tip);
@@ -138,7 +143,7 @@ export function renderGraph(): HTMLElement {
 function laying(): string {
   const overview = state.brain.overview;
   if (overview === null) return "laying out memories…";
-  return `laying out ${overview.episodic_count + overview.core.length} memories…`;
+  return `laying out ${overview.count} memories…`;
 }
 
 function dot(
@@ -148,8 +153,8 @@ function dot(
   world: SVGGElement,
 ): SVGGElement {
   const group = document.createElementNS(SVG, "g");
-  group.classList.add("gnode", node.core ? "gnode-core" : "gnode-epi");
-  const radius = node.core ? 11 : 5.5 + Math.min(node.hits, 14) * 0.45;
+  group.classList.add("gnode", "gnode-epi");
+  const radius = 5.5 + Math.min(node.hits, 14) * 0.45;
   const circle = document.createElementNS(SVG, "circle");
   circle.setAttribute("cx", String(node.x));
   circle.setAttribute("cy", String(node.y));
@@ -162,12 +167,12 @@ function dot(
 
   const show = (): void => {
     tip.replaceChildren(
-      el("div", `graph-tip-id ${node.core ? "core" : "epi"}`, node.display_id),
+      el("div", "graph-tip-id epi", node.display_id),
       el("div", "graph-tip-text", node.content),
       el(
         "div",
         "graph-tip-meta",
-        node.core ? "core · always injected" : `${node.hits} hits · episodic`,
+        `${node.hits} ${node.hits === 1 ? "hit" : "hits"}`,
       ),
     );
     const box = svg.getBoundingClientRect();

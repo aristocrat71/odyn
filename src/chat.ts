@@ -158,6 +158,8 @@ function failed(message: string): HTMLElement {
 }
 
 // DESIGN.md §5.1: one mono status line fused to the top of the composer.
+// Nothing is injected without a /brain mention, and the line says so instead
+// of sitting empty.
 function ledger(): HTMLElement {
   const line = el("div", "ledger");
   line.append(el("span", "ledger-label", "CONTEXT"));
@@ -167,24 +169,25 @@ function ledger(): HTMLElement {
   }
   const preview = state.ledger.preview;
   if (preview === null) return line;
-
-  if (preview.core_tokens > 0) {
-    const chip = el("span", "chip chip-core");
-    chip.append("● core ", el("span", "chip-tokens", String(preview.core_tokens)));
-    if (preview.over_budget) chip.classList.add("over");
-    chip.dataset.tip = preview.core.map((item) => item.content).join(" · ");
-    line.append(chip);
+  if (!preview.active) {
+    line.append(el("span", "ledger-note", "mention /brain to recall memory"));
+    return line;
   }
+  if (preview.memories.length === 0) {
+    line.append(el("span", "ledger-note", "/brain · nothing to recall yet"));
+    return line;
+  }
+
   const visible = state.ledger.expanded
-    ? preview.episodic
-    : preview.episodic.slice(0, CHIP_LIMIT);
+    ? preview.memories
+    : preview.memories.slice(0, CHIP_LIMIT);
   for (const item of visible) {
     const chip = el("span", "chip chip-epi");
     chip.append("◈ ", item.id, " ", el("span", "chip-tokens", String(item.tokens)));
     chip.dataset.tip = item.content;
     line.append(chip);
   }
-  const rest = preview.episodic.slice(CHIP_LIMIT);
+  const rest = preview.memories.slice(CHIP_LIMIT);
   if (!state.ledger.expanded && rest.length > 0) {
     const total = rest.reduce((sum, item) => sum + item.tokens, 0);
     const more = el("button", "chip chip-epi chip-more");
@@ -192,8 +195,9 @@ function ledger(): HTMLElement {
     more.addEventListener("click", expandLedger);
     line.append(more);
   }
-  const total = preview.core_tokens + preview.episodic_tokens;
-  line.append(el("span", "ledger-total", `${count(total)} / ${count(preview.cap_tokens)} tk`));
+  line.append(
+    el("span", "ledger-total", `${count(preview.tokens)} / ${count(preview.cap_tokens)} tk`),
+  );
   return line;
 }
 

@@ -623,14 +623,6 @@ button {
   position: relative;
 }
 
-.chip-core {
-  color: var(--core);
-}
-
-.chip-core.over {
-  color: var(--danger);
-}
-
 .chip-epi {
   color: var(--epi);
 }
@@ -667,7 +659,7 @@ button {
   color: var(--faint);
 }
 
-/* DESIGN.md §6. Brain view: open text columns, no panes. */
+/* DESIGN.md §6. Brain view: one open column of notes, no panes. */
 
 .brain {
   display: flex;
@@ -713,21 +705,10 @@ button {
   color: var(--faint);
 }
 
-.brain-columns {
-  display: flex;
-  gap: 64px;
+.brain-list {
   margin-top: 30px;
-  min-height: 0;
-}
-
-.brain-core {
-  flex: none;
-  width: 340px;
-}
-
-.brain-epi {
-  flex: 1;
   min-width: 0;
+  min-height: 0;
 }
 
 .col-label {
@@ -737,33 +718,18 @@ button {
   text-transform: uppercase;
 }
 
-.col-label.core {
-  color: var(--core);
-}
-
 .col-label.epi {
   color: var(--epi);
 }
 
-.budget {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 14px;
+.brain-path {
+  margin-top: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--dim);
-}
-
-.budget-bar {
-  flex: 1;
-  height: 2px;
-  background: var(--faint);
-}
-
-.budget-fill {
-  height: 100%;
-  background: var(--core);
+  font-size: 10px;
+  color: var(--faint);
 }
 
 .mem-row {
@@ -778,10 +744,6 @@ button {
   flex: none;
   font-family: var(--mono);
   font-size: 11px;
-}
-
-.mem-id.core {
-  color: var(--core);
 }
 
 .mem-id.epi {
@@ -943,6 +905,13 @@ button {
   cursor: grabbing;
 }
 
+/* An authored [[link]] is the loudest edge on the map. */
+.gedge-link {
+  stroke: var(--epi);
+  stroke-width: 1.4;
+  opacity: 0.85;
+}
+
 .gedge-sim {
   stroke: var(--faint);
   stroke-width: 1;
@@ -959,12 +928,6 @@ button {
   stroke-width: 1.5;
 }
 
-.gnode-core circle {
-  stroke: var(--core);
-  fill: var(--core);
-  fill-opacity: 0.22;
-}
-
 .gnode-epi circle {
   stroke: var(--epi);
   fill: var(--epi);
@@ -979,7 +942,7 @@ button {
   pointer-events: none;
 }
 
-/* Episodic labels earn their place with zoom; core is always named. */
+/* Labels earn their place with zoom. */
 .gnode-epi text {
   display: none;
 }

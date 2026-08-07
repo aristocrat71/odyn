@@ -1,14 +1,19 @@
-//! The brain graph: nodes for memories, edges for similarity and co-injection,
-//! positions from a force layout. Built on demand, cached in `graph_cache`,
-//! invalidated by every memory or injection write.
+//! The brain graph: nodes for memories, weighted edges for wikilinks,
+//! similarity and co-injection, positions from a force layout. Built on
+//! demand, cached in `graph_cache`, invalidated by every sync or injection
+//! write. The recall walk in `brain` runs over these same edges — what the
+//! graph view draws is what retrieval traverses.
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{MemoryTier, Storage, StorageError};
+use crate::storage::{Storage, StorageError};
 
 /// Neighbors examined per node when looking for similarity edges.
 const NEIGHBORS: usize = 8;
 const CO_INJECTION_MIN: i64 = 2;
+/// A deliberate `[[link]]` outranks any derived edge: similarity tops out at
+/// 1.0 and co-injection below it, so 1.25 keeps authored edges the strongest.
+const LINK_WEIGHT: f32 = 1.25;
 const ITERATIONS: usize = 300;
 /// Positions land inside [-EXTENT, EXTENT] on both axes.
 const EXTENT: f32 = 450.0;
@@ -16,8 +21,8 @@ const EXTENT: f32 = 450.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: i64,
+    /// The note's slug.
     pub display_id: String,
-    pub core: bool,
     pub content: String,
     pub hits: i64,
     pub x: f32,
@@ -27,6 +32,8 @@ pub struct GraphNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EdgeKind {
+    /// An authored `[[wikilink]]` between two notes.
+    Link,
     Similarity,
     CoInjection,
 }
@@ -36,6 +43,9 @@ pub struct GraphEdge {
     pub a: i64,
     pub b: i64,
     pub kind: EdgeKind,
+    /// The walk's edge strength: links fixed at [`LINK_WEIGHT`], similarity
+    /// the cosine itself, co-injection rising with the shared-use count.
+    pub weight: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,13 +76,12 @@ pub fn brain_graph(storage: &Storage, similarity_threshold: f32) -> Result<Graph
 }
 
 fn compute(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphError> {
-    let stats = storage.stats_for(storage.list_memories(None)?)?;
+    let stats = storage.stats_for(storage.list_memories()?)?;
     let mut nodes: Vec<GraphNode> = stats
         .into_iter()
         .map(|stats| GraphNode {
             id: stats.memory.id,
             display_id: stats.memory.display_id(),
-            core: stats.memory.tier == MemoryTier::Core,
             content: stats.memory.content,
             hits: stats.hits,
             x: 0.0,
@@ -81,8 +90,21 @@ fn compute(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphE
         .collect();
 
     let mut edges = Vec::new();
-    for node in nodes.iter().filter(|node| !node.core) {
-        for (other, distance) in storage.episodic_neighbors(node.id, NEIGHBORS)? {
+    // Authored links first: two notes linking each other are still one edge.
+    let mut linked = std::collections::HashSet::new();
+    for (from, to) in storage.links()? {
+        let (a, b) = (from.min(to), from.max(to));
+        if linked.insert((a, b)) {
+            edges.push(GraphEdge {
+                a,
+                b,
+                kind: EdgeKind::Link,
+                weight: LINK_WEIGHT,
+            });
+        }
+    }
+    for node in nodes.iter() {
+        for (other, distance) in storage.neighbors(node.id, NEIGHBORS)? {
             // Embeddings are unit vectors, so L2 and cosine agree:
             // cos = 1 - d²/2.
             let similarity = 1.0 - (distance * distance) as f32 / 2.0;
@@ -91,15 +113,18 @@ fn compute(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphE
                     a: node.id,
                     b: other,
                     kind: EdgeKind::Similarity,
+                    weight: similarity,
                 });
             }
         }
     }
-    for (a, b) in storage.co_injections(CO_INJECTION_MIN)? {
+    for (a, b, count) in storage.co_injections(CO_INJECTION_MIN)? {
         edges.push(GraphEdge {
             a,
             b,
             kind: EdgeKind::CoInjection,
+            // Rises with shared use, saturating short of any similarity edge.
+            weight: count as f32 / (count as f32 + 2.0),
         });
     }
 
@@ -107,10 +132,10 @@ fn compute(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphE
     Ok(Graph { nodes, edges })
 }
 
-/// Fruchterman–Reingold: all-pairs repulsion, springs on similarity edges,
-/// gravity to the center, cooling over the run. Deterministic — the seed
-/// positions are a golden-angle spiral, not random — so the same brain always
-/// draws the same map.
+/// Fruchterman–Reingold: all-pairs repulsion, springs on link and similarity
+/// edges, gravity to the center, cooling over the run. Deterministic — the
+/// seed positions are a golden-angle spiral, not random — so the same brain
+/// always draws the same map.
 fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
     let count = nodes.len();
     if count == 0 {
@@ -133,7 +158,7 @@ fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
         .collect();
     let springs: Vec<(usize, usize)> = edges
         .iter()
-        .filter(|edge| edge.kind == EdgeKind::Similarity)
+        .filter(|edge| matches!(edge.kind, EdgeKind::Similarity | EdgeKind::Link))
         .filter_map(|edge| Some((*index_of.get(&edge.a)?, *index_of.get(&edge.b)?)))
         .collect();
 
@@ -193,11 +218,12 @@ fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embed::EMBEDDING_DIM;
+    use crate::storage::memory_tests::note_with_links;
     use crate::storage::tests::TempDir;
+    use crate::storage::Storage;
 
     fn vector(axis: usize, lean: f32) -> Vec<f32> {
-        let mut values = vec![0.0f32; EMBEDDING_DIM];
+        let mut values = vec![0.0f32; crate::embed::EMBEDDING_DIM];
         values[axis] = 1.0 - lean;
         values[axis + 1] = lean;
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
@@ -207,26 +233,26 @@ mod tests {
         values
     }
 
+    /// Three notes: two close in meaning, one far, with a link far→close-a.
     fn seeded(label: &str) -> (TempDir, Storage) {
         let dir = TempDir::new(label);
         let storage = Storage::open(dir.db()).expect("open");
-        storage
-            .add_memory(MemoryTier::Core, "core anchor", None)
-            .expect("core");
-        storage
-            .add_memory(MemoryTier::Episodic, "close a", Some(&vector(0, 0.0)))
-            .expect("a");
-        storage
-            .add_memory(MemoryTier::Episodic, "close b", Some(&vector(0, 0.1)))
-            .expect("b");
-        storage
-            .add_memory(MemoryTier::Episodic, "far away", Some(&vector(100, 0.0)))
-            .expect("far");
+        let notes = vec![
+            note_with_links("close-a", "close a", &[]),
+            note_with_links("close-b", "close b", &[]),
+            note_with_links("far-away", "far, see [[close-a]]", &["close-a"]),
+        ];
+        let embeddings = vec![
+            ("close-a".to_string(), vector(0, 0.0)),
+            ("close-b".to_string(), vector(0, 0.1)),
+            ("far-away".to_string(), vector(100, 0.0)),
+        ];
+        storage.sync_notes(&notes, &embeddings).expect("sync");
         (dir, storage)
     }
 
     #[test]
-    fn similarity_and_co_injection_edges_come_out_of_the_data() {
+    fn link_similarity_and_co_injection_edges_come_out_of_the_data() {
         let (_dir, storage) = seeded("edges");
         let conversation = storage
             .create_conversation("g", "ollama", "llama3.2:3b")
@@ -242,33 +268,39 @@ mod tests {
                 )
                 .expect("message");
             storage
-                .record_injections(conversation.id, Some(row.id), &[1, 2, 4])
+                .record_injections(conversation.id, Some(row.id), &[1, 3])
                 .expect("inject");
         }
 
         let graph = brain_graph(&storage, 0.78).expect("graph");
-        assert_eq!(graph.nodes.len(), 4);
-        let core = graph.nodes.iter().find(|node| node.id == 1).expect("core");
-        assert!(core.core);
-        assert_eq!(core.hits, 2);
+        assert_eq!(graph.nodes.len(), 3);
+        let close_a = graph.nodes.iter().find(|node| node.id == 1).expect("a");
+        assert_eq!(close_a.display_id, "close-a");
+        assert_eq!(close_a.hits, 2);
 
+        let by_kind = |kind: EdgeKind| -> Vec<(i64, i64, f32)> {
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == kind)
+                .map(|edge| (edge.a, edge.b, edge.weight))
+                .collect()
+        };
+        // The authored link: far-away (3) → close-a (1), normalized a<b.
+        let links = by_kind(EdgeKind::Link);
+        assert_eq!(links.len(), 1);
+        assert_eq!((links[0].0, links[0].1), (1, 3));
+        assert!((links[0].2 - LINK_WEIGHT).abs() < 1e-6);
         // cos(a, b) ≈ 0.994 passes the threshold; everything near "far" fails.
-        let similar: Vec<(i64, i64)> = graph
-            .edges
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::Similarity)
-            .map(|edge| (edge.a, edge.b))
-            .collect();
-        assert_eq!(similar, vec![(2, 3)]);
-        // Memories 2 and 4 were injected together twice; the core row never
-        // forms co-injection pairs.
-        let co: Vec<(i64, i64)> = graph
-            .edges
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::CoInjection)
-            .map(|edge| (edge.a, edge.b))
-            .collect();
-        assert_eq!(co, vec![(2, 4)]);
+        let similar = by_kind(EdgeKind::Similarity);
+        assert_eq!(similar.len(), 1);
+        assert_eq!((similar[0].0, similar[0].1), (1, 2));
+        assert!(similar[0].2 >= 0.78 && similar[0].2 <= 1.0, "{similar:?}");
+        // Memories 1 and 3 were injected together twice: weight 2/(2+2).
+        let co = by_kind(EdgeKind::CoInjection);
+        assert_eq!(co.len(), 1);
+        assert_eq!((co[0].0, co[0].1), (1, 3));
+        assert!((co[0].2 - 0.5).abs() < 1e-6);
 
         let mut positions: Vec<(i32, i32)> = graph
             .nodes
@@ -281,7 +313,7 @@ mod tests {
             .collect();
         positions.sort_unstable();
         positions.dedup();
-        assert_eq!(positions.len(), 4, "nodes must not stack");
+        assert_eq!(positions.len(), 3, "nodes must not stack");
     }
 
     #[test]
@@ -292,14 +324,30 @@ mod tests {
         let second = brain_graph(&storage, 0.78).expect("second");
         assert_eq!(first, second, "the cache answers unchanged");
 
-        storage
-            .add_memory(MemoryTier::Episodic, "new arrival", Some(&vector(50, 0.0)))
-            .expect("add");
+        let notes = vec![
+            note_with_links("close-a", "close a", &[]),
+            note_with_links("close-b", "close b", &[]),
+            note_with_links("far-away", "far, see [[close-a]]", &["close-a"]),
+            note_with_links("new-arrival", "new", &[]),
+        ];
+        let embeddings = vec![("new-arrival".to_string(), vector(50, 0.0))];
+        storage.sync_notes(&notes, &embeddings).expect("sync");
         assert!(
             storage.cached_graph().expect("cached").is_none(),
-            "a write must clear the cache"
+            "a sync must clear the cache"
         );
         let third = brain_graph(&storage, 0.78).expect("third");
-        assert_eq!(third.nodes.len(), 5, "the new memory appears on refresh");
+        assert_eq!(third.nodes.len(), 4, "the new memory appears on refresh");
+    }
+
+    /// An old cache payload — edges without weights — must recompute, not error.
+    #[test]
+    fn an_unparseable_cache_is_recomputed() {
+        let (_dir, storage) = seeded("stale-cache");
+        storage
+            .store_graph(r#"{"nodes":[],"edges":[{"a":1,"b":2,"kind":"similarity"}]}"#)
+            .expect("plant an old payload");
+        let graph = brain_graph(&storage, 0.78).expect("recompute");
+        assert_eq!(graph.nodes.len(), 3);
     }
 }

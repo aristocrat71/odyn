@@ -54,13 +54,19 @@ input.addEventListener("keydown", (event) => {
     run(chosen);
     return;
   }
-  // Not a command: it was the first message all along.
-  if (text !== "" && !text.startsWith("/")) {
+  // Not a command: it was the first message all along. `/brain <question>`
+  // counts — that is a chat message with recall on, not a navigation.
+  if (text !== "" && (!text.startsWith("/") || brainAsk(text))) {
     prefillComposer(text);
     input.value = "";
     setView("chat");
   }
 });
+
+// The bare `/brain` opens the brain view above; with anything after it, the
+// mention belongs to the chat composer.
+const brainAsk = (text: string): boolean =>
+  /(^|\s)\/brain([\s.,;:!?]|$)/i.test(text);
 
 export function renderHome(): HTMLElement {
   const view = el("div", "home");

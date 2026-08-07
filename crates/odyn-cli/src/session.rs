@@ -4,10 +4,10 @@
 use std::io::Write;
 
 use futures::StreamExt;
-use odyn_core::brain::{self, InjectedContext};
+use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
 use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
-use odyn_core::config::{Config, ConfigError, MemoryConfig, ProviderConfig, ProviderRegistry};
+use odyn_core::config::{BrainConfig, Config, ConfigError, ProviderConfig, ProviderRegistry};
 use odyn_core::embed::load_default_embedder;
 use odyn_core::storage::{Storage, StorageError};
 
@@ -50,7 +50,7 @@ pub struct Session {
     pub provider: String,
     pub model: String,
     pub handle: Box<dyn ChatProvider>,
-    pub memory: MemoryConfig,
+    pub brain: BrainConfig,
     /// The `[style]` default; a `--brevity` flag overrides it per invocation.
     pub brevity: Brevity,
 }
@@ -73,7 +73,7 @@ impl Session {
             provider,
             model,
             handle,
-            memory: config.memory.clone(),
+            brain: config.brain.clone(),
             brevity: config.style.brevity,
         })
     }
@@ -135,37 +135,37 @@ pub fn save_turn(
     storage.append_turn(conversation, prompt, &reply.text, reply.usage, injected)
 }
 
-/// Memory is additive: when the brain cannot run, the turn still goes out —
-/// uninjected, loudly, with nothing recorded. `None` means exactly that.
-/// No database is not a failure: there is no memory, but style still applies.
+/// Memory is opt-in and additive: a turn that never mentioned `/brain` gets
+/// the style directive alone, and when the brain cannot run, the turn still
+/// goes out — uninjected, loudly, with nothing recorded. `None` means exactly
+/// that. No database is not a failure either: style still applies.
 pub fn memory_context(
     storage: Option<&Storage>,
-    memory: &MemoryConfig,
+    brain_config: &BrainConfig,
     history: &[Message],
-    prompt: &str,
+    ask: &Ask,
     brevity: Brevity,
 ) -> Option<InjectedContext> {
+    if !ask.recall {
+        return Some(brain::empty_context(brevity));
+    }
     let Some(storage) = storage else {
         return Some(brain::empty_context(brevity));
     };
+    // The folder is the truth: recall reads the files as they are now.
+    if let Err(err) = brain::sync(storage, brain_config, load_default_embedder) {
+        warn(&format!("brain folder not synced: {err}"));
+    }
     let context = brain::build_context(
         storage,
-        memory,
+        brain_config,
         history,
-        prompt,
+        &ask.query,
         brevity,
         load_default_embedder,
     );
     match context {
-        Ok(context) => {
-            if context.core_over_budget {
-                warn(&format!(
-                    "core memories exceed the budget ({} > {} tokens)",
-                    context.core_tokens, memory.core_budget_tokens
-                ));
-            }
-            Some(context)
-        }
+        Ok(context) => Some(context),
         Err(err) => {
             warn(&format!("memory skipped this turn: {err}"));
             None
@@ -190,19 +190,16 @@ pub fn with_context(context: Option<&InjectedContext>, history: &[Message]) -> V
 /// is one more event on the stream.
 pub fn print_context(
     context: Option<&InjectedContext>,
-    memory: &MemoryConfig,
+    brain_config: &BrainConfig,
     json: bool,
 ) -> Result<(), Failure> {
     if json {
         let items: Vec<serde_json::Value> = context
             .map(|context| {
                 context
-                    .core
+                    .memories
                     .iter()
-                    .chain(&context.episodic)
-                    .map(|memory| {
-                        serde_json::json!({"id": memory.display_id(), "tokens": memory.tokens})
-                    })
+                    .map(|memory| serde_json::json!({"id": memory.slug, "tokens": memory.tokens}))
                     .collect()
             })
             .unwrap_or_default();
@@ -221,16 +218,13 @@ pub fn print_context(
             .and_then(|()| writeln!(err, "{}", context.system_message))
             .and_then(|()| writeln!(err, "----- tokens (chars/4 approximation) -----"))
             .and_then(|()| {
-                for item in context.core.iter().chain(&context.episodic) {
-                    writeln!(err, "{} {}", item.display_id(), item.tokens)?;
+                for item in &context.memories {
+                    writeln!(err, "{} {}", item.slug, item.tokens)?;
                 }
                 writeln!(
                     err,
-                    "core {}/{} tk, episodic {}/{} tk",
-                    context.core_tokens,
-                    memory.core_budget_tokens,
-                    context.episodic_tokens,
-                    memory.episodic_cap_tokens
+                    "memories {}/{} tk",
+                    context.tokens, brain_config.cap_tokens
                 )
             })
             .and_then(|()| writeln!(err, "-------------------")),

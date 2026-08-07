@@ -79,9 +79,10 @@ const SECTIONS: Section[] = [
         "Odyn is a personal AI harness: a desktop app and an `odyn` command-line binary " +
           "over one Rust core, sharing one config file, one database and one brain. It " +
           "talks only to open-weight models — any OpenAI-compatible endpoint and a local " +
-          "Ollama. Memory is two-tier: core memories that are always injected, and " +
-          "episodic memories retrieved by meaning for the turn at hand, both accounted " +
-          "for token by token before anything is sent.",
+          "Ollama. The brain is a folder of markdown notes, and it stays out of your " +
+          "context window until you ask: mention `/brain` in a message and Odyn walks " +
+          "its memory graph for the notes that answer you, accounted for token by token " +
+          "before anything is sent. Every other message reaches the model bare.",
       ),
     ],
   },
@@ -116,10 +117,10 @@ keep_alive = "5m"
 # api_key_env = "DEEPSEEK_API_KEY"
 # default_model = "deepseek-chat"
 
-[memory]
-core_budget_tokens = 500
-episodic_top_k = 6
-episodic_cap_tokens = 900
+[brain]
+# path = "~/odyn-brain"
+top_k = 6
+cap_tokens = 1200
 similarity_edge_threshold = 0.78
 
 [style]
@@ -306,88 +307,101 @@ odyn chat`),
     id: "brain",
     title: "the brain",
     body: () => [
-      sub("core"),
+      sub("a folder of notes"),
       p(
-        "Core memories are facts about you that are worth paying for on every single " +
-          "turn: they are injected whole, every time, and are never embedded. Core is never " +
-          "truncated — over its budget it still goes in complete and the overrun is flagged, " +
-          "because silently dropping one would make the ledger a lie.",
+        "The brain is a folder of markdown files — `odyn mem path` prints where, and " +
+          "`path` under `[brain]` moves it anywhere, an Obsidian vault included. One " +
+          "file is one memory: the file's name is its id, the text is the memory, and " +
+          "YAML frontmatter is tolerated but never injected. Write files with any " +
+          "editor or agent; Odyn re-reads the folder on every recall and re-embeds " +
+          "only what changed. Deleting a file deletes the memory. The database is " +
+          "just an index derived from the folder — the files never lie.",
       ),
-      sub("episodic"),
+      sub("links"),
       p(
-        "Episodic memories are everything else, retrieved only when they are relevant. " +
-          "The retrieval query is the last two turns of the conversation — four messages, " +
-          "injected system messages excluded — joined with the message you are about to " +
-          "send. That text is embedded, the nearest `episodic_top_k` (default 6) episodic " +
-          "memories come back closest-first, and they are kept in that order until the next " +
-          "one would push past `episodic_cap_tokens` (default 900). Token counts everywhere " +
-          "are a chars/4 approximation, computed when a memory is written.",
+        "`[[another-note]]` inside a note is a deliberate edge in the brain graph, " +
+          "Obsidian-style — `[[note|alias]]` and `[[note#heading]]` resolve to the " +
+          "same place, case-insensitively. Links are the strongest edges the recall " +
+          "walk follows, so wiring two notes together is telling Odyn they belong " +
+          "in context together.",
+      ),
+      sub("recall — the /brain mention"),
+      p(
+        "Nothing is injected by default. A message mentioning `/brain` — anywhere in " +
+          "it — recalls for that one turn; the token itself is stripped before the " +
+          "model or the transcript sees the message. The query is the last two turns " +
+          "plus your cleaned message, embedded once. The nearest `top_k` notes seed a " +
+          "walk over the brain graph — links strongest, then embedding similarity, " +
+          "then co-use — and the final order blends how well a note matches the " +
+          "question with how firmly it sits in the walked neighborhood of notes that " +
+          "do. Notes are kept in that order until the next would push past " +
+          "`cap_tokens` (default 1200). A bare `/brain` recalls on the conversation " +
+          "history alone.",
       ),
       sub("the ledger"),
       p(
         "One mono line fused to the top of the composer, which is not a " +
           "readout of what was sent — it is built by the same call the send makes:",
       ),
-      pre("CONTEXT   ● core 342   ◈ e-0142 61   ◈ e-0087 48        488 / 1,400 tk"),
+      pre("CONTEXT   ◈ cern-trip 61   ◈ espresso-order 48        109 / 1,200 tk"),
       list([
-        "`● core {tk}` in amber, one teal `◈ {id} {tk}` per retrieved episodic memory, token counts dim.",
-        "Past five episodic chips the tail collapses to `◈ +3 more 122`; clicking expands it.",
-        "Hovering a chip shows that memory's full text.",
-        "The total on the right is against `core_budget_tokens + episodic_cap_tokens` — 1,400 with the defaults. The core chip turns red when core alone is over its budget.",
-        "It refreshes at least 400ms after the last keystroke. The line is exactly what the model sees.",
+        "Without `/brain` in the draft it reads `mention /brain to recall memory` — and that is the truth: the send injects nothing.",
+        "With `/brain`, one teal `◈ {slug} {tk}` chip per recalled note, token counts dim.",
+        "Past five chips the tail collapses to `◈ +3 more 122`; clicking expands it.",
+        "Hovering a chip shows that note's full text.",
+        "The total on the right is against `cap_tokens`. It refreshes at least 400ms after the last keystroke. The line is exactly what the model sees.",
       ]),
       sub("trace lines"),
       p(
-        "Under any answer that used episodic memories: `◈ used e-0142 " +
-          "e-0087`. Ids print as `c-01` for core and `e-0142` for episodic; the prefix is " +
-          "cosmetic, so `e-0142`, `c-0142` and `142` all name the same memory.",
+        "Under any answer that recalled: `◈ used cern-trip espresso-order` — the " +
+          "note slugs injected for the question above it.",
       ),
       sub("from the command line"),
       rows([
-        ["odyn mem add <CONTENT>", "remember something as episodic: normalized to one line, then embedded."],
-        ["odyn mem add <CONTENT> --core", "store as core instead — always injected, never embedded."],
-        ["odyn mem list", "every memory, oldest first, as `<id>  <tokens> tk  <content>`."],
-        ["odyn mem list --tier core|episodic", "one tier only."],
+        ["odyn mem add <CONTENT>", "write a new note; the name is derived from the first line, or given with `--name`."],
+        ["odyn mem list", "every note, oldest first, as `<slug>  <tokens> tk  <first line>`."],
         [
           "odyn mem search <QUERY>",
-          "the episodic memories closest in meaning, up to 20 — browsing is deliberately wider than injection.",
+          "the notes closest in meaning, up to 20 — browsing is deliberately wider than injection.",
         ],
-        ["odyn mem rm <ID>", "delete by id."],
-        ["odyn mem edit <ID> <CONTENT>", "replace the content. Episodic memories are re-embedded."],
+        ["odyn mem rm <NAME>", "delete the note's file."],
+        ["odyn mem edit <NAME> <CONTENT>", "replace a note's content; it is re-embedded on sync."],
+        ["odyn mem path", "print the brain folder."],
       ]),
       sub("brain view — list mode"),
       p(
-        "The header states the brain: `214 episodic · bge-small " +
-          "· top-k 6 · cap 900 tk`. The core column carries an inline budget bar, " +
-          "`342 ——▓▓▓——— 500 tk`, and one plain row per memory; hover reveals `✎` and `✕`, " +
-          "and editing happens in place — the row becomes an input, Enter commits, Esc " +
-          "cancels. `+ add core memory` adds one the same way. The episodic column has a " +
-          "semantic search that runs the same embedding pipeline as chat retrieval and " +
-          "`odyn mem search`, so all three agree on order; results replace the list rather " +
-          "than filter it, and clearing the field restores browsing. The sort word cycles " +
-          "`recent` → `hits` → `created`. A memory injected in the last five minutes carries " +
-          "a teal `injected 2m ago` tag. The list pages in at 50 as you scroll.",
+        "The header states the brain: `214 memories · bge-small · top-k 6 · cap 1200 tk`, " +
+          "with the folder's path under the column label. One row per note; hover " +
+          "reveals `✎` and `✕`, and editing happens in place — the row becomes an " +
+          "input, Enter commits, Esc cancels. `+ add a note` writes a new file the " +
+          "same way. The semantic search runs the same embedding pipeline as recall " +
+          "and `odyn mem search`, so all three agree on order; results replace the " +
+          "list rather than filter it, and clearing the field restores browsing. The " +
+          "sort word cycles `recent` → `hits` → `created`. A note recalled in the " +
+          "last five minutes carries a teal `injected 2m ago` tag. The list pages in " +
+          "at 50 as you scroll.",
       ),
       sub("brain view — graph mode"),
       p(
-        "Core nodes are amber, radius 11, always labelled. " +
-          "Episodic nodes are teal and grow with use: radius 5.5 + hits × 0.45, capped at 14 " +
-          "hits, labelled with their id from about 0.8× zoom. A solid faint edge means " +
-          "embedding similarity at or above `similarity_edge_threshold` (default 0.78). A " +
-          "dashed teal edge means co-injection: the two memories were retrieved together at " +
-          "least twice. Scroll zooms, anchored at the cursor, between 0.15× and 6×; drag " +
-          "pans; `+`, `−` and `fit` sit bottom right. Hover shows a tooltip, click pins it, " +
-          "double-click centers that node. The layout is force-directed, computed in Rust, " +
-          "cached in the database and invalidated on every memory or injection write. It is " +
-          "deterministic — the same brain always draws the same map.",
+        "What the map draws is what recall traverses. Nodes are teal and grow with " +
+          "use: radius 5.5 + hits × 0.45, capped at 14 hits, labelled with their slug " +
+          "from about 0.8× zoom. A solid teal edge is an authored `[[link]]`. A faint " +
+          "edge means embedding similarity at or above `similarity_edge_threshold` " +
+          "(default 0.78). A dashed teal edge means co-use: the two notes were " +
+          "recalled together at least twice. Scroll zooms, anchored at the cursor, " +
+          "between 0.15× and 6×; drag pans; `+`, `−` and `fit` sit bottom right. " +
+          "Hover shows a tooltip, click pins it, double-click centers that node. The " +
+          "layout is force-directed, computed in Rust, cached in the database and " +
+          "invalidated on every sync or recall. It is deterministic — the same brain " +
+          "always draws the same map.",
       ),
       sub("the model download"),
       p(
         "Embedding uses bge-small-en-v1.5, 384 dimensions, about " +
           "100MB, fetched into `<data dir>/models/` the first time an embedding is actually " +
           "needed, with a progress line. It is loaded, used and dropped again, so the " +
-          "weights never sit resident. Retrieval on a brain with no episodic memories skips " +
-          "the embedder entirely: an empty brain never downloads anything.",
+          "weights never sit resident. An empty brain never loads the embedder, and a " +
+          "`/brain` mention on one never downloads anything.",
       ),
     ],
   },
@@ -400,26 +414,26 @@ odyn chat`),
           "the answer. In text mode it goes to stderr, so a piped answer stays clean:",
       ),
       pre(`----- context -----
-## Core profile
-- [c-01] name is Mitul
-- [c-02] prefers terse replies
+## Memories
 
-## Relevant memories
-- [e-0142] went to CERN in june
+### cern-trip
+went to CERN in june
+
+### espresso-order
+likes espresso, flat and short
 
 ## Style
 Prefer tight fragments over full sentences. …
 ----- tokens (chars/4 approximation) -----
-c-01 4
-c-02 6
-e-0142 8
-core 10/500 tk, episodic 8/900 tk
+cern-trip 5
+espresso-order 8
+memories 13/1200 tk
 -------------------`),
       list([
         "Everything between the two rules is the system message verbatim — the exact bytes the model receives, not a summary of them.",
-        "`## Core profile` and `## Relevant memories` list one `- [id] content` line per memory, in injection order. An empty section is omitted entirely.",
+        "`## Memories` carries one `### slug` section per recalled note, in walk order, formatting intact. The section is omitted entirely when the message did not mention `/brain`.",
         "`## Style` is last and appears only when brevity is not `off`.",
-        "Then one `<id> <tokens>` line per injected memory, and the two totals against `core_budget_tokens` and `episodic_cap_tokens`.",
+        "Then one `<slug> <tokens>` line per injected note, and the total against `cap_tokens`.",
         "With nothing to inject the whole block is one line: `----- context: empty -----`.",
         "Token counts are a chars/4 approximation, not the provider's tokenizer. They are consistent, not exact.",
         "Under `--json`, this becomes one more event on the stream instead: `{\"type\":\"context\",\"system\":…,\"items\":[…]}`.",
@@ -498,7 +512,11 @@ core 10/500 tk, episodic 8/900 tk
           "odyn config set <KEY> <VALUE>",
           "set a dotted key. Numbers and booleans are stored as such, anything else as a string; comments and layout survive, and an invalid result leaves the file untouched.",
         ],
-        ["odyn mem …", "`add`, `list`, `search`, `rm`, `edit` — see the brain section above."],
+        [
+          "  /brain <QUESTION>",
+          "not a command — a chat message with recall on, here and in the GUI alike.",
+        ],
+        ["odyn mem …", "`add`, `list`, `search`, `rm`, `edit`, `path` — see the brain section above."],
       ]),
     ],
   },
@@ -507,11 +525,12 @@ core 10/500 tk, episodic 8/900 tk
     title: "data & privacy",
     body: () => [
       p(
-        "Everything Odyn knows is on this machine, in three places, none of them inside the " +
+        "Everything Odyn knows is on this machine, in four places, none of them inside the " +
           "checkout:",
       ),
       rows([
         ["config", "`<config dir>/odyn.toml`"],
+        ["brain", "`<data dir>/brain/` — the folder of `.md` notes, unless `[brain] path` points elsewhere"],
         ["database", "`<data dir>/odyn.db` — SQLite in WAL mode, plus its `-wal` and `-shm` sidecars"],
         ["embedding model", "`<data dir>/models/`"],
       ]),
@@ -523,7 +542,7 @@ core 10/500 tk, episodic 8/900 tk
       list([
         "Outbound traffic goes to the providers you configured, and nowhere else — plus one download of the embedding model, once, the first time an embedding is needed.",
         "A key you paste is written to `odyn.toml` as `api_key`, and nowhere else — never to a log, and never over the wire except to the provider it belongs to. `api_key_env` keeps it out of the file entirely by naming an environment variable instead; either is read only when that provider is actually built.",
-        "Conversations, memories and injection records live only in `odyn.db`. Deleting a conversation takes its messages with it.",
+        "Memories are the files in the brain folder; `odyn.db` holds conversations, the recall records, and an index derived from those files. Deleting a note's file deletes the memory; deleting a conversation takes its messages with it.",
         "Spotlight asks are never stored unless you promote them; dismissing drops the exchange.",
         "`odyn ask` without `--save` will not create a database on a machine that never saved anything.",
       ]),
@@ -566,8 +585,8 @@ core 10/500 tk, episodic 8/900 tk
           "set `[spotlight] model`, or give the spotlight provider a `default_model`.",
         ],
         [
-          "a red core chip",
-          "core memories exceed `core_budget_tokens`. They are still injected whole — trim them in the brain view, or raise the budget.",
+          "the model never answers from memory",
+          "recall is opt-in: mention `/brain` in the message. The ledger above the composer says whether the next send recalls.",
         ],
         [
           "the first embedding hangs",

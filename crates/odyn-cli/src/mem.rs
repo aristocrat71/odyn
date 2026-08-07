@@ -1,73 +1,66 @@
-//! `odyn mem`: the brain's front door on the command line.
+//! `odyn mem`: the brain folder's front door on the command line.
+//!
+//! Memories are markdown files; these commands write and remove them, then
+//! mirror the folder into the retrieval index. Anything they can do, a plain
+//! text editor in the brain folder does too.
 
 use std::io::Write;
 
+use odyn_core::brain;
+use odyn_core::config::Config;
 use odyn_core::embed::load_default_embedder;
-use odyn_core::storage::{normalize_content, Memory, MemoryTier, Storage};
+use odyn_core::notes;
+use odyn_core::storage::{Memory, Storage};
 
-use crate::session::{write_failure, Failure};
+use crate::session::{config_failure, write_failure, Failure};
 
-/// Semantic search shows more than the injection top-k: browsing is not
+/// Semantic search shows more than one recall injects: browsing is not
 /// injecting.
 const SEARCH_LIMIT: usize = 20;
 
 #[derive(clap::Subcommand)]
 pub enum Action {
-    /// remember something; episodic unless --core
+    /// remember something as a new note in the brain folder
     Add {
         content: String,
-        /// store as an always-injected core memory
+        /// the note's name; derived from the content when omitted
         #[arg(long)]
-        core: bool,
+        name: Option<String>,
     },
-    /// list memories, oldest first
-    List {
-        /// show only one tier
-        #[arg(long, value_enum)]
-        tier: Option<Tier>,
-    },
-    /// find the episodic memories closest in meaning to the query
+    /// list notes, oldest first
+    List,
+    /// find the notes closest in meaning to the query
     Search { query: String },
-    /// delete a memory by id (e-0142, c-01, or a plain number)
-    Rm { id: String },
-    /// replace a memory's content by id; episodic memories are re-embedded
-    Edit { id: String, content: String },
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-pub enum Tier {
-    Core,
-    Episodic,
-}
-
-impl From<Tier> for MemoryTier {
-    fn from(tier: Tier) -> Self {
-        match tier {
-            Tier::Core => MemoryTier::Core,
-            Tier::Episodic => MemoryTier::Episodic,
-        }
-    }
+    /// delete a note by name
+    Rm { name: String },
+    /// replace a note's content by name; it is re-embedded on sync
+    Edit { name: String, content: String },
+    /// print the brain folder's path
+    Path,
 }
 
 pub fn run(action: Action) -> Result<(), Failure> {
+    let config = Config::load().map_err(config_failure)?;
+    let dir = notes::brain_dir(config.brain.path.as_deref())
+        .map_err(|err| Failure::run(err.to_string()))?;
+    if let Action::Path = action {
+        return writeln!(anstream::stdout(), "{}", dir.display()).map_err(write_failure);
+    }
     let storage = Storage::open_default()
         .map_err(|err| Failure::run(format!("could not open the database: {err}")))?;
     let mut out = anstream::stdout().lock();
     match action {
-        Action::Add { content, core } => {
-            let memory = if core {
-                storage.add_memory(MemoryTier::Core, &content, None)
-            } else {
-                let content = normalize_content(&content);
-                let embedding = embed_one(&content)?;
-                storage.add_memory(MemoryTier::Episodic, &content, Some(&embedding))
-            }
-            .map_err(|err| Failure::run(format!("could not add the memory: {err}")))?;
-            writeln!(out, "{}", line(&memory)).map_err(write_failure)
+        Action::Path => unreachable!("answered before the database opened"),
+        Action::Add { content, name } => {
+            let slug = notes::write_note(&dir, name.as_deref(), &content)
+                .map_err(|err| Failure::run(format!("could not add the note: {err}")))?;
+            sync(&storage, &config)?;
+            writeln!(out, "{}", line(&find(&storage, &slug)?)).map_err(write_failure)
         }
-        Action::List { tier } => {
+        Action::List => {
+            sync(&storage, &config)?;
             let memories = storage
-                .list_memories(tier.map(MemoryTier::from))
+                .list_memories()
                 .map_err(|err| Failure::run(format!("could not list memories: {err}")))?;
             for memory in memories {
                 writeln!(out, "{}", line(&memory)).map_err(write_failure)?;
@@ -75,43 +68,52 @@ pub fn run(action: Action) -> Result<(), Failure> {
             Ok(())
         }
         Action::Search { query } => {
+            sync(&storage, &config)?;
             let count = storage
-                .count_memories(Some(MemoryTier::Episodic))
+                .count_memories()
                 .map_err(|err| Failure::run(format!("could not search memories: {err}")))?;
             if count == 0 {
                 return Ok(());
             }
             let embedding = embed_one(&query)?;
             let neighbors = storage
-                .knn_episodic(&embedding, SEARCH_LIMIT)
+                .knn(&embedding, SEARCH_LIMIT)
                 .map_err(|err| Failure::run(format!("could not search memories: {err}")))?;
             for (memory, _) in neighbors {
                 writeln!(out, "{}", line(&memory)).map_err(write_failure)?;
             }
             Ok(())
         }
-        Action::Rm { id } => {
-            let id = parse_id(&id)?;
-            storage
-                .delete_memory(id)
-                .map_err(|err| Failure::run(format!("could not delete the memory: {err}")))?;
-            writeln!(out, "deleted {id}").map_err(write_failure)
+        Action::Rm { name } => {
+            notes::delete_note(&dir, &name)
+                .map_err(|err| Failure::run(format!("could not delete the note: {err}")))?;
+            sync(&storage, &config)?;
+            writeln!(out, "deleted {name}").map_err(write_failure)
         }
-        Action::Edit { id, content } => {
-            let id = parse_id(&id)?;
-            let current = storage
-                .memory(id)
-                .map_err(|err| Failure::run(format!("could not edit the memory: {err}")))?;
-            let embedding = match current.tier {
-                MemoryTier::Core => None,
-                MemoryTier::Episodic => Some(embed_one(&normalize_content(&content))?),
-            };
-            let memory = storage
-                .update_memory(id, &content, embedding.as_deref())
-                .map_err(|err| Failure::run(format!("could not edit the memory: {err}")))?;
-            writeln!(out, "{}", line(&memory)).map_err(write_failure)
+        Action::Edit { name, content } => {
+            notes::update_note(&dir, &name, &content)
+                .map_err(|err| Failure::run(format!("could not edit the note: {err}")))?;
+            sync(&storage, &config)?;
+            writeln!(out, "{}", line(&find(&storage, &name)?)).map_err(write_failure)
         }
     }
+}
+
+/// Mirrors the folder into the index; the model loads only when a note is
+/// new or edited.
+fn sync(storage: &Storage, config: &Config) -> Result<(), Failure> {
+    brain::sync(storage, &config.brain, load_default_embedder)
+        .map_err(|err| Failure::run(format!("could not sync the brain folder: {err}")))?;
+    Ok(())
+}
+
+fn find(storage: &Storage, slug: &str) -> Result<Memory, Failure> {
+    storage
+        .list_memories()
+        .map_err(|err| Failure::run(format!("could not read the memory back: {err}")))?
+        .into_iter()
+        .find(|memory| memory.slug == slug)
+        .ok_or_else(|| Failure::run(format!("note `{slug}` did not survive the sync")))
 }
 
 /// Loads the model, embeds one text, drops the model.
@@ -125,20 +127,16 @@ fn embed_one(text: &str) -> Result<Vec<f32>, Failure> {
         .ok_or_else(|| Failure::run("the embedder returned no vector"))
 }
 
-/// The prefix is cosmetic — ids are unique across tiers — so `e-0142`,
-/// `c-01` and `142` all name the same row space.
-fn parse_id(id: &str) -> Result<i64, Failure> {
-    let digits = id.trim().trim_start_matches("c-").trim_start_matches("e-");
-    digits
-        .parse::<i64>()
-        .map_err(|_| Failure::config(format!("not a memory id: {id}")))
-}
-
+/// One row per note: the slug, the cost, the first line of the content.
 fn line(memory: &Memory) -> String {
-    format!(
-        "{}  {} tk  {}",
-        memory.display_id(),
-        memory.tokens,
-        memory.content
-    )
+    let mut first = memory
+        .content
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if memory.content.lines().count() > 1 {
+        first.push_str(" …");
+    }
+    format!("{}  {} tk  {}", memory.slug, memory.tokens, first)
 }
