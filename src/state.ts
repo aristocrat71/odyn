@@ -2,6 +2,10 @@ import * as api from "./api";
 
 export type View = "home" | "chat" | "brain" | "providers" | "config" | "guide";
 
+// Provider and model are picked apart: one list of both is as long as every
+// provider's catalog put together.
+export type PickerMenu = "provider" | "model" | null;
+
 export type Stream = {
   conversation: number;
   requestId: number | null;
@@ -27,7 +31,8 @@ export const state = {
   tokens: null as number | null,
   stream: null as Stream | null,
   picker: {
-    open: false,
+    // Which of the two menus is open, if either.
+    open: null as PickerMenu,
     loading: false,
     groups: [] as api.ProviderGroup[],
   },
@@ -133,22 +138,27 @@ export function setView(view: View): void {
   render();
 }
 
-export function togglePicker(): void {
-  if (state.picker.open) {
+export function togglePicker(which: PickerMenu): void {
+  if (state.picker.open === which) {
     closePicker();
     return;
   }
-  state.picker.open = true;
-  // Reachability from a minute ago is not a fact, so nothing stale is shown.
-  state.picker.loading = true;
-  state.picker.groups = [];
-  void loadProviders();
-  timer = window.setInterval(() => void loadProviders(), PICKER_REFRESH_MS);
+  // Only the first open probes: stepping from the provider menu to the model
+  // one is the same listing, read twice.
+  const first = state.picker.open === null;
+  state.picker.open = which;
+  if (first) {
+    // Reachability from a minute ago is not a fact, so nothing stale is shown.
+    state.picker.loading = true;
+    state.picker.groups = [];
+    void loadProviders();
+    timer = window.setInterval(() => void loadProviders(), PICKER_REFRESH_MS);
+  }
   render();
 }
 
 export function closePicker(): void {
-  if (!state.picker.open) return;
+  if (state.picker.open === null) return;
   shut();
   render();
 }
@@ -173,7 +183,7 @@ export const chooseModel = (provider: string, model: string): Promise<void> =>
 let timer: number | null = null;
 
 function shut(): void {
-  state.picker.open = false;
+  state.picker.open = null;
   state.brevityMenu = false;
   if (timer !== null) {
     clearInterval(timer);
@@ -209,7 +219,7 @@ const loadProviders = (): Promise<void> =>
     const groups = await api.providersOverview().finally(() => {
       state.picker.loading = false;
     });
-    if (state.picker.open) state.picker.groups = groups;
+    if (state.picker.open !== null) state.picker.groups = groups;
   });
 
 export function startRename(id: number): void {

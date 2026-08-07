@@ -222,16 +222,19 @@ odyn chat`),
       ),
       sub("model picker"),
       p(
-        "Top right, reading `provider / model ▾`. It lists every " +
-          "configured provider whether it answers or not — one that is down is labelled " +
-          "`· offline` and its models are dimmed and unclickable, because a picker that " +
-          "hides what is down explains nothing. Ollama entries carry their on-disk size. " +
-          "Reachability is re-probed every 30 seconds while the menu is open. Choosing a " +
-          "model writes it onto the conversation.",
+        "Two menus in the composer's footer, `provider <name> ▾` and `model <name> ▾`, " +
+          "because one list of every provider's whole catalog is too long to find anything " +
+          "in. The provider menu lists every configured provider whether it answers or not " +
+          "— one that is down is labelled `offline` and its models are dimmed and " +
+          "unclickable, because a picker that hides what is down explains nothing. The " +
+          "model menu shows that provider's models, free ones first, Ollama entries with " +
+          "their on-disk size. Switching provider keeps the model when the new provider " +
+          "serves it too. Reachability is re-probed every 30 seconds while a menu is open. " +
+          "Choosing a model writes it onto the conversation.",
       ),
       sub("brevity"),
       p(
-        "Beside the picker, reading `brevity <level> ▾`. Each level injects one " +
+        "Beside the picker in the same footer, reading `brevity <level> ▾`. Each level injects one " +
           "fixed directive under a `## Style` heading in the same system message as memory; " +
           "every level tells the model to reproduce code blocks, shell commands, file paths, " +
           "identifiers and error messages byte-exact.",

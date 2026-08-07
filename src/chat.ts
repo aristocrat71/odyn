@@ -1,6 +1,8 @@
-import type { Message } from "./api";
+import type { Conversation, Message } from "./api";
+import { renderBrevity } from "./brevctl";
 import { el } from "./dom";
 import { renderMarkdown } from "./markdown";
+import { renderPickers } from "./picker";
 import {
   cancelStream,
   expandLedger,
@@ -65,13 +67,8 @@ export function renderChat(): HTMLElement {
   const column = el("div", "chat");
   column.append(
     rolled,
-    ledger(),
     composer(),
-    el(
-      "div",
-      "hint",
-      `${MOD}K spotlight · the line above is exactly what the model sees`,
-    ),
+    el("div", "hint", "the CONTEXT line is exactly what the model sees"),
   );
   // A conversation just opened previews immediately; typing debounces.
   if (opened) void refreshPreview(input.value);
@@ -202,12 +199,34 @@ function ledger(): HTMLElement {
 
 const count = (tokens: number): string => tokens.toLocaleString("en-US");
 
+// Spotlight's shape: one surface holding the ledger, the field, and a footer
+// of everything the next message is sent with.
 function composer(): HTMLElement {
   const box = el("div", "composer");
+  const field = el("div", "composer-field");
   const glyph = el("button", "send", "↵");
   glyph.addEventListener("click", submit);
-  box.append(input, glyph);
+  field.append(input, glyph);
+  box.append(ledger(), field, foot());
   return box;
+}
+
+function foot(): HTMLElement {
+  const line = el("div", "composer-foot");
+  const current = selected();
+  if (current !== undefined) {
+    const picks = el("span", "composer-picks");
+    picks.append(renderBrevity(current), ...renderPickers(current));
+    line.append(picks);
+  }
+  line.append(
+    el("span", "composer-hints", `⏎ send · ⇧⏎ newline · ${MOD}K spotlight`),
+  );
+  return line;
+}
+
+function selected(): Conversation | undefined {
+  return state.conversations.find((row) => row.id === state.selected);
 }
 
 function submit(): void {

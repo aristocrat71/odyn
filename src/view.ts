@@ -1,11 +1,9 @@
 import type { Conversation } from "./api";
 import { renderBrain } from "./brain";
-import { renderBrevity } from "./brevctl";
 import { renderChat } from "./chat";
 import { renderConfig } from "./config";
 import { el } from "./dom";
 import { renderHome } from "./home";
-import { renderPicker } from "./picker";
 import { renderProviders } from "./providers";
 import { state } from "./state";
 
@@ -28,14 +26,9 @@ function topbar(): HTMLElement {
   const crumbs = crumbLine(current);
   if (crumbs !== "") left.append(el("div", "crumbs", crumbs));
 
+  // Model and brevity used to sit here; they belong to the message being
+  // written, so they live in the composer's footer now.
   bar.append(left);
-  // The picker sets the model of a conversation, so it exists only where one
-  // is; the brevity control sits beside it and follows the same rule.
-  if (state.view === "chat" && current) {
-    const controls = el("div", "topbar-controls");
-    controls.append(renderBrevity(current), renderPicker(current));
-    bar.append(controls);
-  }
   return bar;
 }
 
