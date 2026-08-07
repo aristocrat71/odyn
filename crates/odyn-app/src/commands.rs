@@ -30,6 +30,8 @@ pub struct Conversation {
     title: String,
     provider: String,
     model: String,
+    /// Unix epoch seconds; the list view dates each row by it.
+    updated_at: i64,
     /// The conversation's explicit choice; `None` follows `[style] brevity`.
     brevity: Option<Brevity>,
 }
@@ -821,6 +823,7 @@ impl From<StoredConversation> for Conversation {
             title: row.title,
             provider: row.provider,
             model: row.model,
+            updated_at: row.updated_at,
             brevity: row.brevity,
         }
     }

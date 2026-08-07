@@ -1,6 +1,13 @@
 import * as api from "./api";
 
-export type View = "home" | "chat" | "brain" | "providers" | "config" | "guide";
+export type View =
+  | "home"
+  | "chat"
+  | "conversations"
+  | "brain"
+  | "providers"
+  | "config"
+  | "guide";
 
 // Provider and model are picked apart: one list of both is as long as every
 // provider's catalog put together.
@@ -337,6 +344,10 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   state.stream = null;
   void guard(async () => {
+    // Storing the turn bumped this conversation's `updated_at`, so the order is
+    // re-read rather than guessed at — the sidebar only has room for the seven
+    // most recent and they have just changed.
+    state.conversations = await api.listConversations();
     // The stored turn is the truth now: it carries the interrupted marker and
     // the token counts the crumbs read.
     if (state.selected === stream.conversation) await open(stream.conversation);

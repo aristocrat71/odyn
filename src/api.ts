@@ -8,6 +8,8 @@ export type Conversation = {
   title: string;
   provider: string;
   model: string;
+  // Unix epoch seconds.
+  updated_at: number;
   // The conversation's explicit choice; null follows the [style] default.
   brevity: BrevityLevel | null;
 };

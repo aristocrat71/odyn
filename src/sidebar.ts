@@ -15,15 +15,37 @@ import {
 
 const VIEWS: View[] = ["home", "chat", "brain", "providers", "config", "guide"];
 
+// The sidebar is a shortcut to what you were just doing, not an archive. The
+// rest are a click away on the heading.
+const RECENT = 7;
+
 export function renderSidebar(root: HTMLElement): void {
   root.replaceChildren(
     wordmark(),
     nav(),
-    el("div", "label", "conversations"),
+    label(),
     conversations(),
     newLink(),
     footer(),
   );
+}
+
+// The heading is the way into the searchable list, and it carries the total so
+// that the seven below it never read as all there is.
+function label(): HTMLElement {
+  const link = el("button", "label label-link");
+  const word = el("span");
+  if (state.view === "conversations") {
+    link.classList.add("active");
+    word.append(el("span", "mark", "—"), " conversations");
+  } else {
+    word.textContent = "conversations";
+  }
+  link.append(word);
+  const total = state.conversations.length;
+  if (total > RECENT) link.append(el("span", "label-count", String(total)));
+  link.addEventListener("click", () => setView("conversations"));
+  return link;
 }
 
 function wordmark(): HTMLElement {
@@ -50,8 +72,19 @@ function nav(): HTMLElement {
 
 function conversations(): HTMLElement {
   const list = el("div", "conversations");
-  for (const row of state.conversations) list.append(conversation(row));
+  for (const row of recent()) list.append(conversation(row));
   return list;
+}
+
+// Opening an old conversation does not make it recent — nothing is written
+// until it is answered — so it takes the last slot rather than being the one
+// row the sidebar cannot show while you are sitting in it.
+function recent(): Conversation[] {
+  const rows = state.conversations.slice(0, RECENT);
+  if (state.selected === null || rows.some((row) => row.id === state.selected)) return rows;
+  const open = state.conversations.find((row) => row.id === state.selected);
+  if (open === undefined) return rows;
+  return [...rows.slice(0, RECENT - 1), open];
 }
 
 function conversation(row: Conversation): HTMLElement {
