@@ -8,6 +8,8 @@ export type Conversation = {
   title: string;
   provider: string;
   model: string;
+  // Unix epoch seconds.
+  updated_at: number;
   // The conversation's explicit choice; null follows the [style] default.
   brevity: BrevityLevel | null;
 };
@@ -59,10 +61,6 @@ export type ProviderGroup = {
 };
 
 export type Status = {
-  provider_name: string;
-  provider_reachable: boolean;
-  ollama_reachable: boolean | null;
-  rss_bytes: number;
   brevity_default: BrevityLevel;
 };
 

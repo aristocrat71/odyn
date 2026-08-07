@@ -214,6 +214,10 @@ odyn chat`),
           "double-click a conversation in the sidebar. Enter commits, Esc cancels; an empty or unchanged title is a cancel.",
         ],
         ["delete", "the `✕` on a conversation row, revealed on hover or focus."],
+        [
+          "find one",
+          "the sidebar lists the seven most recently answered and puts the total beside the `CONVERSATIONS` heading; the heading opens all of them with a search on top. The search is fuzzy — letters have to appear in a title in order, not next to each other — and the letters that earned each hit are marked in teal. Arrows move, Enter opens, Esc clears. An older conversation you open takes the sidebar's last slot until something newer pushes it out.",
+        ],
       ]),
       p(
         "Under the title, a conversation shows `N turns · X.Xk tokens`. The token count " +
@@ -537,11 +541,7 @@ core 10/500 tk, episodic 8/900 tk
     body: () => [
       rows([
         [
-          "a red dot in the footer",
-          "the named provider did not answer a probe. A second dot appears only when a local Ollama is configured beside a different default provider. Both are re-probed every 30 seconds; the number beside them is this process's resident memory.",
-        ],
-        [
-          "a red line under the footer",
+          "a red line at the foot of the sidebar",
           "the global hotkey could not be registered — usually another app owns the combination. Change `[spotlight] hotkey`. Spotlight still opens with " +
             `${MOD}K from the main window.`,
         ],

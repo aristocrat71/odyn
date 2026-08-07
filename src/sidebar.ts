@@ -13,17 +13,35 @@ import {
   type View,
 } from "./state";
 
-const VIEWS: View[] = ["home", "chat", "brain", "providers", "config", "guide"];
+const NAV: View[] = ["home", "chat", "brain", "providers", "config", "guide"];
+
+const RECENT = 7;
 
 export function renderSidebar(root: HTMLElement): void {
   root.replaceChildren(
     wordmark(),
     nav(),
-    el("div", "label", "conversations"),
+    label(),
     conversations(),
     newLink(),
     footer(),
   );
+}
+
+function label(): HTMLElement {
+  const link = el("button", "label label-link");
+  const word = el("span");
+  if (state.view === "conversations") {
+    link.classList.add("active");
+    word.append(el("span", "mark", "—"), " conversations");
+  } else {
+    word.textContent = "conversations";
+  }
+  link.append(word);
+  const total = state.conversations.length;
+  if (total > RECENT) link.append(el("span", "label-count", String(total)));
+  link.addEventListener("click", () => setView("conversations"));
+  return link;
 }
 
 function wordmark(): HTMLElement {
@@ -34,7 +52,7 @@ function wordmark(): HTMLElement {
 
 function nav(): HTMLElement {
   const bar = el("nav", "nav");
-  for (const view of VIEWS) {
+  for (const view of NAV) {
     const item = el("button", "nav-item");
     if (view === state.view) {
       item.classList.add("active");
@@ -50,20 +68,30 @@ function nav(): HTMLElement {
 
 function conversations(): HTMLElement {
   const list = el("div", "conversations");
-  for (const row of state.conversations) list.append(conversation(row));
+  for (const row of recent()) list.append(conversation(row));
   return list;
+}
+
+function recent(): Conversation[] {
+  const rows = state.conversations.slice(0, RECENT);
+  if (state.selected === null || rows.some((row) => row.id === state.selected)) return rows;
+  const open = state.conversations.find((row) => row.id === state.selected);
+  if (open === undefined) return rows;
+  return [...rows.slice(0, RECENT - 1), open];
 }
 
 function conversation(row: Conversation): HTMLElement {
   const line = el("div", "row");
-  if (row.id === state.selected) line.classList.add("active");
+  // Selected is not the same as open: only the chat view is inside it.
+  const open = state.view === "chat" && row.id === state.selected;
+  if (open) line.classList.add("active");
   if (row.id === state.editing) {
     line.append(rename(row));
     return line;
   }
 
   const title = el("button", "row-title");
-  if (row.id === state.selected) title.append(el("span", "mark", "—"), ` ${row.title}`);
+  if (open) title.append(el("span", "mark", "—"), ` ${row.title}`);
   else title.textContent = row.title;
   title.addEventListener("click", () => void selectConversation(row.id));
   title.addEventListener("dblclick", () => startRename(row.id));
@@ -102,28 +130,8 @@ function newLink(): HTMLElement {
 
 function footer(): HTMLElement {
   const box = el("div");
-  const line = el("div", "status");
-  box.append(line);
-  const status = state.status;
-  if (status === null) return box;
-  line.append(probe(status.provider_name, status.provider_reachable));
-  // A second dot only when a local Ollama runs beside the default provider.
-  if (status.ollama_reachable !== null) {
-    line.append(probe("ollama", status.ollama_reachable));
-  }
-  line.append(el("span", "status-rss", megabytes(status.rss_bytes)));
   if (state.hotkeyError !== null) {
     box.append(el("div", "status status-warn", state.hotkeyError));
   }
   return box;
-}
-
-function probe(name: string, reachable: boolean): HTMLElement {
-  const box = el("span");
-  box.append(el("span", reachable ? "dot" : "dot down", "●"), name);
-  return box;
-}
-
-function megabytes(bytes: number): string {
-  return `${Math.round(bytes / 1024 / 1024)}MB`;
 }

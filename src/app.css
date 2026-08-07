@@ -31,6 +31,7 @@ button {
   gap: var(--gutter);
   height: 100vh;
   padding: var(--gutter);
+  overflow: hidden;
 }
 
 .sidebar {
@@ -88,6 +89,25 @@ button {
   font-weight: 500;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+  color: var(--faint);
+}
+
+.label-link {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  transition: color 150ms ease;
+}
+
+.label-link:hover {
+  color: var(--dim);
+}
+
+.label-link.active {
+  color: var(--muted);
+}
+
+.label-count {
   color: var(--faint);
 }
 
@@ -181,19 +201,6 @@ button {
   color: var(--dim);
 }
 
-.dot {
-  margin-right: 2px;
-  color: var(--epi);
-}
-
-.dot.down {
-  color: var(--danger);
-}
-
-.status-rss {
-  color: var(--faint);
-}
-
 .status-warn {
   margin-top: 6px;
   color: var(--danger);
@@ -203,6 +210,7 @@ button {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .topbar {
@@ -1542,9 +1550,24 @@ g.labeled .gnode-epi text {
 }
 
 .conn-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--dim);
+}
+
+.conn-shut {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  transition: color 150ms ease;
+}
+
+.conn-shut:hover {
+  color: var(--ink);
 }
 
 .conn-key {
@@ -1668,8 +1691,13 @@ g.labeled .gnode-epi text {
   color: var(--epi);
 }
 
+.prov-links {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .prov-add {
-  margin-top: 10px;
   padding: 0 12px;
   font-family: var(--mono);
   font-size: 11.5px;
@@ -1734,4 +1762,148 @@ g.labeled .gnode-epi text {
   display: flex;
   gap: 16px;
   margin-top: 14px;
+}
+
+/* ---- conversations: every one of them, searched ---- */
+
+.convs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 660px;
+}
+
+.conv-head {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  gap: 20px;
+}
+
+.conv-search {
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 7px;
+  border: 0;
+  border-bottom: 1px solid var(--faint);
+  outline: none;
+  background: none;
+  font-size: 14.5px;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.conv-search::placeholder {
+  color: var(--faint);
+}
+
+.conv-search:focus {
+  border-bottom-color: var(--epi);
+}
+
+.conv-count {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+
+.conv-list {
+  flex: 1;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+}
+
+.conv-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0 10px;
+  border-radius: 8px;
+}
+
+.conv-row.active {
+  background: var(--epi-soft);
+}
+
+.conv-open {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 16px;
+  min-width: 0;
+  padding: 8px 0;
+}
+
+.conv-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13.5px;
+  color: var(--muted);
+  transition: color 150ms ease;
+}
+
+.conv-row.active .conv-title,
+.conv-row.current .conv-title {
+  color: var(--ink);
+}
+
+.conv-mark {
+  color: var(--epi);
+}
+
+.conv-model {
+  flex: none;
+  max-width: 210px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.conv-date {
+  flex: none;
+  width: 50px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.conv-delete {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  opacity: 0;
+  transition:
+    color 150ms ease,
+    opacity 150ms ease;
+}
+
+.conv-row:hover .conv-delete,
+.conv-row:focus-within .conv-delete {
+  opacity: 1;
+}
+
+.conv-delete:hover {
+  color: var(--danger);
+}
+
+.conv-none {
+  margin-top: 22px;
+  padding: 0 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
 }

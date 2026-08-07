@@ -13,7 +13,6 @@ use odyn_core::providers::ollama::OllamaProvider;
 use odyn_core::providers::openai_compat::OpenAiCompatProvider;
 use odyn_core::providers::{ollama, openai_compat};
 use odyn_core::storage::{Conversation as StoredConversation, MemoryTier, StorageError};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{AppState, Ready, Stream};
@@ -30,6 +29,7 @@ pub struct Conversation {
     title: String,
     provider: String,
     model: String,
+    updated_at: i64,
     /// The conversation's explicit choice; `None` follows `[style] brevity`.
     brevity: Option<Brevity>,
 }
@@ -96,12 +96,6 @@ pub struct Model {
 
 #[derive(serde::Serialize)]
 pub struct Status {
-    provider_name: String,
-    provider_reachable: bool,
-    /// `None` when no local Ollama is configured beside the default provider,
-    /// which is also the case when Ollama *is* the default: one dot, not two.
-    ollama_reachable: Option<bool>,
-    rss_bytes: u64,
     /// `[style] brevity` — what a conversation without its own choice uses.
     brevity_default: Brevity,
 }
@@ -383,39 +377,8 @@ pub async fn cancel_message(
 
 #[tauri::command]
 pub async fn status(state: State<'_, AppState>) -> Result<Status, String> {
-    let (provider_name, default, ollama, brevity_default) = {
-        let ready = state.ready()?;
-        let brevity_default = ready.config.style.brevity;
-        let name = ready.registry.default_provider_name().to_string();
-        let default = ready
-            .config
-            .providers
-            .get(&name)
-            .ok_or_else(|| format!("no provider named `{name}` is configured"))?
-            .clone();
-        let ollama = ready
-            .config
-            .providers
-            .iter()
-            .find(|(other, provider)| {
-                **other != name && matches!(provider, ProviderConfig::Ollama { .. })
-            })
-            .map(|(_, provider)| provider.clone());
-        (name, default, ollama, brevity_default)
-    };
-
-    let provider_reachable = ping(&default).await;
-    let ollama_reachable = match ollama {
-        Some(provider) => Some(ping(&provider).await),
-        None => None,
-    };
-    Ok(Status {
-        provider_name,
-        provider_reachable,
-        ollama_reachable,
-        rss_bytes: rss_bytes(),
-        brevity_default,
-    })
+    let brevity_default = state.ready()?.config.style.brevity;
+    Ok(Status { brevity_default })
 }
 
 /// Every configured provider, in config order, whether it answers or not:
@@ -792,28 +755,6 @@ fn conversation(ready: &Ready, id: i64) -> Result<StoredConversation, String> {
         .ok_or_else(|| StorageError::ConversationNotFound(id).to_string())
 }
 
-async fn ping(provider: &ProviderConfig) -> bool {
-    match provider {
-        ProviderConfig::OpenAiCompat { base_url, .. } => openai_compat::ping(base_url).await,
-        ProviderConfig::Ollama { base_url, .. } => ollama::ping(base_url).await,
-    }
-}
-
-/// The RAM number in the footer is a brag, so it is measured, not estimated:
-/// this process only, refreshed on demand.
-fn rss_bytes() -> u64 {
-    let Ok(pid) = sysinfo::get_current_pid() else {
-        return 0;
-    };
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing().with_memory(),
-    );
-    system.process(pid).map_or(0, |process| process.memory())
-}
-
 impl From<StoredConversation> for Conversation {
     fn from(row: StoredConversation) -> Self {
         Self {
@@ -821,6 +762,7 @@ impl From<StoredConversation> for Conversation {
             title: row.title,
             provider: row.provider,
             model: row.model,
+            updated_at: row.updated_at,
             brevity: row.brevity,
         }
     }

@@ -61,11 +61,10 @@ pub fn run() {
             spotlight::spotlight_target,
             spotlight::spotlight_set_target,
             spotlight::spotlight_save_key,
+            spotlight::spotlight_open_view,
         ])
         .build(tauri::generate_context!());
     match app {
-        // Once the close button hides the window instead of destroying it, the
-        // dock icon is the other way back in — macOS reports that click here.
         Ok(app) => app.run(|_app, _event| {
             #[cfg(target_os = "macos")]
             if matches!(_event, tauri::RunEvent::Reopen { .. }) {

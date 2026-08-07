@@ -11,6 +11,7 @@ import { refreshLedger } from "./chat";
 import { el } from "./dom";
 import { renderSidebar } from "./sidebar";
 import {
+  isView,
   load,
   newConversation,
   onChange,
@@ -20,8 +21,6 @@ import {
   watchStream,
 } from "./state";
 import { renderView } from "./view";
-
-const STATUS_INTERVAL_MS = 30_000;
 
 const app = el("div", "app");
 const sidebar = el("aside", "sidebar");
@@ -74,7 +73,6 @@ renderView(main);
 watchStream();
 void load();
 void refreshStatus();
-setInterval(() => void refreshStatus(), STATUS_INTERVAL_MS);
 
 // A memory added from the CLI shows up when the window comes back.
 window.addEventListener("focus", refreshLedger);
@@ -83,4 +81,8 @@ window.addEventListener("focus", refreshLedger);
 void listen<number>("open-conversation", async (event) => {
   await load();
   await selectConversation(event.payload);
+});
+
+void listen<string>("open-view", (event) => {
+  if (isView(event.payload)) setView(event.payload);
 });

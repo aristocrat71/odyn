@@ -2,6 +2,7 @@ import type { Conversation } from "./api";
 import { renderBrain } from "./brain";
 import { renderChat } from "./chat";
 import { renderConfig } from "./config";
+import { renderConversations } from "./conversations";
 import { el } from "./dom";
 import { renderHome } from "./home";
 import { renderProviders } from "./providers";
@@ -36,6 +37,7 @@ function body(): HTMLElement {
   const view = el("section", "view");
   if (state.view === "home") view.append(renderHome());
   if (state.view === "chat") view.append(renderChat());
+  if (state.view === "conversations") view.append(renderConversations());
   if (state.view === "brain") view.append(renderBrain());
   if (state.view === "providers") view.append(renderProviders());
   if (state.view === "config") view.append(renderConfig());

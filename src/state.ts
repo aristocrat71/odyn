@@ -1,6 +1,19 @@
 import * as api from "./api";
 
-export type View = "home" | "chat" | "brain" | "providers" | "config" | "guide";
+export const VIEWS = [
+  "home",
+  "chat",
+  "conversations",
+  "brain",
+  "providers",
+  "config",
+  "guide",
+] as const;
+
+export type View = (typeof VIEWS)[number];
+
+export const isView = (name: string): name is View =>
+  (VIEWS as readonly string[]).includes(name);
 
 // Provider and model are picked apart: one list of both is as long as every
 // provider's catalog put together.
@@ -66,6 +79,7 @@ export const state = {
     // `{ name: null }` is the add form; a string names the row being edited.
     editing: null as { name: string | null } | null,
     catalog: null as api.CatalogItem[] | null,
+    connect: false,
     // The catalog entry the connect panel is aimed at. A recognised key aims
     // it on its own; a tile is how the rest get aimed.
     pick: null as string | null,
@@ -337,6 +351,7 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   state.stream = null;
   void guard(async () => {
+    state.conversations = await api.listConversations();
     // The stored turn is the truth now: it carries the interrupted marker and
     // the token counts the crumbs read.
     if (state.selected === stream.conversation) await open(stream.conversation);
@@ -457,6 +472,7 @@ export const loadProvidersConfig = (): Promise<void> =>
   guard(async () => {
     // What the last visit connected is not news on this one.
     state.providers.connected = null;
+    state.providers.connect = false;
     state.providers.entries = await api.providersConfig();
     state.providers.catalog = await api.providerCatalog();
   });
@@ -505,6 +521,15 @@ export const openKeysPage = (id: string): Promise<void> =>
 
 export function startProviderEdit(name: string | null): void {
   state.providers.editing = { name };
+  state.providers.connect = false;
+  render();
+}
+
+// Both write the same file, so only one of them is ever on screen.
+export function openConnect(open: boolean): void {
+  state.providers.connect = open;
+  if (open) state.providers.editing = null;
+  else state.providers.connected = null;
   render();
 }
 
@@ -514,7 +539,7 @@ export function cancelProviderEdit(): void {
 }
 
 // Every write answers with the reloaded list, so what the view shows is what
-// the running app just adopted. The footer probes again on its own time.
+// the running app just adopted.
 export const saveProvider = (draft: api.ProviderDraft): Promise<void> =>
   guard(async () => {
     state.providers.entries = await api.providerSave(draft);
