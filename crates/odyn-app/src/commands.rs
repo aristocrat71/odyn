@@ -162,14 +162,36 @@ pub async fn list_conversations(state: State<'_, AppState>) -> Result<Vec<Conver
 #[tauri::command]
 pub async fn create_conversation(state: State<'_, AppState>) -> Result<Conversation, String> {
     let ready = state.ready()?;
-    let provider = ready.registry.default_provider_name();
-    // No default model is a real state for Ollama; the picker fills it in.
-    let model = ready.config.default_model(provider).unwrap_or_default();
-    let row = ready
-        .storage()
-        .create_conversation(NEW_TITLE, provider, model)
+    let storage = ready.storage();
+    let last = storage.latest_conversation().map_err(say)?;
+    let (provider, model) = inherited(&ready, last);
+    let row = storage
+        .create_conversation(NEW_TITLE, &provider, &model)
         .map_err(say)?;
     Ok(Conversation::from(row))
+}
+
+/// A new chat opens on the last one's target: whatever was picked a minute ago
+/// is almost always what the next question wants. A provider that has since
+/// left the config falls back to the default — the picker is still one click
+/// away either way.
+fn inherited(
+    ready: &crate::state::Ready,
+    last: Option<odyn_core::storage::Conversation>,
+) -> (String, String) {
+    if let Some(row) = last {
+        if ready.config.providers.contains_key(&row.provider) {
+            return (row.provider, row.model);
+        }
+    }
+    let provider = ready.registry.default_provider_name().to_string();
+    // No default model is a real state for Ollama; the picker fills it in.
+    let model = ready
+        .config
+        .default_model(&provider)
+        .unwrap_or_default()
+        .to_string();
+    (provider, model)
 }
 
 #[tauri::command]

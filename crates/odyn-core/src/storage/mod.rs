@@ -245,6 +245,17 @@ impl Storage {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The most recently active conversation — the head of `list_conversations`,
+    /// read on its own so a new chat can open on the last one's target.
+    pub fn latest_conversation(&self) -> Result<Option<Conversation>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, model, provider, created_at, updated_at, brevity
+             FROM conversations ORDER BY updated_at DESC, id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], to_conversation)?;
+        Ok(rows.next().transpose()?)
+    }
+
     /// Writes an explicit brevity choice; the column stays NULL until one.
     pub fn set_conversation_brevity(&self, id: i64, brevity: Brevity) -> Result<(), StorageError> {
         let changed = self.conn.execute(
@@ -728,6 +739,36 @@ pub(crate) mod tests {
 
         storage.delete_conversation(second.id).expect("delete");
         assert!(storage.list_conversations().expect("list").is_empty());
+    }
+
+    /// What a new chat inherits its provider and model from.
+    #[test]
+    fn the_latest_conversation_is_the_head_of_the_list() {
+        let dir = TempDir::new("latest");
+        let storage = Storage::open(dir.db()).expect("open");
+        assert!(storage.latest_conversation().expect("latest").is_none());
+
+        let older = storage
+            .create_conversation("older", "ollama", "llama3.2:3b")
+            .expect("create older");
+        let newer = storage
+            .create_conversation("newer", "deepseek", "deepseek-chat")
+            .expect("create newer");
+        touch(&storage.conn, older.id, 100).expect("backdate older");
+        touch(&storage.conn, newer.id, 200).expect("backdate newer");
+
+        let latest = storage.latest_conversation().expect("latest");
+        assert_eq!(
+            latest.map(|row| (row.provider, row.model)),
+            Some(("deepseek".to_string(), "deepseek-chat".to_string()))
+        );
+
+        // Answering in the older one makes it the one a new chat follows.
+        storage
+            .append_message(older.id, Role::User, "hi", None, None)
+            .expect("append");
+        let latest = storage.latest_conversation().expect("latest after append");
+        assert_eq!(latest.map(|row| row.id), Some(older.id));
     }
 
     #[test]
