@@ -160,6 +160,7 @@ parses and is ignored.
 | `top_k` | `6` | How many nearest notes seed the recall walk, and the most one recall may inject. Must be at least 1. |
 | `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
 | `min_relevance` | `0.3` | Only notes scoring at least this share of the best match are injected. `0` keeps everything the cap allows. |
+| `save_temperature` | `0.3` | Sampling temperature for `/memory` save turns; lower is more literal. Between 0 and 2. |
 | `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
 Token counts are a chars/4 approximation, in the config and in every ledger

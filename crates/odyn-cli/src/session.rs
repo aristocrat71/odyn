@@ -121,7 +121,8 @@ pub async fn stream_reply(
     };
     let dir = notes::brain_dir(config.brain.path.as_deref())
         .map_err(|err| Failure::run(err.to_string()))?;
-    let reply = tools::run_turn(provider, model, messages, &tools, &dir, emit)
+    let temperature = config.brain.save_temperature;
+    let reply = tools::run_turn(provider, model, messages, &tools, &dir, temperature, emit)
         .await
         .map_err(|err| match err {
             TurnError::Chat(err) => Failure::run(format!("stream failed: {}", describe(&err))),

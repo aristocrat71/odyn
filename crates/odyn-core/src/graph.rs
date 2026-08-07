@@ -46,8 +46,14 @@ pub struct GraphEdge {
     pub weight: f32,
 }
 
+/// Bumped when the layout algorithm changes, so a cached map from an older
+/// Odyn is recomputed instead of shown.
+const LAYOUT_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Graph {
+    #[serde(default)]
+    pub version: u32,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
 }
@@ -65,7 +71,9 @@ pub enum GraphError {
 pub fn brain_graph(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphError> {
     if let Some(payload) = storage.cached_graph()? {
         if let Ok(graph) = serde_json::from_str::<Graph>(&payload) {
-            return Ok(graph);
+            if graph.version == LAYOUT_VERSION {
+                return Ok(graph);
+            }
         }
     }
     let graph = compute(storage, similarity_threshold)?;
@@ -126,11 +134,15 @@ fn compute(storage: &Storage, similarity_threshold: f32) -> Result<Graph, GraphE
     }
 
     layout(&mut nodes, &edges);
-    Ok(Graph { nodes, edges })
+    Ok(Graph {
+        version: LAYOUT_VERSION,
+        nodes,
+        edges,
+    })
 }
 
-/// Fruchterman–Reingold: all-pairs repulsion, springs on link and similarity
-/// edges, gravity to the center, cooling over the run. Deterministic — seed
+/// Fruchterman–Reingold: all-pairs repulsion, weight-scaled springs on every
+/// edge, gravity to the center, cooling over the run. Deterministic — seed
 /// positions are a golden-angle spiral, not random — so the same brain always
 /// draws the same map.
 fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
@@ -153,10 +165,17 @@ fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
         .enumerate()
         .map(|(index, node)| (node.id, index))
         .collect();
-    let springs: Vec<(usize, usize)> = edges
+    // Every edge is a spring, pulling in proportion to its weight: the layout
+    // tightens as notes get linked, similar, or used together.
+    let springs: Vec<(usize, usize, f32)> = edges
         .iter()
-        .filter(|edge| matches!(edge.kind, EdgeKind::Similarity | EdgeKind::Link))
-        .filter_map(|edge| Some((*index_of.get(&edge.a)?, *index_of.get(&edge.b)?)))
+        .filter_map(|edge| {
+            Some((
+                *index_of.get(&edge.a)?,
+                *index_of.get(&edge.b)?,
+                edge.weight,
+            ))
+        })
         .collect();
 
     let k = (4.0 * EXTENT * EXTENT / count as f32).sqrt();
@@ -178,11 +197,11 @@ fn layout(nodes: &mut [GraphNode], edges: &[GraphEdge]) {
                 shifts[b].1 -= dy * push;
             }
         }
-        for &(a, b) in &springs {
+        for &(a, b, weight) in &springs {
             let dx = nodes[a].x - nodes[b].x;
             let dy = nodes[a].y - nodes[b].y;
             let distance = (dx * dx + dy * dy).sqrt().max(0.1);
-            let pull = distance / k;
+            let pull = weight * distance / k;
             shifts[a].0 -= dx * pull;
             shifts[a].1 -= dy * pull;
             shifts[b].0 += dx * pull;
@@ -265,7 +284,7 @@ mod tests {
                 )
                 .expect("message");
             storage
-                .record_injections(conversation.id, Some(row.id), &[1, 3])
+                .record_injections(Some(conversation.id), Some(row.id), &[1, 3])
                 .expect("inject");
         }
 
@@ -343,6 +362,19 @@ mod tests {
             .store_graph(r#"{"nodes":[],"edges":[{"a":1,"b":2,"kind":"similarity"}]}"#)
             .expect("plant an old payload");
         let graph = brain_graph(&storage, 0.78).expect("recompute");
+        assert_eq!(graph.nodes.len(), 3);
+    }
+
+    /// A cache laid out by an older algorithm parses fine but must not be
+    /// shown: its positions are the old physics.
+    #[test]
+    fn a_cache_from_an_older_layout_is_recomputed() {
+        let (_dir, storage) = seeded("versioned-cache");
+        storage
+            .store_graph(r#"{"nodes":[],"edges":[]}"#)
+            .expect("plant a version-0 payload");
+        let graph = brain_graph(&storage, 0.78).expect("recompute");
+        assert_eq!(graph.version, LAYOUT_VERSION);
         assert_eq!(graph.nodes.len(), 3);
     }
 }

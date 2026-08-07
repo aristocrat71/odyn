@@ -53,6 +53,7 @@ top_k = 6                # walk seeds per /brain mention, and the most notes inj
 cap_tokens = 1200        # token budget for one recall
 similarity_edge_threshold = 0.78
 min_relevance = 0.3      # inject only notes scoring this share of the best match
+save_temperature = 0.3   # sampling on /memory save turns; lower = more literal
 
 [style]
 brevity = "off"        # off | lite | full | ultra — default for new conversations
@@ -158,6 +159,9 @@ pub struct BrainConfig {
     /// Inject only notes scoring this share of the best match; 0 keeps
     /// everything the cap allows.
     pub min_relevance: f32,
+    /// Sampling temperature for `/memory` save turns. Saving is transcription,
+    /// not creativity: lower is more literal.
+    pub save_temperature: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -187,6 +191,7 @@ impl Default for BrainConfig {
             // Just under the walk share, so a strongly linked neighbor of the
             // best match survives on its edges alone.
             min_relevance: 0.3,
+            save_temperature: 0.3,
         }
     }
 }
@@ -292,6 +297,10 @@ impl Config {
                 "brain.similarity_edge_threshold",
                 "must be greater than 0 and at most 1",
             ));
+        }
+        let temperature = self.brain.save_temperature;
+        if !(0.0..=2.0).contains(&temperature) {
+            return Err(invalid("brain.save_temperature", "must be between 0 and 2"));
         }
         Ok(())
     }

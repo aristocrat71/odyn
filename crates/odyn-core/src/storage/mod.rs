@@ -115,6 +115,25 @@ CREATE TABLE brain_meta (
 );
 INSERT INTO brain_meta (id, model, dim) VALUES (1, 'bge-small', 384);
 ",
+    // Ephemeral spotlight asks record injections too: conversation_id becomes
+    // nullable, and `turn` — the message id, or a negative id for asks that
+    // never became one — is the recall event co-use edges join on.
+    r"
+CREATE TABLE injections_next (
+    id              INTEGER PRIMARY KEY,
+    conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+    message_id      INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    turn            INTEGER NOT NULL,
+    memory_id       INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    injected_at     INTEGER NOT NULL
+);
+INSERT INTO injections_next (id, conversation_id, message_id, turn, memory_id, injected_at)
+    SELECT id, conversation_id, message_id, COALESCE(message_id, -id), memory_id, injected_at
+    FROM injections;
+DROP TABLE injections;
+ALTER TABLE injections_next RENAME TO injections;
+DELETE FROM graph_cache;
+",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -347,8 +366,8 @@ impl Storage {
         )?;
         for memory_id in injected {
             tx.execute(
-                "INSERT INTO injections (conversation_id, message_id, memory_id, injected_at)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO injections (conversation_id, message_id, turn, memory_id, injected_at)
+                 VALUES (?1, ?2, ?2, ?3, ?4)",
                 params![conversation_id, prompt_id, memory_id, now],
             )?;
         }

@@ -392,6 +392,13 @@ const loadEmbedModels = (): Promise<void> =>
   });
 
 /// Swapping re-embeds every note, so the view says so rather than look hung.
+export const chooseSaveTemperature = (value: number): Promise<void> =>
+  guard(async () => {
+    if (value === state.brain.overview?.save_temperature) return;
+    state.brain.overview = await api.brainSetSaveTemperature(value);
+    render();
+  });
+
 export const chooseEmbedModel = (model: string): Promise<void> =>
   guard(async () => {
     if (model === state.brain.overview?.model) return;

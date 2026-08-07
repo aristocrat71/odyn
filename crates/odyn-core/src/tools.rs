@@ -63,13 +63,16 @@ pub fn save_memory_tool() -> ToolDef {
 
 /// Streams, runs any tool calls, follows up with the results, and repeats until
 /// the model answers in text. An empty `tools` slice makes this exactly one
-/// request. Every delta and save reaches `emit` as it happens.
+/// request at the provider's default temperature; tool turns sample at
+/// `temperature` instead (`brain.save_temperature`) — saving is transcription,
+/// not creativity. Every delta and save reaches `emit` as it happens.
 pub async fn run_turn(
     provider: &dyn ChatProvider,
     model: &str,
     mut messages: Vec<Message>,
     tools: &[ToolDef],
     brain_dir: &Path,
+    temperature: f32,
     mut emit: impl FnMut(TurnEvent<'_>) -> std::io::Result<()>,
 ) -> Result<TurnReply, TurnError> {
     let mut text = String::new();
@@ -81,6 +84,9 @@ pub async fn run_turn(
         {
             let mut req = ChatRequest::new(&messages, model);
             req.tools = tools;
+            if !tools.is_empty() {
+                req.temperature = Some(temperature);
+            }
             let mut stream = provider.chat_stream(req);
             while let Some(event) = stream.next().await {
                 match event? {
@@ -186,10 +192,12 @@ mod tests {
         }
     }
 
-    /// Records every request's messages and tool count.
+    /// Messages, tool count and temperature of one recorded request.
+    type Recorded = (Vec<Message>, usize, Option<f32>);
+
     struct Scripted {
         rounds: Mutex<Vec<Vec<Result<ChatEvent, ChatError>>>>,
-        requests: Mutex<Vec<(Vec<Message>, usize)>>,
+        requests: Mutex<Vec<Recorded>>,
     }
 
     impl Scripted {
@@ -206,10 +214,11 @@ mod tests {
             &'a self,
             req: ChatRequest<'a>,
         ) -> BoxStream<'a, Result<ChatEvent, ChatError>> {
-            self.requests
-                .lock()
-                .expect("record request")
-                .push((req.messages.to_vec(), req.tools.len()));
+            self.requests.lock().expect("record request").push((
+                req.messages.to_vec(),
+                req.tools.len(),
+                req.temperature,
+            ));
             let mut rounds = self.rounds.lock().expect("next round");
             let events = if rounds.is_empty() {
                 Vec::new()
@@ -256,6 +265,7 @@ mod tests {
             messages.clone(),
             &[save_memory_tool()],
             &dir.0,
+            0.3,
             |event| {
                 seen.push(match event {
                     TurnEvent::Delta(delta) => format!("delta:{delta}"),
@@ -285,6 +295,8 @@ mod tests {
         let requests = provider.requests.lock().expect("requests");
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].1, 1, "tools offered on the first request");
+        assert_eq!(requests[0].2, Some(0.3));
+        assert_eq!(requests[1].2, Some(0.3));
         let followup = &requests[1].0;
         assert_eq!(followup.len(), 3);
         assert_eq!(followup[1], Message::tool_request("", vec![asked.clone()]));
@@ -313,6 +325,7 @@ mod tests {
             vec![Message::new(Role::User, "/memory")],
             &[save_memory_tool()],
             &dir.0,
+            0.3,
             |_| Ok(()),
         ))
         .expect("turn");
@@ -354,11 +367,14 @@ mod tests {
             vec![Message::new(Role::User, "hello")],
             &[],
             &dir.0,
+            0.3,
             |_| Ok(()),
         ))
         .expect("turn");
         assert_eq!(reply.text, "hi");
         assert!(reply.saved.is_empty());
-        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].2, None, "plain turns keep the provider default");
     }
 }

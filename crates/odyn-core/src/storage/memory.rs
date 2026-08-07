@@ -268,15 +268,18 @@ impl Storage {
             .map_err(|error| not_found(error, id))
     }
 
-    /// Records what was injected for a message, replacing any earlier record for
-    /// it: a retried turn's context is the one the model last saw, and counting
-    /// it twice would inflate every hit statistic.
+    /// Records one recall event, replacing any earlier record for the same
+    /// message: a retried turn's context is the one the model last saw, and
+    /// counting it twice would inflate every hit statistic. A `None`
+    /// conversation is an ephemeral spotlight ask — it still counts hits and
+    /// co-use, under a negative `turn` id of its own. Answers the inserted
+    /// row ids, so a promotion can adopt them.
     pub fn record_injections(
         &self,
-        conversation_id: i64,
+        conversation_id: Option<i64>,
         message_id: Option<i64>,
         memory_ids: &[i64],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<i64>, StorageError> {
         let now = now_secs();
         let tx = self.conn.unchecked_transaction()?;
         if let Some(message_id) = message_id {
@@ -285,15 +288,47 @@ impl Storage {
                 params![message_id],
             )?;
         }
+        let turn = match message_id {
+            Some(id) => id,
+            None => {
+                let low: i64 =
+                    tx.query_row("SELECT COALESCE(MIN(turn), 0) FROM injections", [], |row| {
+                        row.get(0)
+                    })?;
+                low.min(0) - 1
+            }
+        };
+        let mut rows = Vec::with_capacity(memory_ids.len());
         for memory_id in memory_ids {
             tx.execute(
-                "INSERT INTO injections (conversation_id, message_id, memory_id, injected_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![conversation_id, message_id, memory_id, now],
+                "INSERT INTO injections (conversation_id, message_id, turn, memory_id, injected_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![conversation_id, message_id, turn, memory_id, now],
             )?;
+            rows.push(tx.last_insert_rowid());
         }
         // Injections move co-injection edges and hit counts, so the graph too.
         invalidate_graph(&tx)?;
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    /// Promotion: ephemeral rows join the saved conversation and its user
+    /// message, keeping the hit history they already earned.
+    pub fn adopt_injections(
+        &self,
+        rows: &[i64],
+        conversation_id: i64,
+        message_id: i64,
+    ) -> Result<(), StorageError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for row in rows {
+            tx.execute(
+                "UPDATE injections SET conversation_id = ?1, message_id = ?2, turn = ?2
+                 WHERE id = ?3",
+                params![conversation_id, message_id, row],
+            )?;
+        }
         Ok(tx.commit()?)
     }
 
@@ -405,8 +440,7 @@ impl Storage {
             "SELECT a.memory_id, b.memory_id, count(*)
              FROM injections AS a
              JOIN injections AS b
-               ON a.message_id = b.message_id AND a.memory_id < b.memory_id
-             WHERE a.message_id IS NOT NULL
+               ON a.turn = b.turn AND a.memory_id < b.memory_id
              GROUP BY a.memory_id, b.memory_id
              HAVING count(*) >= ?1",
         )?;
@@ -630,7 +664,7 @@ pub(crate) mod tests {
             .create_conversation("c", "ollama", "llama3.2:3b")
             .expect("create");
         storage
-            .record_injections(conversation.id, None, &[alpha_id])
+            .record_injections(Some(conversation.id), None, &[alpha_id])
             .expect("inject");
         assert!(storage
             .sync_notes(&[note("beta", "plain")], &[])
@@ -680,7 +714,7 @@ pub(crate) mod tests {
             .append_message(conversation.id, crate::chat::Role::User, "q", None, None)
             .expect("message");
         storage
-            .record_injections(conversation.id, Some(message.id), &[alpha.id])
+            .record_injections(Some(conversation.id), Some(message.id), &[alpha.id])
             .expect("inject");
         assert_eq!(
             storage.active_model().expect("model").as_deref(),
@@ -831,10 +865,10 @@ pub(crate) mod tests {
             .expect("message");
 
         storage
-            .record_injections(conversation.id, Some(message.id), &[ids[0]])
+            .record_injections(Some(conversation.id), Some(message.id), &[ids[0]])
             .expect("record");
         storage
-            .record_injections(conversation.id, Some(message.id), &[ids[1]])
+            .record_injections(Some(conversation.id), Some(message.id), &[ids[1]])
             .expect("re-record");
 
         let recorded: Vec<i64> = storage
@@ -871,7 +905,7 @@ pub(crate) mod tests {
                 )
                 .expect("message");
             storage
-                .record_injections(conversation.id, Some(row.id), &[ids[0], ids[1]])
+                .record_injections(Some(conversation.id), Some(row.id), &[ids[0], ids[1]])
                 .expect("inject");
         }
         assert_eq!(
@@ -879,6 +913,56 @@ pub(crate) mod tests {
             vec![(ids[0], ids[1], 3)]
         );
         assert!(storage.co_injections(4).expect("pairs").is_empty());
+    }
+
+    /// A spotlight ask that is never promoted still counts: hits accrue and
+    /// co-use pairs form, each ask under a turn id of its own. Promotion
+    /// adopts the rows instead of recording them twice.
+    #[test]
+    fn ephemeral_recordings_count_and_promotion_adopts_them() {
+        let (_dir, storage) = open("ephemeral");
+        let notes = vec![note("a", "x"), note("b", "y")];
+        sync_spread(&storage, &notes);
+        let ids: Vec<i64> = storage
+            .list_memories()
+            .expect("list")
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect();
+
+        let first = storage
+            .record_injections(None, None, &[ids[0], ids[1]])
+            .expect("record");
+        storage
+            .record_injections(None, None, &[ids[0], ids[1]])
+            .expect("record again");
+        assert_eq!(
+            storage.co_injections(2).expect("pairs"),
+            vec![(ids[0], ids[1], 2)],
+            "two asks, one pair — never four rows on one turn"
+        );
+        let listed = storage.list_memories().expect("list");
+        assert_eq!(storage.stats_for(listed).expect("stats")[0].hits, 2);
+
+        let conversation = storage
+            .create_conversation("promoted", "ollama", "llama3.2:3b")
+            .expect("create");
+        let question = storage
+            .append_message(conversation.id, crate::chat::Role::User, "q", None, None)
+            .expect("message");
+        storage
+            .adopt_injections(&first, conversation.id, question.id)
+            .expect("adopt");
+        let adopted = storage.injections(conversation.id).expect("injections");
+        assert_eq!(adopted.len(), 2, "adoption re-parents, it does not add");
+        assert!(adopted
+            .iter()
+            .all(|injection| injection.message_id == Some(question.id)));
+        assert_eq!(
+            storage.co_injections(2).expect("pairs"),
+            vec![(ids[0], ids[1], 2)],
+            "adoption must not change what was counted"
+        );
     }
 
     #[test]
@@ -901,10 +985,10 @@ pub(crate) mod tests {
             .create_conversation("s", "ollama", "llama3.2:3b")
             .expect("create");
         storage
-            .record_injections(conversation.id, None, &[a])
+            .record_injections(Some(conversation.id), None, &[a])
             .expect("inject a");
         storage
-            .record_injections(conversation.id, None, &[a, c])
+            .record_injections(Some(conversation.id), None, &[a, c])
             .expect("inject a and c");
 
         let ids = |rows: Vec<MemoryStats>| {

@@ -115,8 +115,10 @@ struct Ask {
 struct Shared {
     answer: Mutex<String>,
     usage: Mutex<Option<Usage>>,
-    /// The memories injected for this ask, recorded if it is promoted.
+    /// The memories injected for this ask.
     injected: Mutex<Vec<i64>>,
+    /// Their injection rows, recorded at ask time; promotion adopts them.
+    recorded: Mutex<Vec<i64>>,
     finished: AtomicBool,
 }
 
@@ -385,10 +387,16 @@ pub async fn spotlight_promote(
     let question = storage
         .append_message(row.id, Role::User, &ask.question, None, None)
         .map_err(|err| err.to_string())?;
+    let recorded = lock(&ask.shared.recorded).clone();
     let injected = lock(&ask.shared.injected).clone();
-    if !injected.is_empty() {
+    if !recorded.is_empty() {
         storage
-            .record_injections(row.id, Some(question.id), &injected)
+            .adopt_injections(&recorded, row.id, question.id)
+            .map_err(|err| err.to_string())?;
+    } else if !injected.is_empty() {
+        // Ask-time recording failed; the promoted turn still gets its record.
+        storage
+            .record_injections(Some(row.id), Some(question.id), &injected)
             .map_err(|err| err.to_string())?;
     }
     storage
@@ -451,17 +459,38 @@ async fn run(
 ) {
     // A spotlight ask has no history: the question alone drives retrieval.
     // Brevity comes from `[spotlight]`, never from any conversation.
-    let (brevity, brain_dir) = match app.state::<AppState>().ready() {
+    let (brevity, brain_dir, save_temperature) = match app.state::<AppState>().ready() {
         Ok(ready) => (
             ready.config.spotlight.brevity,
             odyn_core::notes::brain_dir(ready.config.brain.path.as_deref()).unwrap_or_default(),
+            ready.config.brain.save_temperature,
         ),
-        Err(_) => (Default::default(), std::path::PathBuf::new()),
+        Err(_) => (
+            Default::default(),
+            std::path::PathBuf::new(),
+            odyn_core::config::BrainConfig::default().save_temperature,
+        ),
     };
     let memorize = ask.memorize;
     let mut history = vec![Message::new(Role::User, ask.message.clone())];
     if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
         *lock(&shared.injected) = context.memory_ids();
+        // An ephemeral ask still counts: hits and co-use edges accrue whether
+        // or not it is ever promoted.
+        if !context.is_empty() {
+            let recorded = app
+                .state::<AppState>()
+                .ready()
+                .ok()
+                .and_then(|ready| {
+                    ready
+                        .storage()
+                        .record_injections(None, None, &context.memory_ids())
+                        .ok()
+                })
+                .unwrap_or_default();
+            *lock(&shared.recorded) = recorded;
+        }
         emit(&app, request_id, crate::commands::context_body(&context));
         if !context.system_message.is_empty() {
             history.insert(0, Message::new(Role::System, context.system_message));
@@ -480,6 +509,7 @@ async fn run(
         history,
         &tools,
         &brain_dir,
+        save_temperature,
         |event| {
             match event {
                 TurnEvent::Delta(delta) => {

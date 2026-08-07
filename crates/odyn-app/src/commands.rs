@@ -370,6 +370,7 @@ pub async fn send_message(
         Err(err) => return fail(&app, &state, request_id, err.to_string()),
     };
     let brevity = row.brevity.unwrap_or(ready.config.style.brevity);
+    let save_temperature = ready.config.brain.save_temperature;
     let task = tauri::async_runtime::spawn(run(
         app.clone(),
         request_id,
@@ -381,6 +382,7 @@ pub async fn send_message(
         question_id,
         brevity,
         brain_dir,
+        save_temperature,
     ));
     stream.attach(task);
     Ok(request_id)
@@ -519,6 +521,7 @@ async fn run(
     question_id: Option<i64>,
     brevity: Brevity,
     brain_dir: std::path::PathBuf,
+    save_temperature: f32,
 ) {
     let context = build_context(&app, prior.clone(), ask.clone(), brevity).await;
     if let Some(context) = &context {
@@ -547,6 +550,7 @@ async fn run(
         history,
         &tools,
         &brain_dir,
+        save_temperature,
     )
     .await;
     let state = app.state::<AppState>();
@@ -683,7 +687,7 @@ fn record(app: &AppHandle, stream: &Stream, question_id: Option<i64>, context: &
         return;
     };
     let _ = ready.storage().record_injections(
-        stream.conversation_id,
+        Some(stream.conversation_id),
         question_id,
         &context.memory_ids(),
     );
@@ -767,29 +771,38 @@ async fn drive(
     history: Vec<Message>,
     tools: &[ToolDef],
     brain_dir: &std::path::Path,
+    save_temperature: f32,
 ) -> Outcome {
-    let driven = tools::run_turn(provider, model, history, tools, brain_dir, |event| {
-        match event {
-            TurnEvent::Delta(delta) => {
-                stream.push(delta);
-                emit(
+    let driven = tools::run_turn(
+        provider,
+        model,
+        history,
+        tools,
+        brain_dir,
+        save_temperature,
+        |event| {
+            match event {
+                TurnEvent::Delta(delta) => {
+                    stream.push(delta);
+                    emit(
+                        app,
+                        request_id,
+                        Body::Delta {
+                            text: delta.to_string(),
+                        },
+                    );
+                }
+                TurnEvent::Saved(slug) => emit(
                     app,
                     request_id,
-                    Body::Delta {
-                        text: delta.to_string(),
+                    Body::Saved {
+                        slug: slug.to_string(),
                     },
-                );
+                ),
             }
-            TurnEvent::Saved(slug) => emit(
-                app,
-                request_id,
-                Body::Saved {
-                    slug: slug.to_string(),
-                },
-            ),
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .await;
     match driven {
         Ok(reply) => Outcome::Done(reply.usage),

@@ -5,6 +5,7 @@ import { renderGraph } from "./graph";
 import {
   cancelMemoryEdit,
   chooseEmbedModel,
+  chooseSaveTemperature,
   commitMemoryEdit,
   loadMoreMemories,
   removeMemory,
@@ -55,6 +56,40 @@ const models = dropdown({
   onPick: (value) => void chooseEmbedModel(value),
 });
 
+// /memory save turns sample at this temperature: lower = more literal.
+const TEMPS: [number, string][] = [
+  [0, "deterministic"],
+  [0.1, "near-literal"],
+  [0.2, ""],
+  [0.3, "default"],
+  [0.5, ""],
+  [0.7, ""],
+  [1, "loose"],
+];
+const temps = dropdown({
+  label: "save temp",
+  empty: "…",
+  onPick: (value) => void chooseSaveTemperature(Number(value)),
+});
+
+function tempPicker(): HTMLElement {
+  const wrap = el("span", "brain-model");
+  const current = state.brain.overview?.save_temperature;
+  const items = TEMPS.map(([value, hint]) => ({
+    value: String(value),
+    label: `save ${value}`,
+    hint,
+  }));
+  // A value tuned by hand in odyn.toml still shows as the selection.
+  if (current !== undefined && !TEMPS.some(([value]) => value === current)) {
+    items.push({ value: String(current), label: `save ${current}`, hint: "" });
+  }
+  temps.set(items, current === undefined ? "" : String(current));
+  temps.setDisabled(state.brain.overview === null);
+  wrap.append(temps.root);
+  return wrap;
+}
+
 function header(): HTMLElement {
   const row = el("div", "brain-header");
   const overview = state.brain.overview;
@@ -65,7 +100,7 @@ function header(): HTMLElement {
         `cap ${overview.cap_tokens} tk`;
   const left = el("div", "brain-stats", stats);
   if (overview !== null) left.title = overview.path;
-  left.append(" ", modelPicker());
+  left.append(" ", modelPicker(), " ", tempPicker());
   row.append(left);
   const toggle = el("div", "brain-toggle");
   for (const mode of ["list", "graph"] as const) {

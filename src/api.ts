@@ -132,6 +132,7 @@ export type BrainOverview = {
   model_remote: boolean;
   // The width the index was built at; 0 before anything is built.
   dim: number;
+  save_temperature: number;
 };
 
 export type EmbedOption = {
@@ -152,6 +153,9 @@ export const embedCatalog = (): Promise<EmbedOption[]> =>
 // Writes the config key and re-indexes; slow by nature.
 export const brainSetModel = (model: string): Promise<BrainOverview> =>
   invoke("brain_set_model", { model });
+
+export const brainSetSaveTemperature = (value: number): Promise<BrainOverview> =>
+  invoke("brain_set_save_temperature", { value });
 
 export const brainMemories = (
   sort: MemorySort,

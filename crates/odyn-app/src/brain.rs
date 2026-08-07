@@ -38,6 +38,7 @@ pub struct BrainOverview {
     model_remote: bool,
     /// The width the index was actually built at; 0 before anything is built.
     dim: usize,
+    save_temperature: f32,
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -91,6 +92,7 @@ pub async fn brain_overview(app: AppHandle) -> Result<BrainOverview, String> {
             model: ready.config.brain.model.canonical(),
             model_remote: ready.config.brain.model.is_remote(),
             dim,
+            save_temperature: ready.config.brain.save_temperature,
         })
     })
     .await
@@ -172,6 +174,23 @@ pub async fn brain_set_model(app: AppHandle, model: String) -> Result<BrainOverv
     })
     .await
     .map_err(|err| err.to_string())??;
+    brain_overview(app).await
+}
+
+/// Writes `[brain] save_temperature`. Validated here first: a bad value must
+/// not reach the file and brick the config until it is hand-edited.
+#[tauri::command]
+pub async fn brain_set_save_temperature(
+    app: AppHandle,
+    value: f32,
+) -> Result<BrainOverview, String> {
+    if !(0.0..=2.0).contains(&value) {
+        return Err("save_temperature must be between 0 and 2".to_string());
+    }
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "brain.save_temperature", &format!("{value:?}"))
+        .map_err(|err| err.to_string())?;
+    app.state::<AppState>().inner().reload()?;
     brain_overview(app).await
 }
 

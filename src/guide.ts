@@ -123,6 +123,8 @@ model = "bge-small"
 top_k = 6
 cap_tokens = 1200
 similarity_edge_threshold = 0.78
+min_relevance = 0.3
+save_temperature = 0.3
 
 [style]
 brevity = "off"
@@ -264,7 +266,7 @@ odyn chat`),
     body: () => [
       p(
         "One field, summoned anywhere, for a question that does not deserve a conversation. " +
-          "Asks are ephemeral: nothing is stored unless you promote the exchange.",
+          "Asks are ephemeral: the exchange is stored only if you promote it. Recalled notes do earn their hits either way, so the brain graph learns from spotlight use.",
       ),
       rows([
         [
@@ -597,7 +599,7 @@ memories 13/1200 tk
         "Your notes are embedded on this machine by default, whether by the bundled model or by Ollama. The one exception is a `<provider>:` embedding model, which sends every note's full text to that endpoint — the brain view says so whenever one is active, and it is never the default.",
         "A key you paste is written to `odyn.toml` as `api_key`, and nowhere else — never to a log, and never over the wire except to the provider it belongs to. `api_key_env` keeps it out of the file entirely by naming an environment variable instead; either is read only when that provider is actually built.",
         "Memories are the files in the brain folder; `odyn.db` holds conversations, the recall records, and an index derived from those files. Deleting a note's file deletes the memory; deleting a conversation takes its messages with it.",
-        "Spotlight asks are never stored unless you promote them; dismissing drops the exchange.",
+        "Spotlight asks are stored only when promoted; dismissing drops the exchange. What does persist is the brain's hit ledger: which notes were recalled, never what was asked.",
         "`odyn ask` without `--save` will not create a database on a machine that never saved anything.",
       ]),
       p("Both locations can be moved:"),
