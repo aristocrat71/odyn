@@ -9,6 +9,7 @@ pub mod config_edit;
 pub mod embed;
 pub mod graph;
 pub mod providers;
+pub mod reasoning;
 pub mod storage;
 
 /// Tests that read or set environment variables run one at a time: the

@@ -251,14 +251,18 @@ impl ChatProvider for OpenAiCompatProvider {
             .header(CONTENT_TYPE, "application/json")
             .body(body);
 
-        futures::stream::unfold(
-            State::Start {
-                builder: Box::new(builder),
-                first_token: self.timeouts.first_token,
-            },
-            step,
+        // Models that write their thinking into `content` are stripped here, so
+        // no surface has to know they do it.
+        crate::reasoning::strip_reasoning(
+            futures::stream::unfold(
+                State::Start {
+                    builder: Box::new(builder),
+                    first_token: self.timeouts.first_token,
+                },
+                step,
+            )
+            .boxed(),
         )
-        .boxed()
     }
 }
 

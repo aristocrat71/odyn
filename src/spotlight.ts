@@ -20,7 +20,8 @@ type SpotEvent =
     }
   | { request_id: number; kind: "delta"; text: string }
   | { request_id: number; kind: "done" }
-  | { request_id: number; kind: "error"; message: string };
+  // `detail` present means `message` stands in for the provider's own words.
+  | { request_id: number; kind: "error"; message: string; detail?: string };
 
 type SpotProvider = { name: string; kind: string; models: string[] };
 type SpotTarget = {
@@ -148,13 +149,19 @@ function draw(): void {
     for (const id of used) trace.append(" ", el("span", "trace-id", id));
     results.append(trace);
   }
-  results.scrollTop = results.scrollHeight;
+  // No auto-scroll: a growing answer must not yank the panel while reading.
 }
 
-function fail(message: string): void {
+function fail(message: string, detail?: string): void {
   streaming = false;
+  // Whatever streamed before the failure is kept, minus the streaming cursor.
+  if (answer !== "") draw();
   results.hidden = false;
   results.append(el("div", "spot-error", message));
+  if (detail !== undefined) {
+    console.error(`[odyn] ${detail}`);
+    results.append(el("div", "spot-error-hint", "⌘K picks another model"));
+  }
 }
 
 function clearScreen(): void {
@@ -294,7 +301,7 @@ void listen<SpotEvent>("spotlight-event", (event) => {
     streaming = false;
     draw();
   } else {
-    fail(data.message);
+    fail(data.message, data.detail);
   }
 });
 

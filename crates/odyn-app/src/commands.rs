@@ -135,7 +135,21 @@ pub(crate) enum Body {
     },
     Error {
         message: String,
+        /// The provider's own words when `message` stands in for them. Never
+        /// rendered: the frontend logs it to the webview console.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
+}
+
+impl Body {
+    /// An error whose text is the whole story.
+    pub(crate) fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            detail: None,
+        }
+    }
 }
 
 /// What a reply ended as. An interruption is not a failure: it keeps its text.
@@ -554,7 +568,7 @@ async fn run(
     match outcome {
         Outcome::Done(usage) => settle(&app, &ready, request_id, &stream, usage, false),
         Outcome::Interrupted => settle(&app, &ready, request_id, &stream, None, true),
-        Outcome::Failed(message) => emit(&app, request_id, Body::Error { message }),
+        Outcome::Failed(message) => emit(&app, request_id, Body::error(message)),
     }
 }
 
@@ -724,9 +738,7 @@ fn settle(
     );
     let body = match stored {
         Ok(_) => Body::Done { usage, interrupted },
-        Err(err) => Body::Error {
-            message: err.to_string(),
-        },
+        Err(err) => Body::error(err.to_string()),
     };
     emit(app, request_id, body);
 }
@@ -740,7 +752,7 @@ fn fail(
     message: String,
 ) -> Result<u64, String> {
     state.streams.close(request_id);
-    emit(app, request_id, Body::Error { message });
+    emit(app, request_id, Body::error(message));
     Ok(request_id)
 }
 

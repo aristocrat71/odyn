@@ -154,6 +154,16 @@ that reports them.
 | `provider` | unset | Falls back to `default_provider`. Must name a configured provider. |
 | `model` | unset | Falls back to that provider's `default_model`. With neither, spotlight asks fail with `no spotlight model`. |
 
+When a model fails anyway — rate-limited, an unsupported request, a dropped
+connection, or a reply with no text in it — the panel says `model unavailable`
+and offers `⌘K`, rather than relaying the provider's raw error. The underlying
+message goes to the webview console. Configuration mistakes are still named in
+full: those are yours to fix, not the model's.
+
+Reasoning is never part of an answer. Models that stream their thinking as a
+`<think>…</think>` block inside the text have it removed as the stream flows,
+on every surface — spotlight, chat, and `odyn ask`.
+
 ## CLI reference
 
 ```
