@@ -1,10 +1,12 @@
 import type { MemoryRow } from "./api";
 import { el } from "./dom";
+import { dropdown } from "./dropdown";
 import { renderGraph } from "./graph";
 import {
   cancelMemoryEdit,
+  chooseEmbedModel,
   commitMemoryEdit,
-  loadMoreEpisodic,
+  loadMoreMemories,
   removeMemory,
   scheduleBrainSearch,
   setBrainMode,
@@ -25,7 +27,7 @@ search.placeholder = "search memories…";
 search.addEventListener("input", () => scheduleBrainSearch(search.value));
 
 const editor = el("input", "mem-input");
-let editingShown: number | "new" | null = null;
+let editingShown: string | null = null;
 editor.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void commitMemoryEdit(editor.value);
   if (event.key === "Escape") cancelMemoryEdit();
@@ -38,16 +40,21 @@ export function renderBrain(): HTMLElement {
     root.append(renderGraph());
     return root;
   }
-  const columns = el("div", "brain-columns");
-  columns.append(coreColumn(), episodicColumn());
-  root.append(columns);
+  root.append(listColumn());
   root.addEventListener("scroll", () => {
     if (root.scrollHeight - root.scrollTop - root.clientHeight < NEAR) {
-      void loadMoreEpisodic();
+      void loadMoreMemories();
     }
   });
   return root;
 }
+
+// The model picker outlives redraws, like every other persistent control.
+const models = dropdown({
+  label: "model",
+  empty: "…",
+  onPick: (value) => void chooseEmbedModel(value),
+});
 
 function header(): HTMLElement {
   const row = el("div", "brain-header");
@@ -55,9 +62,12 @@ function header(): HTMLElement {
   const stats =
     overview === null
       ? ""
-      : `${overview.episodic_count} episodic · ${overview.model} · ` +
-        `top-k ${overview.top_k} · cap ${overview.cap_tokens} tk`;
-  row.append(el("div", "brain-stats", stats));
+      : `${overview.count} memories · top-k ${overview.top_k} · ` +
+        `cap ${overview.cap_tokens} tk`;
+  const left = el("div", "brain-stats", stats);
+  if (overview !== null) left.title = overview.path;
+  left.append(" ", modelPicker());
+  row.append(left);
   const toggle = el("div", "brain-toggle");
   for (const mode of ["list", "graph"] as const) {
     const word = el("button", "brain-mode", mode);
@@ -70,68 +80,51 @@ function header(): HTMLElement {
   return row;
 }
 
-function coreColumn(): HTMLElement {
-  const column = el("div", "brain-col brain-core");
-  column.append(el("div", "col-label core", "CORE PROFILE — always injected"));
+// Which model embeds this brain. Changing it re-embeds every note, so the
+// control says so while that runs, and a remote model is marked as one —
+// it is the only kind that sends note text off the machine.
+function modelPicker(): HTMLElement {
+  const wrap = el("span", "brain-model");
   const overview = state.brain.overview;
-  if (overview !== null) column.append(budget(overview.core_tokens, overview.core_budget_tokens));
-  for (const row of overview?.core ?? []) {
-    column.append(state.brain.editing === row.id ? editRow(row) : coreRow(row));
+  if (state.brain.swapping) {
+    wrap.append(el("span", "brain-reindex", "re-embedding every note…"));
+    return wrap;
   }
-  if (state.brain.editing === "new") {
-    column.append(editRow(null));
-  } else {
-    const add = el("button", "ghost-link", "+ add core memory");
-    add.addEventListener("click", () => startMemoryEdit("new"));
-    column.append(add);
-  }
-  return column;
-}
-
-// DESIGN.md §6.1: `342 ——▓▓▓——— 500 tk`, a 2px amber bar between the numbers.
-function budget(used: number, cap: number): HTMLElement {
-  const line = el("div", "budget");
-  const bar = el("div", "budget-bar");
-  const fill = el("div", "budget-fill");
-  fill.style.width = `${Math.min(100, cap === 0 ? 100 : (used / cap) * 100)}%`;
-  bar.append(fill);
-  line.append(el("span", "budget-used", String(used)), bar, el("span", "budget-cap", `${cap} tk`));
-  return line;
-}
-
-function coreRow(row: MemoryRow): HTMLElement {
-  const line = el("div", "mem-row");
-  line.append(
-    el("span", "mem-id core", row.display_id),
-    el("span", "mem-content", row.content),
-    el("span", "mem-tokens", `${row.tokens} tk`),
+  const options = state.brain.models;
+  const current = overview?.model ?? "";
+  models.set(
+    (options ?? []).map((option) => ({
+      value: option.id,
+      label: option.id,
+      hint:
+        (option.dim === null ? "" : `${option.dim}d · `) +
+        (option.remote ? `⚠ ${option.description}` : option.description),
+    })),
+    current,
   );
-  const actions = el("span", "mem-actions");
-  const edit = el("button", "mem-edit", "✎");
-  edit.addEventListener("click", () => startMemoryEdit(row.id));
-  const remove = el("button", "mem-delete", "✕");
-  remove.addEventListener("click", () => void removeMemory(row.id));
-  actions.append(edit, remove);
-  line.append(actions);
-  return line;
-}
-
-// The row becomes an input in place; `null` is the add-new row.
-function editRow(row: MemoryRow | null): HTMLElement {
-  const line = el("div", "mem-row editing");
-  if (row !== null) line.append(el("span", "mem-id core", row.display_id));
-  if (editingShown !== state.brain.editing) {
-    editingShown = state.brain.editing;
-    editor.value = row?.content ?? "";
-    queueMicrotask(() => editor.focus());
+  models.setDisabled(options === null);
+  wrap.append(models.root);
+  if (overview !== null && overview.dim > 0) {
+    wrap.append(el("span", "brain-dim", `${overview.dim}d`));
   }
-  line.append(editor);
-  return line;
+  if (overview?.model_remote === true) {
+    const warn = el("span", "brain-remote", "⚠ notes are sent to this provider");
+    wrap.append(warn);
+  }
+  return wrap;
 }
 
-function episodicColumn(): HTMLElement {
-  const column = el("div", "brain-col brain-epi");
-  column.append(el("div", "col-label epi", "EPISODIC — top-k retrieval"));
+// One flat pool: every memory is a markdown note in the brain folder,
+// recalled only when a message mentions /brain.
+function listColumn(): HTMLElement {
+  const column = el("div", "brain-col brain-list");
+  const overview = state.brain.overview;
+  column.append(
+    el("div", "col-label epi", "MEMORIES — recalled on /brain"),
+  );
+  if (overview !== null) {
+    column.append(el("div", "brain-path", overview.path));
+  }
 
   const toolbar = el("div", "brain-toolbar");
   const sort = el("button", "sort-toggle", `${state.brain.sort} ▾`);
@@ -142,30 +135,62 @@ function episodicColumn(): HTMLElement {
   toolbar.append(search, sort);
   column.append(toolbar);
 
-  const rows = state.brain.results ?? state.brain.episodic;
-  for (const row of rows) column.append(epiRow(row));
+  const rows = state.brain.results ?? state.brain.memories;
+  for (const row of rows) {
+    column.append(state.brain.editing === row.slug ? editRow(row) : memRow(row));
+  }
   if (rows.length === 0 && state.brain.results !== null) {
     column.append(el("div", "brain-none", "nothing similar"));
+  }
+  if (state.brain.editing === "new") {
+    column.append(editRow(null));
+  } else {
+    const add = el("button", "ghost-link", "+ add a note");
+    add.addEventListener("click", () => startMemoryEdit("new"));
+    column.append(add);
   }
   return column;
 }
 
-function epiRow(row: MemoryRow): HTMLElement {
+function memRow(row: MemoryRow): HTMLElement {
   const line = el("div", "mem-row");
   line.append(
-    el("span", "mem-id epi", row.display_id),
-    el("span", "mem-content", row.content),
+    el("span", "mem-id epi", row.slug),
+    el("span", "mem-content", flat(row.content)),
   );
   const now = Math.floor(Date.now() / 1000);
   if (row.last_injected_at !== null && now - row.last_injected_at <= INJECTED_TAG_S) {
     const minutes = Math.max(0, Math.floor((now - row.last_injected_at) / 60));
     line.append(el("span", "mem-tag", `injected ${minutes}m ago`));
   }
-  const meta =
-    row.hits > 0 ? `${row.hits} hits` : date(row.created_at);
+  const meta = row.hits > 0 ? `${row.hits} hits` : date(row.created_at);
   line.append(el("span", "mem-meta", meta));
+  const actions = el("span", "mem-actions");
+  const edit = el("button", "mem-edit", "✎");
+  edit.addEventListener("click", () => startMemoryEdit(row.slug));
+  const remove = el("button", "mem-delete", "✕");
+  remove.addEventListener("click", () => void removeMemory(row.slug));
+  actions.append(edit, remove);
+  line.append(actions);
   return line;
 }
+
+// The row becomes an input in place; `null` is the add-new row. The inline
+// editor is for quick one-line notes — the folder is where long ones live.
+function editRow(row: MemoryRow | null): HTMLElement {
+  const line = el("div", "mem-row editing");
+  if (row !== null) line.append(el("span", "mem-id epi", row.slug));
+  if (editingShown !== state.brain.editing) {
+    editingShown = state.brain.editing;
+    editor.value = row?.content ?? "";
+    queueMicrotask(() => editor.focus());
+  }
+  line.append(editor);
+  return line;
+}
+
+// A multi-line note flattens to one row line; the graph tip shows it whole.
+const flat = (content: string): string => content.split("\n").join(" ⏎ ");
 
 const date = (seconds: number): string =>
   new Date(seconds * 1000).toLocaleDateString("en-US", {

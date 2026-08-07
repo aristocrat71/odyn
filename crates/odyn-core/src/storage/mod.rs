@@ -14,7 +14,11 @@ use crate::chat::{Role, Usage};
 
 mod memory;
 
-pub use memory::{normalize_content, EpisodicSort, Injection, Memory, MemoryStats, MemoryTier};
+pub use memory::{Injection, Memory, MemorySort, MemoryStats, NotePlan};
+
+/// Note and sync helpers shared by other modules' tests.
+#[cfg(test)]
+pub(crate) use memory::tests as memory_tests;
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);
 const DB_FILE_NAME: &str = "odyn.db";
@@ -71,6 +75,50 @@ CREATE TABLE graph_cache (
     r"
 ALTER TABLE conversations ADD COLUMN brevity TEXT;
 ",
+    // The brain v2 wipe: memories move out of SQLite into a folder of
+    // markdown notes, and these tables become an index derived from it —
+    // one flat pool, no tiers, slugs for ids, wikilinks as edges. Old rows
+    // are dropped, not migrated (authorized: dev-stage data).
+    r"
+DROP TABLE injections;
+DROP TABLE memories;
+DROP TABLE memories_vec;
+DELETE FROM graph_cache;
+CREATE TABLE memories (
+    id         INTEGER PRIMARY KEY,
+    slug       TEXT    NOT NULL UNIQUE,
+    content    TEXT    NOT NULL,
+    hash       INTEGER NOT NULL,
+    tokens     INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[384]);
+CREATE TABLE memory_links (
+    from_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    to_slug TEXT    NOT NULL,
+    PRIMARY KEY (from_id, to_slug)
+);
+CREATE TABLE injections (
+    id              INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    message_id      INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    memory_id       INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    injected_at     INTEGER NOT NULL
+);
+",
+    // Which embedding model built the index. The vector table's width is that
+    // model's, so it can no longer be declared here — `ensure_index` owns it
+    // from now on. The row states what migration 5 created, so an existing
+    // index stays valid and nothing re-embeds just for this upgrade.
+    r"
+CREATE TABLE brain_meta (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    model TEXT    NOT NULL,
+    dim   INTEGER NOT NULL
+);
+INSERT INTO brain_meta (id, model, dim) VALUES (1, 'bge-small', 384);
+",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -92,12 +140,8 @@ pub enum StorageError {
     MemoryNotFound(i64),
     #[error("an embedding with {expected} dimensions was required, but {got} were given")]
     EmbeddingDimensions { expected: usize, got: usize },
-    #[error("episodic memories require an embedding")]
-    EmbeddingRequired,
-    #[error("core memories must not have an embedding")]
-    EmbeddingForbidden,
-    #[error("memory content is empty")]
-    EmptyMemory,
+    #[error("note `{0}` changed but no embedding for it was given")]
+    MissingEmbedding(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +243,17 @@ impl Storage {
         )?;
         let rows = stmt.query_map([], to_conversation)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The most recently active conversation — the head of `list_conversations`,
+    /// read on its own so a new chat can open on the last one's target.
+    pub fn latest_conversation(&self) -> Result<Option<Conversation>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, model, provider, created_at, updated_at, brevity
+             FROM conversations ORDER BY updated_at DESC, id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map([], to_conversation)?;
+        Ok(rows.next().transpose()?)
     }
 
     /// Writes an explicit brevity choice; the column stays NULL until one.
@@ -533,6 +588,51 @@ pub(crate) mod tests {
         assert_eq!(reopened.list_conversations().expect("list"), vec![created]);
     }
 
+    /// The brain v2 migration wipes the old tiered memory rows but must keep
+    /// every conversation, and the reborn index must accept notes.
+    #[test]
+    fn upgrading_a_tiered_database_wipes_memories_and_keeps_conversations() {
+        odyn_vec::register().expect("register sqlite-vec");
+        let dir = TempDir::new("wipe");
+        std::fs::create_dir_all(&dir.0).expect("create the directory");
+        {
+            let conn = Connection::open(dir.db()).expect("open raw");
+            for (index, sql) in MIGRATIONS.iter().take(4).enumerate() {
+                conn.execute_batch(sql).expect("apply old schema");
+                conn.pragma_update(None, "user_version", index as i64 + 1)
+                    .expect("set version");
+            }
+            conn.execute(
+                "INSERT INTO conversations (title, model, provider, created_at, updated_at)
+                 VALUES ('kept', 'm', 'p', 5, 5)",
+                [],
+            )
+            .expect("insert conversation");
+            conn.execute(
+                "INSERT INTO memories (tier, content, created_at, updated_at, tokens)
+                 VALUES ('core', 'wiped', 5, 5, 2)",
+                [],
+            )
+            .expect("insert tiered memory");
+        }
+
+        let storage = Storage::open(dir.db()).expect("open upgrades");
+        assert_eq!(
+            user_version(&storage.conn).expect("user_version"),
+            MIGRATIONS.len() as i64
+        );
+        assert_eq!(storage.list_conversations().expect("list")[0].title, "kept");
+        assert_eq!(
+            storage.count_memories().expect("count"),
+            0,
+            "old tiered rows are wiped, not migrated"
+        );
+        // The reborn index accepts a note under the new schema.
+        let notes = vec![memory::tests::note("fresh", "works after the wipe")];
+        memory::tests::sync_spread(&storage, &notes);
+        assert_eq!(storage.list_memories().expect("list")[0].slug, "fresh");
+    }
+
     /// Two processes reaching a fresh file at once: the one that loses the race
     /// must find the migration applied, not run it again.
     #[test]
@@ -639,6 +739,36 @@ pub(crate) mod tests {
 
         storage.delete_conversation(second.id).expect("delete");
         assert!(storage.list_conversations().expect("list").is_empty());
+    }
+
+    /// What a new chat inherits its provider and model from.
+    #[test]
+    fn the_latest_conversation_is_the_head_of_the_list() {
+        let dir = TempDir::new("latest");
+        let storage = Storage::open(dir.db()).expect("open");
+        assert!(storage.latest_conversation().expect("latest").is_none());
+
+        let older = storage
+            .create_conversation("older", "ollama", "llama3.2:3b")
+            .expect("create older");
+        let newer = storage
+            .create_conversation("newer", "deepseek", "deepseek-chat")
+            .expect("create newer");
+        touch(&storage.conn, older.id, 100).expect("backdate older");
+        touch(&storage.conn, newer.id, 200).expect("backdate newer");
+
+        let latest = storage.latest_conversation().expect("latest");
+        assert_eq!(
+            latest.map(|row| (row.provider, row.model)),
+            Some(("deepseek".to_string(), "deepseek-chat".to_string()))
+        );
+
+        // Answering in the older one makes it the one a new chat follows.
+        storage
+            .append_message(older.id, Role::User, "hi", None, None)
+            .expect("append");
+        let latest = storage.latest_conversation().expect("latest after append");
+        assert_eq!(latest.map(|row| row.id), Some(older.id));
     }
 
     #[test]

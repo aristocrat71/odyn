@@ -25,7 +25,7 @@ export type Stream = {
   prompt: string;
   text: string;
   error: string;
-  // The episodic ids the backend injected for this reply, for the trace line.
+  // The note slugs the backend injected for this reply, for the trace line.
   used: string[];
 };
 
@@ -62,14 +62,19 @@ export const state = {
   brain: {
     mode: "list" as "list" | "graph",
     overview: null as api.BrainOverview | null,
-    episodic: [] as api.MemoryRow[],
-    sort: "recent" as api.EpisodicSort,
+    memories: [] as api.MemoryRow[],
+    sort: "recent" as api.MemorySort,
     exhausted: false,
     query: "",
     // `null` means browsing; a search replaces the list, not filters it.
     results: null as api.MemoryRow[] | null,
-    editing: null as number | "new" | null,
+    // The slug being edited in place; "new" is the add-note row.
+    editing: null as string | null,
     graph: null as api.Graph | null,
+    // Everything selectable, loaded when the brain view opens.
+    models: null as api.EmbedOption[] | null,
+    // Set while a swap re-embeds the folder — it can take a while.
+    swapping: false,
   },
   config: {
     file: null as api.ConfigFile | null,
@@ -378,27 +383,52 @@ let searchSeq = 0;
 export const loadBrain = (): Promise<void> =>
   guard(async () => {
     state.brain.overview = await api.brainOverview();
-    state.brain.episodic = await api.brainEpisodic(state.brain.sort, 0);
-    state.brain.exhausted = state.brain.episodic.length < BRAIN_PAGE;
+    state.brain.memories = await api.brainMemories(state.brain.sort, 0);
+    state.brain.exhausted = state.brain.memories.length < BRAIN_PAGE;
+    // The catalog probes Ollama and every configured endpoint, so it lands
+    // after the list rather than holding it up.
+    void loadEmbedModels();
   });
 
-export async function loadMoreEpisodic(): Promise<void> {
+const loadEmbedModels = (): Promise<void> =>
+  guard(async () => {
+    state.brain.models = await api.embedCatalog();
+  });
+
+/// Swapping the model re-embeds every note, so the view says so while it
+/// runs rather than looking hung.
+export const chooseEmbedModel = (model: string): Promise<void> =>
+  guard(async () => {
+    if (model === state.brain.overview?.model) return;
+    state.brain.swapping = true;
+    render();
+    try {
+      state.brain.overview = await api.brainSetModel(model);
+      state.brain.memories = await api.brainMemories(state.brain.sort, 0);
+      state.brain.graph = null;
+      if (state.brain.mode === "graph") await loadBrainGraph();
+    } finally {
+      state.brain.swapping = false;
+    }
+  });
+
+export async function loadMoreMemories(): Promise<void> {
   const brain = state.brain;
   if (brain.exhausted || brain.results !== null || loadingMore) return;
   loadingMore = true;
   await guard(async () => {
-    const page = await api.brainEpisodic(brain.sort, brain.episodic.length);
-    brain.episodic.push(...page);
+    const page = await api.brainMemories(brain.sort, brain.memories.length);
+    brain.memories.push(...page);
     if (page.length < BRAIN_PAGE) brain.exhausted = true;
   });
   loadingMore = false;
 }
 
-export const setBrainSort = (sort: api.EpisodicSort): Promise<void> =>
+export const setBrainSort = (sort: api.MemorySort): Promise<void> =>
   guard(async () => {
     state.brain.sort = sort;
-    state.brain.episodic = await api.brainEpisodic(sort, 0);
-    state.brain.exhausted = state.brain.episodic.length < BRAIN_PAGE;
+    state.brain.memories = await api.brainMemories(sort, 0);
+    state.brain.exhausted = state.brain.memories.length < BRAIN_PAGE;
   });
 
 export function setBrainMode(mode: "list" | "graph"): void {
@@ -435,7 +465,7 @@ async function runBrainSearch(query: string): Promise<void> {
   });
 }
 
-export function startMemoryEdit(editing: number | "new"): void {
+export function startMemoryEdit(editing: string): void {
   state.brain.editing = editing;
   render();
 }
@@ -452,14 +482,14 @@ export const commitMemoryEdit = (content: string): Promise<void> =>
     const text = content.trim();
     // An empty edit is a cancel, matching how renames behave.
     if (editing === null || text === "") return;
-    if (editing === "new") await api.brainAddCore(text);
-    else await api.brainUpdateCore(editing, text);
+    if (editing === "new") await api.brainAddNote(text);
+    else await api.brainUpdateNote(editing, text);
     await loadBrain();
   });
 
-export const removeMemory = (id: number): Promise<void> =>
+export const removeMemory = (slug: string): Promise<void> =>
   guard(async () => {
-    await api.brainDeleteMemory(id);
+    await api.brainDeleteNote(slug);
     await loadBrain();
   });
 

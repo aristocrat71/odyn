@@ -458,7 +458,75 @@ button {
   color: var(--dim);
 }
 
-/* The only spinner in the app. */
+/* The wait before the first token: one quiet line, three breathing dots.
+   Replaced the moment text starts arriving. Shared with the spotlight window,
+   which never loads this file — spotlight.css carries the same rules. */
+
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.waiting-word {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.waiting-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.waiting-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--epi);
+  opacity: 0.25;
+  animation: wait 1.2s ease-in-out infinite;
+}
+
+.waiting-dot:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.waiting-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes wait {
+  0%,
+  65%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waiting-word,
+  .waiting-dot {
+    animation: none;
+  }
+  .waiting-dot {
+    opacity: 0.55;
+  }
+}
+
+/* The cursor that trails a streaming answer, once it has one. */
 .cursor {
   display: inline-block;
   width: 7px;
@@ -544,6 +612,14 @@ button {
   white-space: nowrap;
 }
 
+/* The wrap carries the typography, so the draft and the ghost over it wrap the
+   same way, line for line. */
+.composer-ask {
+  flex: 1;
+  min-width: 0;
+  line-height: 23px;
+}
+
 .composer-input {
   flex: 1;
   min-width: 0;
@@ -554,9 +630,7 @@ button {
   outline: none;
   resize: none;
   background: none;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: 23px;
+  font: inherit;
   color: var(--ink);
   caret-color: var(--epi);
 }
@@ -623,14 +697,6 @@ button {
   position: relative;
 }
 
-.chip-core {
-  color: var(--core);
-}
-
-.chip-core.over {
-  color: var(--danger);
-}
-
 .chip-epi {
   color: var(--epi);
 }
@@ -667,7 +733,7 @@ button {
   color: var(--faint);
 }
 
-/* DESIGN.md §6. Brain view: open text columns, no panes. */
+/* DESIGN.md §6. Brain view: one open column of notes, no panes. */
 
 .brain {
   display: flex;
@@ -713,21 +779,10 @@ button {
   color: var(--faint);
 }
 
-.brain-columns {
-  display: flex;
-  gap: 64px;
+.brain-list {
   margin-top: 30px;
-  min-height: 0;
-}
-
-.brain-core {
-  flex: none;
-  width: 340px;
-}
-
-.brain-epi {
-  flex: 1;
   min-width: 0;
+  min-height: 0;
 }
 
 .col-label {
@@ -737,33 +792,42 @@ button {
   text-transform: uppercase;
 }
 
-.col-label.core {
-  color: var(--core);
-}
-
 .col-label.epi {
   color: var(--epi);
 }
 
-.budget {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 14px;
+.brain-model {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.brain-dim,
+.brain-reindex {
   font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--dim);
+  font-size: 10px;
+  color: var(--faint);
 }
 
-.budget-bar {
-  flex: 1;
-  height: 2px;
-  background: var(--faint);
+.brain-reindex {
+  color: var(--epi);
 }
 
-.budget-fill {
-  height: 100%;
-  background: var(--core);
+/* The one backend that sends note text off the machine says so, always. */
+.brain-remote {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--danger);
+}
+
+.brain-path {
+  margin-top: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
 }
 
 .mem-row {
@@ -778,10 +842,6 @@ button {
   flex: none;
   font-family: var(--mono);
   font-size: 11px;
-}
-
-.mem-id.core {
-  color: var(--core);
 }
 
 .mem-id.epi {
@@ -943,6 +1003,13 @@ button {
   cursor: grabbing;
 }
 
+/* An authored [[link]] is the loudest edge on the map. */
+.gedge-link {
+  stroke: var(--epi);
+  stroke-width: 1.4;
+  opacity: 0.85;
+}
+
 .gedge-sim {
   stroke: var(--faint);
   stroke-width: 1;
@@ -959,12 +1026,6 @@ button {
   stroke-width: 1.5;
 }
 
-.gnode-core circle {
-  stroke: var(--core);
-  fill: var(--core);
-  fill-opacity: 0.22;
-}
-
 .gnode-epi circle {
   stroke: var(--epi);
   fill: var(--epi);
@@ -979,7 +1040,7 @@ button {
   pointer-events: none;
 }
 
-/* Episodic labels earn their place with zoom; core is always named. */
+/* Labels earn their place with zoom. */
 .gnode-epi text {
   display: none;
 }
@@ -1367,15 +1428,25 @@ g.labeled .gnode-epi text {
   color: var(--muted);
 }
 
-.home-input {
+/* The wrap carries the surface and the typography, so the field and the ghost
+   over it are the same text in the same place by construction. */
+.home-field {
   padding: 12px 16px;
-  border: 0;
-  outline: none;
   border-radius: var(--radius-composer);
   background: var(--bg-soft);
   box-shadow: var(--ring);
   font-family: var(--mono);
   font-size: 13.5px;
+}
+
+.home-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  font: inherit;
   color: var(--ink);
   caret-color: var(--epi);
 }
@@ -1412,6 +1483,56 @@ g.labeled .gnode-epi text {
 
 .home-cmd-hint {
   color: var(--dim);
+}
+
+/* Only on the row the field is completing to, so it reads as an offer. */
+.home-cmd-key {
+  margin-left: auto;
+  color: var(--faint);
+}
+
+/* Inline completion for `/` commands: the rest of the highlighted one, drawn
+   where the caret is. Shared with the spotlight window — spotlight.css has the
+   same rules, which this window never loads. */
+
+.ghost-wrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+/* Over the field, not under it: what was typed is repeated transparently so
+   the remainder starts exactly where the real text ends. */
+.ghost {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  /* Absolute inset lands on the wrap's padding box, so the field's own padding
+     has to be repeated here for the two texts to start at the same place. */
+  padding: inherit;
+  overflow: hidden;
+  font: inherit;
+  white-space: pre;
+  pointer-events: none;
+}
+
+/* A textarea wraps its text and starts at the top, so its mirror must too:
+   block, not flex, or the two spans would become boxes side by side and each
+   wrap on its own instead of flowing as one line of text. */
+.ghost.multi {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.ghost-typed {
+  color: transparent;
+}
+
+.ghost-rest {
+  color: var(--faint);
 }
 
 .home-note {

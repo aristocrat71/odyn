@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::brevity::Brevity;
 use crate::chat::ChatProvider;
+use crate::embed::EmbedModel;
 use crate::providers::ollama::OllamaProvider;
 use crate::providers::openai_compat::{OpenAiCompatProvider, ProviderInitError};
 
@@ -46,10 +47,11 @@ keep_alive = "5m"  # how long a model stays in RAM; "0" unloads it immediately
 # base_url = "https://opencode.ai/zen/v1"
 # api_key = "your key"
 
-[memory]
-core_budget_tokens = 500
-episodic_top_k = 6
-episodic_cap_tokens = 900
+[brain]
+# path = "~/odyn-brain"  # the folder of .md notes; default: the platform data dir
+model = "bge-small"      # embedding model; changing it re-embeds every note
+top_k = 6                # recall walk seeds per /brain mention
+cap_tokens = 1200        # token budget for one recall
 similarity_edge_threshold = 0.78
 
 [style]
@@ -110,7 +112,11 @@ pub struct Config {
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
-    pub memory: MemoryConfig,
+    pub brain: BrainConfig,
+    /// The brain v1 `[memory]` section, swallowed whole and ignored so an
+    /// old file still parses — a stale section must not brick the app.
+    #[serde(default, rename = "memory")]
+    legacy_memory: Option<toml::Value>,
     #[serde(default)]
     pub style: StyleConfig,
     #[serde(default)]
@@ -138,10 +144,20 @@ pub enum ProviderConfig {
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct MemoryConfig {
-    pub core_budget_tokens: u32,
-    pub episodic_top_k: u32,
-    pub episodic_cap_tokens: u32,
+pub struct BrainConfig {
+    /// Where the note files live; `None` is the platform data dir.
+    pub path: Option<PathBuf>,
+    /// Which model embeds notes and questions: a bare name is bundled
+    /// (fastembed), `ollama:<model>` is the local daemon, `<provider>:<model>`
+    /// an OpenAI-compatible endpoint. Changing it re-embeds the whole folder —
+    /// vectors from two models cannot be compared. Never rejected at parse
+    /// time: a name that resolves to nothing breaks the brain when it is used,
+    /// not the whole config on load.
+    pub model: EmbedModel,
+    /// How many walk seeds a recall starts from.
+    pub top_k: u32,
+    /// The token budget one recall may inject.
+    pub cap_tokens: u32,
     pub similarity_edge_threshold: f32,
 }
 
@@ -161,12 +177,13 @@ pub struct SpotlightConfig {
     pub brevity: Brevity,
 }
 
-impl Default for MemoryConfig {
+impl Default for BrainConfig {
     fn default() -> Self {
         Self {
-            core_budget_tokens: 500,
-            episodic_top_k: 6,
-            episodic_cap_tokens: 900,
+            path: None,
+            model: EmbedModel::default(),
+            top_k: 6,
+            cap_tokens: 1200,
             similarity_edge_threshold: 0.78,
         }
     }
@@ -270,13 +287,13 @@ impl Config {
         // One provider's mistakes stay that provider's: they surface from
         // `ProviderRegistry::provider` when it is used, so a broken zen entry
         // never stops Odyn from talking to a local Ollama.
-        if self.memory.episodic_top_k == 0 {
-            return Err(invalid("memory.episodic_top_k", "must be at least 1"));
+        if self.brain.top_k == 0 {
+            return Err(invalid("brain.top_k", "must be at least 1"));
         }
-        let threshold = self.memory.similarity_edge_threshold;
+        let threshold = self.brain.similarity_edge_threshold;
         if !(threshold > 0.0 && threshold <= 1.0) {
             return Err(invalid(
-                "memory.similarity_edge_threshold",
+                "brain.similarity_edge_threshold",
                 "must be greater than 0 and at most 1",
             ));
         }
@@ -529,7 +546,8 @@ kind = "ollama"
                 keep_alive: Some("5m".to_string()),
             }
         );
-        assert_eq!(config.memory, MemoryConfig::default());
+        // The sample's `[memory]` section is brain v1: swallowed, not honored.
+        assert_eq!(config.brain, BrainConfig::default());
         assert_eq!(
             config.spotlight,
             SpotlightConfig {
@@ -552,16 +570,45 @@ kind = "ollama"
                 keep_alive: None,
             }
         );
-        assert_eq!(config.memory.core_budget_tokens, 500);
-        assert_eq!(config.memory.episodic_top_k, 6);
-        assert_eq!(config.memory.episodic_cap_tokens, 900);
-        assert_eq!(config.memory.similarity_edge_threshold, 0.78);
+        assert_eq!(config.brain.path, None);
+        assert_eq!(config.brain.top_k, 6);
+        assert_eq!(config.brain.cap_tokens, 1200);
+        assert_eq!(config.brain.similarity_edge_threshold, 0.78);
         assert_eq!(config.spotlight, SpotlightConfig::default());
 
-        let partial = format!("{MINIMAL}[memory]\nepisodic_top_k = 3\n");
-        let config = Config::parse(&partial).expect("parse partial memory section");
-        assert_eq!(config.memory.episodic_top_k, 3);
-        assert_eq!(config.memory.core_budget_tokens, 500);
+        assert_eq!(config.brain.model, EmbedModel::default());
+
+        let partial = format!("{MINIMAL}[brain]\ntop_k = 3\npath = \"~/notes\"\n");
+        let config = Config::parse(&partial).expect("parse partial brain section");
+        assert_eq!(config.brain.top_k, 3);
+        assert_eq!(config.brain.path, Some(PathBuf::from("~/notes")));
+        assert_eq!(config.brain.cap_tokens, 1200);
+        assert_eq!(config.brain.model, EmbedModel::default());
+    }
+
+    #[test]
+    fn the_embedding_model_names_its_backend() {
+        let builtin = Config::parse(&format!("{MINIMAL}[brain]\nmodel = \"nomic-v1.5\"\n"))
+            .expect("parse a bundled model");
+        assert_eq!(builtin.brain.model.known_dim(), Some(768));
+        assert!(!builtin.brain.model.is_remote());
+
+        let ollama = Config::parse(&format!(
+            "{MINIMAL}[brain]\nmodel = \"ollama:nomic-embed-text\"\n"
+        ))
+        .expect("parse an ollama model");
+        assert_eq!(ollama.brain.model.canonical(), "ollama:nomic-embed-text");
+        assert!(!ollama.brain.model.is_remote(), "the daemon is local");
+
+        let remote = Config::parse(&format!("{MINIMAL}[brain]\nmodel = \"zen:embed-1\"\n"))
+            .expect("parse a provider model");
+        assert!(remote.brain.model.is_remote());
+
+        // The issue-#8 lesson: a model name that resolves to nothing must not
+        // take the whole config — and with it chat — down on load.
+        let nonsense = Config::parse(&format!("{MINIMAL}[brain]\nmodel = \"gpt-9000\"\n"))
+            .expect("an unresolvable model still parses");
+        assert_eq!(nonsense.brain.model.known_dim(), None);
     }
 
     #[test]
@@ -572,7 +619,7 @@ kind = "ollama"
                 format!("{MINIMAL}[providers.other]\nkind = \"ollama\"\napi_key_env = \"NOPE\"\n"),
                 "api_key_env",
             ),
-            (format!("{MINIMAL}[memory]\nbudget = 5\n"), "budget"),
+            (format!("{MINIMAL}[brain]\nbudget = 5\n"), "budget"),
             (
                 format!("{MINIMAL}[spotlight]\nshortcut = \"F1\"\n"),
                 "shortcut",
@@ -597,17 +644,14 @@ kind = "ollama"
                 format!("{MINIMAL}[spotlight]\nprovider = \"zen\"\n"),
                 "spotlight.provider",
             ),
+            (format!("{MINIMAL}[brain]\ntop_k = 0\n"), "brain.top_k"),
             (
-                format!("{MINIMAL}[memory]\nepisodic_top_k = 0\n"),
-                "memory.episodic_top_k",
+                format!("{MINIMAL}[brain]\nsimilarity_edge_threshold = 1.5\n"),
+                "brain.similarity_edge_threshold",
             ),
             (
-                format!("{MINIMAL}[memory]\nsimilarity_edge_threshold = 1.5\n"),
-                "memory.similarity_edge_threshold",
-            ),
-            (
-                format!("{MINIMAL}[memory]\nsimilarity_edge_threshold = 0.0\n"),
-                "memory.similarity_edge_threshold",
+                format!("{MINIMAL}[brain]\nsimilarity_edge_threshold = 0.0\n"),
+                "brain.similarity_edge_threshold",
             ),
         ];
         for (text, key) in cases {
@@ -701,7 +745,7 @@ kind = "ollama"
         let created = created.expect("create and parse the template");
         assert_eq!(created, reloaded.expect("reload the written file"));
         assert_eq!(created.default_provider, "ollama");
-        assert_eq!(created.memory, MemoryConfig::default());
+        assert_eq!(created.brain, BrainConfig::default());
         assert_eq!(created.spotlight, SpotlightConfig::default());
 
         let written = std::fs::read_to_string(&path).expect("template was written");

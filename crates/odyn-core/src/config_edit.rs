@@ -330,14 +330,10 @@ similarity_edge_threshold = 0.5
         let linked = Fixture::new("through-a-link");
         link(&real.0, &linked);
 
-        set(&linked.0, "memory.episodic_top_k", "4").expect("set through the link");
+        set(&linked.0, "brain.top_k", "4").expect("set through the link");
 
         assert!(is_symlink(&linked.0), "the link was replaced by a file");
-        assert!(
-            real.text().contains("episodic_top_k = 4"),
-            "{}",
-            real.text()
-        );
+        assert!(real.text().contains("top_k = 4"), "{}", real.text());
     }
 
     /// The link is there, the file behind it is not yet: the write still
@@ -350,14 +346,10 @@ similarity_edge_threshold = 0.5
         std::fs::remove_file(&real.0).expect("remove the target");
         link(&real.0, &linked);
 
-        set(&linked.0, "memory.episodic_top_k", "4").expect("set through the link");
+        set(&linked.0, "brain.top_k", "4").expect("set through the link");
 
         assert!(is_symlink(&linked.0), "the link was replaced by a file");
-        assert!(
-            real.text().contains("episodic_top_k = 4"),
-            "{}",
-            real.text()
-        );
+        assert!(real.text().contains("top_k = 4"), "{}", real.text());
     }
 
     #[cfg(unix)]
@@ -377,7 +369,7 @@ similarity_edge_threshold = 0.5
     #[test]
     fn a_value_that_fails_validation_is_never_written() {
         let fixture = Fixture::new("rejected");
-        let cases = [("default_provider", "zen"), ("memory.episodic_top_k", "0")];
+        let cases = [("default_provider", "zen"), ("brain.top_k", "0")];
         for (key, value) in cases {
             let err = set(&fixture.0, key, value)
                 .expect_err("validation must reject this")

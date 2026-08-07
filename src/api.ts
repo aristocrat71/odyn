@@ -22,14 +22,14 @@ export type ConversationView = Conversation & {
 export type Message = {
   role: "system" | "user" | "assistant";
   content: string;
-  // Assistant rows: the episodic ids injected for the question this answers.
+  // Assistant rows: the note slugs injected for the question this answers.
   used: string[];
 };
 
 export type Usage = { input_tokens: number; output_tokens: number };
 
 export type ChatEvent = { request_id: number } & (
-  | { kind: "context"; used: string[] }
+  | { kind: "context"; used: string[]; tokens: number }
   | { kind: "delta"; text: string }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
@@ -38,12 +38,11 @@ export type ChatEvent = { request_id: number } & (
 export type LedgerItem = { id: string; tokens: number; content: string };
 
 export type ContextPreview = {
-  core: LedgerItem[];
-  episodic: LedgerItem[];
-  core_tokens: number;
-  episodic_tokens: number;
+  // False when the draft has no /brain mention: the send would inject nothing.
+  active: boolean;
+  memories: LedgerItem[];
+  tokens: number;
   cap_tokens: number;
-  over_budget: boolean;
   system_message: string;
 };
 
@@ -110,11 +109,11 @@ export const contextPreview = (
 ): Promise<ContextPreview> =>
   invoke("context_preview", { conversationId, draft });
 
-export type EpisodicSort = "recent" | "hits" | "created";
+export type MemorySort = "recent" | "hits" | "created";
 
 export type MemoryRow = {
   id: number;
-  display_id: string;
+  slug: string;
   content: string;
   tokens: number;
   hits: number;
@@ -123,41 +122,61 @@ export type MemoryRow = {
 };
 
 export type BrainOverview = {
-  episodic_count: number;
+  count: number;
   top_k: number;
   cap_tokens: number;
-  core_budget_tokens: number;
-  core_tokens: number;
-  core: MemoryRow[];
+  // The brain folder of .md notes, spelled out.
+  path: string;
+  // What [brain] model names, exactly as the config spells it.
   model: string;
+  // Whether that model sends note text off the machine.
+  model_remote: boolean;
+  // The width the index was built at; 0 before anything is built.
+  dim: number;
+};
+
+// One selectable embedding model.
+export type EmbedOption = {
+  id: string;
+  backend: "builtin" | "ollama" | "provider";
+  // Known ahead of time only for the bundled models.
+  dim: number | null;
+  description: string;
+  remote: boolean;
 };
 
 export const brainOverview = (): Promise<BrainOverview> =>
   invoke("brain_overview");
 
-export const brainEpisodic = (
-  sort: EpisodicSort,
+export const embedCatalog = (): Promise<EmbedOption[]> =>
+  invoke("embed_catalog");
+
+// Writes the config key and re-indexes; slow by nature.
+export const brainSetModel = (model: string): Promise<BrainOverview> =>
+  invoke("brain_set_model", { model });
+
+export const brainMemories = (
+  sort: MemorySort,
   offset: number,
-): Promise<MemoryRow[]> => invoke("brain_episodic", { sort, offset });
+): Promise<MemoryRow[]> => invoke("brain_memories", { sort, offset });
 
 export const brainSearch = (query: string): Promise<MemoryRow[]> =>
   invoke("brain_search", { query });
 
-export const brainAddCore = (content: string): Promise<MemoryRow> =>
-  invoke("brain_add_core", { content });
+export const brainAddNote = (content: string): Promise<MemoryRow> =>
+  invoke("brain_add_note", { content });
 
-export const brainUpdateCore = (
-  id: number,
+export const brainUpdateNote = (
+  slug: string,
   content: string,
-): Promise<MemoryRow> => invoke("brain_update_core", { id, content });
+): Promise<MemoryRow> => invoke("brain_update_note", { slug, content });
 
-export const brainDeleteMemory = (id: number): Promise<void> =>
-  invoke("brain_delete_memory", { id });
+export const brainDeleteNote = (slug: string): Promise<void> =>
+  invoke("brain_delete_note", { slug });
 
 export type GraphNode = {
   id: number;
   display_id: string;
-  core: boolean;
   content: string;
   hits: number;
   x: number;
@@ -167,7 +186,8 @@ export type GraphNode = {
 export type GraphEdge = {
   a: number;
   b: number;
-  kind: "similarity" | "coinjection";
+  kind: "link" | "similarity" | "coinjection";
+  weight: number;
 };
 
 export type Graph = { nodes: GraphNode[]; edges: GraphEdge[] };

@@ -28,6 +28,9 @@ pub async fn run(
             "no prompt: pass one as an argument or on stdin",
         ));
     }
+    // A `/brain` mention turns recall on for this ask and never reaches the
+    // model or the transcript.
+    let ask = odyn_core::brain::parse_ask(prompt);
 
     // `--save` needs the database and creates it; a plain ask only reads
     // memory, so it opens the database if one exists and otherwise stays
@@ -48,15 +51,18 @@ pub async fn run(
     };
     let context = memory_context(
         storage.as_ref(),
-        &session.memory,
+        &session.config,
         &[],
-        prompt,
+        &ask,
         session.brevity,
     );
     if show_context {
-        print_context(context.as_ref(), &session.memory, json)?;
+        print_context(context.as_ref(), &session.config.brain, json)?;
     }
-    let messages = with_context(context.as_ref(), &[Message::new(Role::User, prompt)]);
+    let messages = with_context(
+        context.as_ref(),
+        &[Message::new(Role::User, ask.message.as_str())],
+    );
 
     let mut out = anstream::stdout().lock();
     let mut streamed = false;
@@ -109,7 +115,7 @@ pub async fn run(
         let injected = context
             .map(|context| context.memory_ids())
             .unwrap_or_default();
-        persist(&storage, &session, prompt, &reply, &injected)?;
+        persist(&storage, &session, &ask.message, &reply, &injected)?;
     }
     Ok(())
 }

@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use odyn_core::chat::Role;
-use odyn_core::storage::{MemoryTier, Storage};
+use odyn_core::storage::Storage;
 use serde_json::Value;
 
 /// What the canned stream below adds up to.
@@ -40,6 +40,15 @@ impl TempDir {
     fn write_config(&self, text: &str) -> &Self {
         std::fs::write(self.config(), text).expect("write config");
         self
+    }
+
+    /// Points `[brain] path` inside the temp dir, so no test can ever read
+    /// the developer's real brain folder.
+    fn brain_dir(&self, config: &str) -> String {
+        format!(
+            "{config}[brain]\npath = \"{}\"\n",
+            self.0.join("brain").display()
+        )
     }
 }
 
@@ -357,11 +366,11 @@ fn config_set_and_get_round_trip_through_the_binary() {
     let dir = TempDir::new("configedit");
     dir.write_config(&ollama_config(dead_addr()));
 
-    let set = odyn(&dir, &["config", "set", "memory.episodic_top_k", "3"], None);
+    let set = odyn(&dir, &["config", "set", "brain.top_k", "3"], None);
     assert_eq!(code(&set), Some(0), "{}", stderr(&set));
     assert!(stdout(&set).is_empty(), "{}", stdout(&set));
 
-    let got = odyn(&dir, &["config", "get", "memory.episodic_top_k"], None);
+    let got = odyn(&dir, &["config", "get", "brain.top_k"], None);
     assert_eq!(code(&got), Some(0), "{}", stderr(&got));
     assert_eq!(stdout(&got), "3\n");
 }
@@ -372,10 +381,10 @@ fn a_config_key_that_cannot_be_read_or_written_exits_two() {
     let written = ollama_config(dead_addr());
     dir.write_config(&written);
 
-    let missing = odyn(&dir, &["config", "get", "memory.nope"], None);
+    let missing = odyn(&dir, &["config", "get", "brain.nope"], None);
     assert_eq!(code(&missing), Some(2));
     assert!(
-        stderr(&missing).contains("memory.nope"),
+        stderr(&missing).contains("brain.nope"),
         "{}",
         stderr(&missing)
     );
@@ -454,47 +463,76 @@ fn spawn_capturing_provider() -> (SocketAddr, std::sync::mpsc::Receiver<String>)
     (addr, receiver)
 }
 
-/// Core memories only, so the test never loads (or downloads) the embedder.
+/// The gate itself: notes on disk mean nothing without a `/brain` mention —
+/// no sync, no injection, no embedding model. (A synced note would need the
+/// real model, so this staying offline is itself the assertion.)
 #[test]
-fn ask_injects_core_memories_and_saving_records_the_injections() {
-    let dir = TempDir::new("inject");
+fn without_a_brain_mention_notes_are_never_injected() {
+    let dir = TempDir::new("gated");
     let (addr, request) = spawn_capturing_provider();
-    dir.write_config(&openai_config(addr));
-    Storage::open(dir.db())
-        .expect("seed the database")
-        .add_memory(MemoryTier::Core, "likes botany", None)
-        .expect("add a core memory");
+    dir.write_config(&dir.brain_dir(&openai_config(addr)));
+    let brain = dir.0.join("brain");
+    std::fs::create_dir_all(&brain).expect("create the brain folder");
+    std::fs::write(brain.join("botany.md"), "likes botany\n").expect("write a note");
 
-    let output = odyn(&dir, &["ask", "--save", "--show-context", "2+2"], None);
+    let output = odyn(&dir, &["ask", "--show-context", "2+2"], None);
+    assert_eq!(code(&output), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{ANSWER}\n"));
+
+    let request = request.recv().expect("the provider saw the request");
+    assert!(
+        !request.contains(r#""role":"system""#),
+        "nothing may be injected without /brain: {request}"
+    );
+    assert!(
+        stderr(&output).contains("----- context: empty -----"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// A `/brain` mention on an empty brain: the trigger is stripped from what
+/// the model and the transcript see, nothing is injected, nothing recorded,
+/// and the embedding model is never loaded.
+#[test]
+fn a_brain_mention_is_stripped_and_an_empty_brain_stays_silent() {
+    let dir = TempDir::new("stripped");
+    let (addr, request) = spawn_capturing_provider();
+    dir.write_config(&dir.brain_dir(&openai_config(addr)));
+
+    let output = odyn(
+        &dir,
+        &["ask", "--save", "--show-context", "/brain 2+2"],
+        None,
+    );
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
 
     let request = request.recv().expect("the provider saw the request");
     assert!(
-        request.contains(r#""role":"system""#),
-        "no system message in: {request}"
+        request.contains(r#""content":"2+2""#),
+        "the trigger must be stripped: {request}"
     );
-    assert!(
-        request.contains(r"## Core profile\n- [c-01] likes botany"),
-        "wrong context in: {request}"
-    );
-
-    let shown = stderr(&output);
-    assert!(shown.contains("----- context -----"), "{shown}");
-    assert!(shown.contains("## Core profile"), "{shown}");
-    assert!(shown.contains("c-01 3"), "{shown}");
+    assert!(!request.contains("/brain"), "{request}");
+    assert!(!request.contains(r#""role":"system""#), "{request}");
+    assert!(stderr(&output).contains("----- context: empty -----"));
 
     let storage = Storage::open(dir.db()).expect("reopen the database");
     let conversations = storage.list_conversations().expect("list conversations");
+    assert_eq!(
+        conversations[0].title, "2+2",
+        "titled after the cleaned ask"
+    );
     let messages = storage
         .messages(conversations[0].id)
         .expect("list messages");
-    let injections: Vec<(Option<i64>, i64)> = storage
+    assert_eq!(
+        messages[0].content, "2+2",
+        "the transcript stores the cleaned ask"
+    );
+    assert!(storage
         .injections(conversations[0].id)
         .expect("list injections")
-        .into_iter()
-        .map(|injection| (injection.message_id, injection.memory_id))
-        .collect();
-    assert_eq!(injections, vec![(Some(messages[0].id), 1)]);
+        .is_empty());
 }
 
 #[test]
@@ -513,64 +551,59 @@ fn show_context_is_empty_and_creates_no_database_on_a_fresh_machine() {
 fn show_context_json_is_an_event_on_the_stream() {
     let dir = TempDir::new("jsoncontext");
     let (addr, _request) = spawn_capturing_provider();
-    dir.write_config(&openai_config(addr));
-    Storage::open(dir.db())
-        .expect("seed the database")
-        .add_memory(MemoryTier::Core, "likes botany", None)
-        .expect("add a core memory");
+    dir.write_config(&dir.brain_dir(&openai_config(addr)));
 
-    let output = odyn(&dir, &["ask", "--json", "--show-context", "2+2"], None);
+    let output = odyn(
+        &dir,
+        &["ask", "--json", "--show-context", "/brain 2+2"],
+        None,
+    );
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
 
     let events = events(&output);
     assert_eq!(events[0]["type"], "context");
+    assert_eq!(events[0]["system"], "");
+    assert_eq!(events[0]["items"].as_array().expect("items").len(), 0);
     assert_eq!(
-        events[0]["system"],
-        "## Core profile\n- [c-01] likes botany"
+        events[0]["note"],
+        "token counts are a chars/4 approximation"
     );
-    assert_eq!(events[0]["items"][0]["id"], "c-01");
-    assert_eq!(events[0]["items"][0]["tokens"], 3);
 }
 
-/// Core memories only: the episodic path needs the real embedding model.
+/// The offline half of `mem`: paths, empty listings and file errors. Adding
+/// or editing a note embeds it, which needs the real model — covered by the
+/// core crate's unit tests instead.
 #[test]
-fn mem_core_add_list_edit_rm_round_trip() {
+fn mem_path_list_and_rm_work_without_the_model() {
     let dir = TempDir::new("memcli");
-    dir.write_config("default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\nbase_url = \"http://127.0.0.1:1\"\n");
+    let config = "default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\nbase_url = \"http://127.0.0.1:1\"\n";
+    dir.write_config(&dir.brain_dir(config));
+    let brain = dir.0.join("brain");
 
-    let output = odyn(
-        &dir,
-        &["mem", "add", "--core", "likes  botany\nand moss"],
-        None,
-    );
+    let output = odyn(&dir, &["mem", "path"], None);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "c-01  6 tk  likes  botany and moss\n");
+    assert_eq!(stdout(&output), format!("{}\n", brain.display()));
+    assert!(!dir.db().exists(), "mem path must not conjure a database");
 
-    let output = odyn(&dir, &["mem", "list", "--tier", "core"], None);
-    assert_eq!(stdout(&output), "c-01  6 tk  likes  botany and moss\n");
-    let output = odyn(&dir, &["mem", "list", "--tier", "episodic"], None);
-    assert_eq!(stdout(&output), "");
-
-    let output = odyn(&dir, &["mem", "edit", "c-01", "prefers ferns"], None);
-    assert_eq!(code(&output), Some(0), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "c-01  4 tk  prefers ferns\n");
-
-    let output = odyn(&dir, &["mem", "rm", "c-01"], None);
-    assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let output = odyn(&dir, &["mem", "list"], None);
+    assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "");
 
-    let output = odyn(&dir, &["mem", "rm", "c-01"], None);
-    assert_eq!(code(&output), Some(1), "deleting again must fail");
-    let output = odyn(&dir, &["mem", "rm", "botany"], None);
-    assert_eq!(code(&output), Some(2), "a non-id must be a usage error");
+    let output = odyn(&dir, &["mem", "rm", "ghost"], None);
+    assert_eq!(
+        code(&output),
+        Some(1),
+        "a missing note is a runtime failure"
+    );
+    assert!(stderr(&output).contains("ghost"), "{}", stderr(&output));
 }
 
 /// An empty brain must answer without touching the network for the model.
 #[test]
 fn mem_search_on_an_empty_brain_is_quietly_empty() {
     let dir = TempDir::new("memsearch");
-    dir.write_config("default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\nbase_url = \"http://127.0.0.1:1\"\n");
+    let config = "default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\nbase_url = \"http://127.0.0.1:1\"\n";
+    dir.write_config(&dir.brain_dir(config));
 
     let output = odyn(&dir, &["mem", "search", "anything"], None);
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));

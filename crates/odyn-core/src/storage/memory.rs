@@ -1,42 +1,35 @@
-//! The brain's rows: two memory tiers and one vector index.
+//! The brain's index: rows derived from the note files, never authored here.
 //!
-//! Core memories are always injected, so they are never embedded and never
-//! touch `memories_vec`. Episodic memories are retrieved by similarity, so
-//! every episodic row has a `memories_vec` row under the same rowid — written
-//! in the same transaction, because a memory the index cannot see (or an index
-//! entry pointing at nothing) silently corrupts retrieval.
+//! `sync_notes` is the only writer of memory rows. It mirrors the brain
+//! folder into SQLite — content, hash, tokens, links, and one `memories_vec`
+//! row per memory under the same rowid, written in the same transaction,
+//! because an index entry the folder no longer backs silently corrupts
+//! retrieval. Everything else here reads the mirror or records injections.
 
-use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use std::collections::{HashMap, HashSet};
+
 use rusqlite::{params, Row};
 
 use super::{now_secs, Storage, StorageError};
-use crate::embed::EMBEDDING_DIM;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryTier {
-    Core,
-    Episodic,
-}
+use crate::notes::NoteFile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Memory {
     pub id: i64,
-    pub tier: MemoryTier,
+    /// The note's file stem — the id every surface shows.
+    pub slug: String,
     pub content: String,
-    /// Unix epoch seconds.
+    /// Unix epoch seconds — of the index row, not the file.
     pub created_at: i64,
     pub updated_at: i64,
-    /// chars/4 approximation, computed at write time.
+    /// chars/4 approximation, mirrored from the note.
     pub tokens: i64,
 }
 
 impl Memory {
-    /// `c-01` / `e-0142` — the id every surface (template, ledger, CLI) shows.
+    /// What the template, ledger and CLI print. The slug is the display id.
     pub fn display_id(&self) -> String {
-        match self.tier {
-            MemoryTier::Core => format!("c-{:02}", self.id),
-            MemoryTier::Episodic => format!("e-{:04}", self.id),
-        }
+        self.slug.clone()
     }
 }
 
@@ -53,7 +46,7 @@ pub struct Injection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EpisodicSort {
+pub enum MemorySort {
     /// Most recently touched first.
     Recent,
     /// Most often injected first.
@@ -70,55 +63,225 @@ pub struct MemoryStats {
     pub last_injected_at: Option<i64>,
 }
 
+/// What a folder scan means for the index: the slugs that need an embedding
+/// before `sync_notes` can mirror them, and whether anything changed at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotePlan {
+    /// New or edited notes, in folder order. Embed exactly these.
+    pub stale: Vec<String>,
+    /// True when a sync would touch the index — including pure deletions.
+    pub changed: bool,
+}
+
 impl Storage {
-    /// Content is stored single-line: whitespace runs containing a newline
-    /// collapse to one space, and the edges are trimmed. Anything else would
-    /// break out of its `- [id] content` line in the injected context.
-    pub fn add_memory(
-        &self,
-        tier: MemoryTier,
-        content: &str,
-        embedding: Option<&[f32]>,
-    ) -> Result<Memory, StorageError> {
-        let content = single_line(content);
-        if content.is_empty() {
-            return Err(StorageError::EmptyMemory);
+    /// Whether the index was built by something other than `model`, and so
+    /// has to be rebuilt before it can be trusted. Cheap: one row read.
+    pub fn index_matches(&self, model: &str) -> Result<bool, StorageError> {
+        Ok(self.active_model()?.as_deref() == Some(model))
+    }
+
+    /// Points the index at `model`, whose vectors are `dim` wide, dropping
+    /// every vector the previous model produced: vectors from two models are
+    /// incomparable, so the old ones go whole rather than being mixed with the
+    /// new. Memory rows survive — and with them every id, hit count and
+    /// injection record — so a model swap costs re-embedding, never history.
+    pub fn rebuild_index(&self, model: &str, dim: usize) -> Result<(), StorageError> {
+        if dim == 0 {
+            return Err(StorageError::EmbeddingDimensions {
+                expected: 1,
+                got: 0,
+            });
         }
-        check_tier(tier, embedding)?;
-        let tokens = approx_tokens(&content);
-        let now = now_secs();
         let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(&format!(
+            "DROP TABLE IF EXISTS memories_vec;
+             CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[{dim}]);"
+        ))?;
         tx.execute(
-            "INSERT INTO memories (tier, content, created_at, updated_at, tokens)
-             VALUES (?1, ?2, ?3, ?3, ?4)",
-            params![tier, content, now, tokens],
+            "INSERT OR REPLACE INTO brain_meta (id, model, dim) VALUES (1, ?1, ?2)",
+            params![model, dim as i64],
         )?;
-        let id = tx.last_insert_rowid();
-        if let Some(embedding) = embedding {
+        // Similarity edges are the old model's opinion; they go with it.
+        invalidate_graph(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The model the index was built with, if it has ever been recorded.
+    pub fn active_model(&self) -> Result<Option<String>, StorageError> {
+        let found = self
+            .conn
+            .query_row("SELECT model FROM brain_meta WHERE id = 1", [], |row| {
+                row.get(0)
+            });
+        match found {
+            Ok(model) => Ok(Some(model)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(other) => Err(StorageError::Sqlite(other)),
+        }
+    }
+
+    /// The width the vector table was created at; 0 before anything is built.
+    pub fn index_dim(&self) -> Result<usize, StorageError> {
+        let found = self
+            .conn
+            .query_row("SELECT dim FROM brain_meta WHERE id = 1", [], |row| {
+                row.get::<_, i64>(0)
+            });
+        match found {
+            Ok(dim) => Ok(dim as usize),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(other) => Err(StorageError::Sqlite(other)),
+        }
+    }
+
+    /// Compares the folder against the index. Read-only, so callers can embed
+    /// the stale notes without holding whatever lock guards this storage.
+    pub fn note_sync_plan(&self, notes: &[NoteFile]) -> Result<NotePlan, StorageError> {
+        let indexed = self.indexed_hashes()?;
+        let vectored = self.vec_rowids()?;
+        let stale: Vec<String> = notes
+            .iter()
+            .filter(|note| is_stale(&indexed, &vectored, note))
+            .map(|note| note.slug.clone())
+            .collect();
+        let kept: HashSet<&str> = notes.iter().map(|note| note.slug.as_str()).collect();
+        let deleted = indexed.keys().any(|slug| !kept.contains(slug.as_str()));
+        Ok(NotePlan {
+            changed: !stale.is_empty() || deleted,
+            stale,
+        })
+    }
+
+    /// Mirrors the folder into the index: inserts new notes, rewrites edited
+    /// ones in place (same slug, same id — hit history survives edits), and
+    /// drops rows whose file is gone, injections cascading with them.
+    /// `embeddings` must cover every stale slug; unchanged notes need none.
+    /// Answers whether anything changed, and invalidates the graph when so.
+    pub fn sync_notes(
+        &self,
+        notes: &[NoteFile],
+        embeddings: &[(String, Vec<f32>)],
+    ) -> Result<bool, StorageError> {
+        let dim = self.index_dim()?;
+        for (_, embedding) in embeddings {
+            check_dimensions(embedding, dim)?;
+        }
+        let vectors: HashMap<&str, &[f32]> = embeddings
+            .iter()
+            .map(|(slug, embedding)| (slug.as_str(), embedding.as_slice()))
+            .collect();
+        let indexed = self.indexed_hashes()?;
+        let vectored = self.vec_rowids()?;
+        let now = now_secs();
+        let mut changed = false;
+        let tx = self.conn.unchecked_transaction()?;
+
+        let kept: HashSet<&str> = notes.iter().map(|note| note.slug.as_str()).collect();
+        for (slug, (id, _)) in &indexed {
+            if kept.contains(slug.as_str()) {
+                continue;
+            }
+            tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+            tx.execute("DELETE FROM memories_vec WHERE rowid = ?1", params![id])?;
+            changed = true;
+        }
+
+        for note in notes {
+            // The same staleness rule the plan used, so a note whose vector
+            // went missing — a model swap dropped the table — is rebuilt even
+            // though its content never changed.
+            if !is_stale(&indexed, &vectored, note) {
+                continue;
+            }
+            let id = match indexed.get(&note.slug) {
+                Some((id, _)) => {
+                    tx.execute(
+                        "UPDATE memories
+                         SET content = ?2, hash = ?3, tokens = ?4, updated_at = ?5
+                         WHERE id = ?1",
+                        params![id, note.content, note.hash, note.tokens, now],
+                    )?;
+                    tx.execute("DELETE FROM memories_vec WHERE rowid = ?1", params![id])?;
+                    tx.execute("DELETE FROM memory_links WHERE from_id = ?1", params![id])?;
+                    *id
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO memories (slug, content, hash, tokens, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                        params![note.slug, note.content, note.hash, note.tokens, now],
+                    )?;
+                    tx.last_insert_rowid()
+                }
+            };
+            let embedding = vectors
+                .get(note.slug.as_str())
+                .ok_or_else(|| StorageError::MissingEmbedding(note.slug.clone()))?;
             tx.execute(
                 "INSERT INTO memories_vec (rowid, embedding) VALUES (?1, ?2)",
                 params![id, vec_blob(embedding)],
             )?;
+            for target in &note.links {
+                tx.execute(
+                    "INSERT OR IGNORE INTO memory_links (from_id, to_slug) VALUES (?1, ?2)",
+                    params![id, target],
+                )?;
+            }
+            changed = true;
         }
-        invalidate_graph(&tx)?;
+
+        if changed {
+            invalidate_graph(&tx)?;
+        }
         tx.commit()?;
-        Ok(Memory {
-            id,
-            tier,
-            content,
-            created_at: now,
-            updated_at: now,
-            tokens,
-        })
+        Ok(changed)
     }
 
-    pub fn list_memories(&self, tier: Option<MemoryTier>) -> Result<Vec<Memory>, StorageError> {
+    fn indexed_hashes(&self) -> Result<HashMap<String, (i64, i64)>, StorageError> {
+        let mut stmt = self.conn.prepare("SELECT slug, id, hash FROM memories")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?)))
+        })?;
+        Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+    }
+
+    /// Which memories currently have a vector. A memory row without one is a
+    /// memory retrieval cannot see, so this is what makes the index
+    /// self-healing rather than quietly incomplete.
+    fn vec_rowids(&self) -> Result<HashSet<i64>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, tier, content, created_at, updated_at, tokens
-             FROM memories WHERE ?1 IS NULL OR tier = ?1 ORDER BY id",
+            "SELECT m.id FROM memories AS m WHERE EXISTS (
+                         SELECT 1 FROM memories_vec AS v WHERE v.rowid = m.id)",
         )?;
-        let rows = stmt.query_map(params![tier], to_memory)?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        Ok(rows.collect::<Result<HashSet<_>, _>>()?)
+    }
+
+    pub fn list_memories(&self) -> Result<Vec<Memory>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, slug, content, created_at, updated_at, tokens
+             FROM memories ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], to_memory)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn count_memories(&self) -> Result<i64, StorageError> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM memories", [], |row| row.get(0))?)
+    }
+
+    pub fn memory(&self, id: i64) -> Result<Memory, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT id, slug, content, created_at, updated_at, tokens
+                 FROM memories WHERE id = ?1",
+                params![id],
+                to_memory,
+            )
+            .map_err(|error| not_found(error, id))
     }
 
     /// Records what was injected for a message, replacing any earlier record
@@ -167,25 +330,24 @@ impl Storage {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// One page of the episodic column, with hit counts from the injections
-    /// log. Pages by offset: the list is append-mostly and the UI tolerates a
-    /// row sliding between pages.
-    pub fn episodic_overview(
+    /// One page of the brain list, with hit counts from the injections log.
+    /// Pages by offset: the list is append-mostly and the UI tolerates a row
+    /// sliding between pages.
+    pub fn memories_overview(
         &self,
-        sort: EpisodicSort,
+        sort: MemorySort,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<MemoryStats>, StorageError> {
         let order = match sort {
-            EpisodicSort::Recent => "m.updated_at DESC, m.id DESC",
-            EpisodicSort::Hits => "hits DESC, m.id DESC",
-            EpisodicSort::Created => "m.created_at DESC, m.id DESC",
+            MemorySort::Recent => "m.updated_at DESC, m.id DESC",
+            MemorySort::Hits => "hits DESC, m.id DESC",
+            MemorySort::Created => "m.created_at DESC, m.id DESC",
         };
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT m.id, m.tier, m.content, m.created_at, m.updated_at, m.tokens,
+            "SELECT m.id, m.slug, m.content, m.created_at, m.updated_at, m.tokens,
                     count(i.id) AS hits, max(i.injected_at)
              FROM memories AS m LEFT JOIN injections AS i ON i.memory_id = m.id
-             WHERE m.tier = 'episodic'
              GROUP BY m.id ORDER BY {order} LIMIT ?1 OFFSET ?2"
         ))?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
@@ -217,95 +379,14 @@ impl Storage {
             .collect()
     }
 
-    pub fn count_memories(&self, tier: Option<MemoryTier>) -> Result<i64, StorageError> {
-        Ok(self.conn.query_row(
-            "SELECT count(*) FROM memories WHERE ?1 IS NULL OR tier = ?1",
-            params![tier],
-            |row| row.get(0),
-        )?)
-    }
-
-    pub fn memory(&self, id: i64) -> Result<Memory, StorageError> {
-        self.conn
-            .query_row(
-                "SELECT id, tier, content, created_at, updated_at, tokens
-                 FROM memories WHERE id = ?1",
-                params![id],
-                to_memory,
-            )
-            .map_err(|error| not_found(error, id))
-    }
-
-    /// The tier is fixed at creation; the embedding argument must match it,
-    /// so an episodic edit always arrives with its re-embedded content.
-    pub fn update_memory(
-        &self,
-        id: i64,
-        content: &str,
-        embedding: Option<&[f32]>,
-    ) -> Result<Memory, StorageError> {
-        let content = single_line(content);
-        if content.is_empty() {
-            return Err(StorageError::EmptyMemory);
-        }
-        let tokens = approx_tokens(&content);
-        let now = now_secs();
-        let tx = self.conn.unchecked_transaction()?;
-        let (tier, created_at) = tx
-            .query_row(
-                "SELECT tier, created_at FROM memories WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get::<_, MemoryTier>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .map_err(|error| not_found(error, id))?;
-        check_tier(tier, embedding)?;
-        tx.execute(
-            "UPDATE memories SET content = ?2, tokens = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, content, tokens, now],
-        )?;
-        if let Some(embedding) = embedding {
-            tx.execute("DELETE FROM memories_vec WHERE rowid = ?1", params![id])?;
-            tx.execute(
-                "INSERT INTO memories_vec (rowid, embedding) VALUES (?1, ?2)",
-                params![id, vec_blob(embedding)],
-            )?;
-        }
-        invalidate_graph(&tx)?;
-        tx.commit()?;
-        Ok(Memory {
-            id,
-            tier,
-            content,
-            created_at,
-            updated_at: now,
-            tokens,
-        })
-    }
-
-    pub fn delete_memory(&self, id: i64) -> Result<(), StorageError> {
-        let tx = self.conn.unchecked_transaction()?;
-        let changed = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-        if changed == 0 {
-            return Err(StorageError::MemoryNotFound(id));
-        }
-        // A no-op for core memories, which have no index row.
-        tx.execute("DELETE FROM memories_vec WHERE rowid = ?1", params![id])?;
-        invalidate_graph(&tx)?;
-        Ok(tx.commit()?)
-    }
-
-    /// Nearest episodic memories, closest first, with their L2 distances.
-    pub fn knn_episodic(
-        &self,
-        embedding: &[f32],
-        k: usize,
-    ) -> Result<Vec<(Memory, f64)>, StorageError> {
-        check_dimensions(embedding)?;
+    /// Nearest memories, closest first, with their L2 distances.
+    pub fn knn(&self, embedding: &[f32], k: usize) -> Result<Vec<(Memory, f64)>, StorageError> {
+        check_dimensions(embedding, self.index_dim()?)?;
         if k == 0 {
             return Ok(Vec::new());
         }
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.tier, m.content, m.created_at, m.updated_at, m.tokens, k.distance
+            "SELECT m.id, m.slug, m.content, m.created_at, m.updated_at, m.tokens, k.distance
              FROM (SELECT rowid, distance FROM memories_vec
                    WHERE embedding MATCH ?1 AND k = ?2) AS k
              JOIN memories AS m ON m.id = k.rowid
@@ -317,9 +398,9 @@ impl Storage {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// The k nearest episodic neighbors of a stored memory, excluding itself.
+    /// The k nearest neighbors of a stored memory, excluding itself.
     /// (vec0 only understands MATCH and k, so the self-row is dropped here.)
-    pub fn episodic_neighbors(&self, id: i64, k: usize) -> Result<Vec<(i64, f64)>, StorageError> {
+    pub fn neighbors(&self, id: i64, k: usize) -> Result<Vec<(i64, f64)>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT rowid, distance FROM memories_vec
              WHERE embedding MATCH (SELECT embedding FROM memories_vec WHERE rowid = ?1)
@@ -335,21 +416,35 @@ impl Storage {
         Ok(neighbors)
     }
 
-    /// Episodic pairs injected for the same message at least `min` times,
-    /// smaller id first.
-    pub fn co_injections(&self, min: i64) -> Result<Vec<(i64, i64)>, StorageError> {
+    /// Pairs injected for the same message at least `min` times, smaller id
+    /// first, with how often.
+    pub fn co_injections(&self, min: i64) -> Result<Vec<(i64, i64, i64)>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT a.memory_id, b.memory_id
+            "SELECT a.memory_id, b.memory_id, count(*)
              FROM injections AS a
              JOIN injections AS b
                ON a.message_id = b.message_id AND a.memory_id < b.memory_id
-             JOIN memories AS ma ON ma.id = a.memory_id AND ma.tier = 'episodic'
-             JOIN memories AS mb ON mb.id = b.memory_id AND mb.tier = 'episodic'
              WHERE a.message_id IS NOT NULL
              GROUP BY a.memory_id, b.memory_id
              HAVING count(*) >= ?1",
         )?;
-        let rows = stmt.query_map(params![min], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map(params![min], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// `[[wikilink]]` edges with both ends resolved, self-links dropped.
+    /// Targets are stored lowercased; slugs resolve case-insensitively.
+    pub fn links(&self) -> Result<Vec<(i64, i64)>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.from_id, m.id
+             FROM memory_links AS l
+             JOIN memories AS m ON lower(m.slug) = l.to_slug
+             WHERE l.from_id != m.id
+             ORDER BY l.from_id, m.id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -380,19 +475,23 @@ fn invalidate_graph(conn: &rusqlite::Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn check_tier(tier: MemoryTier, embedding: Option<&[f32]>) -> Result<(), StorageError> {
-    match (tier, embedding) {
-        (MemoryTier::Core, None) => Ok(()),
-        (MemoryTier::Core, Some(_)) => Err(StorageError::EmbeddingForbidden),
-        (MemoryTier::Episodic, None) => Err(StorageError::EmbeddingRequired),
-        (MemoryTier::Episodic, Some(embedding)) => check_dimensions(embedding),
+/// A note is stale when its content moved, or when it has no vector at all —
+/// which is how a model swap re-embeds a folder whose files never changed.
+fn is_stale(
+    indexed: &HashMap<String, (i64, i64)>,
+    vectored: &HashSet<i64>,
+    note: &NoteFile,
+) -> bool {
+    match indexed.get(&note.slug) {
+        None => true,
+        Some((id, hash)) => *hash != note.hash || !vectored.contains(id),
     }
 }
 
-fn check_dimensions(embedding: &[f32]) -> Result<(), StorageError> {
-    if embedding.len() != EMBEDDING_DIM {
+fn check_dimensions(embedding: &[f32], expected: usize) -> Result<(), StorageError> {
+    if embedding.len() != expected {
         return Err(StorageError::EmbeddingDimensions {
-            expected: EMBEDDING_DIM,
+            expected,
             got: embedding.len(),
         });
     }
@@ -407,44 +506,6 @@ fn vec_blob(embedding: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-/// What any content becomes before it is stored: whitespace runs containing a
-/// newline collapse to one space, edges trimmed. Public so callers embedding
-/// content embed exactly the text that will be stored (it is idempotent).
-pub fn normalize_content(content: &str) -> String {
-    single_line(content)
-}
-
-fn single_line(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut run = String::new();
-    let mut run_has_newline = false;
-    for ch in content.chars() {
-        if ch.is_whitespace() {
-            run.push(ch);
-            run_has_newline |= ch == '\n' || ch == '\r';
-        } else {
-            if !run.is_empty() {
-                // A run before the first word is leading whitespace: dropped.
-                if !out.is_empty() {
-                    if run_has_newline {
-                        out.push(' ');
-                    } else {
-                        out.push_str(&run);
-                    }
-                }
-                run.clear();
-                run_has_newline = false;
-            }
-            out.push(ch);
-        }
-    }
-    out
-}
-
-fn approx_tokens(content: &str) -> i64 {
-    content.chars().count().div_ceil(4) as i64
-}
-
 fn not_found(error: rusqlite::Error, id: i64) -> StorageError {
     match error {
         rusqlite::Error::QueryReturnedNoRows => StorageError::MemoryNotFound(id),
@@ -455,7 +516,7 @@ fn not_found(error: rusqlite::Error, id: i64) -> StorageError {
 fn to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
     Ok(Memory {
         id: row.get(0)?,
-        tier: row.get(1)?,
+        slug: row.get(1)?,
         content: row.get(2)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
@@ -463,45 +524,45 @@ fn to_memory(row: &Row<'_>) -> rusqlite::Result<Memory> {
     })
 }
 
-/// Stored as the strings the schema's CHECK constraint names.
-impl ToSql for MemoryTier {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::from(match self {
-            MemoryTier::Core => "core",
-            MemoryTier::Episodic => "episodic",
-        }))
-    }
-}
-
-impl FromSql for MemoryTier {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        match value.as_str()? {
-            "core" => Ok(MemoryTier::Core),
-            "episodic" => Ok(MemoryTier::Episodic),
-            other => Err(FromSqlError::Other(
-                format!("unknown memory tier {other:?}").into(),
-            )),
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::tests::TempDir;
-    use super::super::{user_version, MIGRATIONS};
     use super::*;
-    use rusqlite::Connection;
+    use crate::notes::NoteFile;
 
-    fn open(label: &str) -> (TempDir, Storage) {
+    pub(crate) fn open(label: &str) -> (TempDir, Storage) {
         let dir = TempDir::new(label);
         let storage = Storage::open(dir.db()).expect("open");
         (dir, storage)
     }
 
-    /// A 384-dim unit vector along `axis`, optionally leaning towards the next
-    /// axis — leaning further means farther from the pure axis vector.
-    fn vector(axis: usize, lean: f32) -> Vec<f32> {
-        let mut values = vec![0.0f32; EMBEDDING_DIM];
+    /// A note as `read_notes` would parse it, with a hash that tracks content.
+    pub(crate) fn note(slug: &str, content: &str) -> NoteFile {
+        note_with_links(slug, content, &[])
+    }
+
+    pub(crate) fn note_with_links(slug: &str, content: &str, links: &[&str]) -> NoteFile {
+        NoteFile {
+            slug: slug.to_string(),
+            content: content.to_string(),
+            links: links.iter().map(|link| link.to_lowercase()).collect(),
+            hash: content
+                .bytes()
+                .fold(0i64, |hash, byte| hash.wrapping_mul(31) + i64::from(byte)),
+            tokens: crate::notes::approx_tokens(content),
+        }
+    }
+
+    /// A unit vector along `axis` at the default model's width, optionally
+    /// leaning towards the next axis — leaning further means farther from the
+    /// pure axis vector.
+    pub(crate) fn vector(axis: usize, lean: f32) -> Vec<f32> {
+        wide_vector(axis, lean, crate::embed::FAKE_DIM)
+    }
+
+    /// The same, at an arbitrary width — for the model-swap tests.
+    pub(crate) fn wide_vector(axis: usize, lean: f32, dim: usize) -> Vec<f32> {
+        let mut values = vec![0.0f32; dim];
         values[axis] = 1.0 - lean;
         values[axis + 1] = lean;
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
@@ -509,6 +570,16 @@ mod tests {
             *value /= norm;
         }
         values
+    }
+
+    /// Syncs notes with axis-spread embeddings: note `i` lands on axis `10*i`.
+    pub(crate) fn sync_spread(storage: &Storage, notes: &[NoteFile]) {
+        let embeddings: Vec<(String, Vec<f32>)> = notes
+            .iter()
+            .enumerate()
+            .map(|(index, note)| (note.slug.clone(), vector(index * 10, 0.0)))
+            .collect();
+        storage.sync_notes(notes, &embeddings).expect("sync");
     }
 
     fn vec_rows(storage: &Storage) -> i64 {
@@ -519,275 +590,270 @@ mod tests {
     }
 
     #[test]
-    fn a_version_1_database_upgrades_in_place_and_keeps_its_rows() {
-        let dir = TempDir::new("upgrade");
-        std::fs::create_dir_all(&dir.0).expect("create the directory");
-        {
-            let conn = Connection::open(dir.db()).expect("open raw");
-            conn.execute_batch(MIGRATIONS[0]).expect("apply v1");
-            conn.pragma_update(None, "user_version", 1).expect("set v1");
-            conn.execute(
-                "INSERT INTO conversations (title, model, provider, created_at, updated_at)
-                 VALUES ('kept', 'm', 'p', 5, 5)",
-                [],
-            )
-            .expect("insert conversation");
-            conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, created_at)
-                 VALUES (1, 'user', 'kept too', 5)",
-                [],
-            )
-            .expect("insert message");
-        }
+    fn the_plan_names_new_edited_and_deleted_notes() {
+        let (_dir, storage) = open("plan");
+        let first = vec![note("alpha", "one"), note("beta", "two")];
+        let plan = storage.note_sync_plan(&first).expect("plan");
+        assert_eq!(plan.stale, vec!["alpha".to_string(), "beta".to_string()]);
+        assert!(plan.changed);
+        sync_spread(&storage, &first);
 
-        let storage = Storage::open(dir.db()).expect("open upgrades");
-        assert_eq!(
-            user_version(&storage.conn).expect("user_version"),
-            MIGRATIONS.len() as i64
-        );
-        let conversations = storage.list_conversations().expect("list");
-        assert_eq!(conversations.len(), 1);
-        assert_eq!(conversations[0].title, "kept");
-        assert_eq!(
-            storage.messages(conversations[0].id).expect("messages")[0].content,
-            "kept too"
-        );
+        let unchanged = storage.note_sync_plan(&first).expect("plan again");
+        assert!(unchanged.stale.is_empty());
+        assert!(!unchanged.changed);
 
-        let added = storage
-            .add_memory(
-                MemoryTier::Episodic,
-                "works after upgrade",
-                Some(&vector(0, 0.0)),
-            )
-            .expect("add after upgrade");
+        let edited = vec![note("alpha", "one, edited"), note("beta", "two")];
+        let plan = storage.note_sync_plan(&edited).expect("plan edited");
+        assert_eq!(plan.stale, vec!["alpha".to_string()]);
+        assert!(plan.changed);
+
+        let deleted = vec![note("beta", "two")];
+        let plan = storage.note_sync_plan(&deleted).expect("plan deleted");
+        assert!(plan.stale.is_empty());
+        assert!(plan.changed, "a pure deletion still changes the index");
+    }
+
+    #[test]
+    fn sync_mirrors_the_folder_and_keeps_ids_across_edits() {
+        let (_dir, storage) = open("sync");
+        let notes = vec![
+            note_with_links("alpha", "links to [[beta]]", &["beta"]),
+            note("beta", "plain"),
+        ];
+        sync_spread(&storage, &notes);
+        let listed = storage.list_memories().expect("list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].slug, "alpha");
+        assert_eq!(listed[0].display_id(), "alpha");
+        assert_eq!(vec_rows(&storage), 2);
+        assert_eq!(
+            storage.links().expect("links"),
+            vec![(listed[0].id, listed[1].id)]
+        );
+        let alpha_id = listed[0].id;
+
+        // An edit keeps the id — the hit history and edges by name survive.
+        let edited = vec![
+            note_with_links("alpha", "now links to nothing", &[]),
+            note("beta", "plain"),
+        ];
+        let embeddings = vec![("alpha".to_string(), vector(50, 0.0))];
+        assert!(storage.sync_notes(&edited, &embeddings).expect("resync"));
+        let relisted = storage.list_memories().expect("relist");
+        assert_eq!(relisted[0].id, alpha_id);
+        assert_eq!(relisted[0].content, "now links to nothing");
+        assert!(relisted[0].updated_at >= relisted[0].created_at);
+        assert!(storage.links().expect("links").is_empty());
+        let (nearest, distance) = storage.knn(&vector(50, 0.0), 1).expect("knn").remove(0);
+        assert_eq!(nearest.id, alpha_id, "the embedding moved with the edit");
+        assert!(distance.abs() < 1e-6);
+
+        // A deleted file prunes its row, its vec entry and its injections.
+        let conversation = storage
+            .create_conversation("c", "ollama", "llama3.2:3b")
+            .expect("create");
+        storage
+            .record_injections(conversation.id, None, &[alpha_id])
+            .expect("inject");
+        assert!(storage
+            .sync_notes(&[note("beta", "plain")], &[])
+            .expect("prune"));
+        assert_eq!(storage.count_memories().expect("count"), 1);
         assert_eq!(vec_rows(&storage), 1);
+        assert!(storage
+            .injections(conversation.id)
+            .expect("gone")
+            .is_empty());
+
+        // Nothing changed: sync says so and touches nothing.
+        assert!(!storage
+            .sync_notes(&[note("beta", "plain")], &[])
+            .expect("noop"));
+    }
+
+    #[test]
+    fn sync_requires_an_embedding_for_every_stale_note() {
+        let (_dir, storage) = open("missing");
+        let err = storage
+            .sync_notes(&[note("alpha", "text")], &[])
+            .expect_err("no embedding given");
+        assert!(matches!(err, StorageError::MissingEmbedding(slug) if slug == "alpha"));
+        assert_eq!(storage.count_memories().expect("count"), 0, "rolled back");
+
+        assert!(matches!(
+            storage.sync_notes(
+                &[note("alpha", "text")],
+                &[("alpha".to_string(), vec![1.0, 2.0])]
+            ),
+            Err(StorageError::EmbeddingDimensions { expected, got })
+                if expected == crate::embed::FAKE_DIM && got == 2
+        ));
+    }
+
+    /// The model swap: the vector table is rebuilt at the new width, every
+    /// note comes back stale even though no file changed, and the rows —
+    /// with their ids, hit counts and injection records — survive it.
+    #[test]
+    fn changing_the_model_rebuilds_the_index_but_keeps_history() {
+        let (_dir, storage) = open("swap");
+        let notes = vec![note("alpha", "one"), note("beta", "two")];
+        sync_spread(&storage, &notes);
+        let alpha = storage.list_memories().expect("list")[0].clone();
+
+        let conversation = storage
+            .create_conversation("c", "ollama", "llama3.2:3b")
+            .expect("create");
+        let message = storage
+            .append_message(conversation.id, crate::chat::Role::User, "q", None, None)
+            .expect("message");
+        storage
+            .record_injections(conversation.id, Some(message.id), &[alpha.id])
+            .expect("inject");
         assert_eq!(
-            storage.memory(added.id).expect("get").content,
-            "works after upgrade"
+            storage.active_model().expect("model").as_deref(),
+            Some("bge-small")
         );
+        assert!(storage.index_matches("bge-small").expect("matches"));
+
+        // A wider model: the table is rebuilt, so nothing has a vector left.
+        const WIDE_DIM: usize = 768;
+        assert!(!storage.index_matches("bge-base").expect("differs"));
+        storage.rebuild_index("bge-base", WIDE_DIM).expect("swap");
+        assert_eq!(
+            storage.active_model().expect("model").as_deref(),
+            Some("bge-base")
+        );
+        assert!(storage.index_matches("bge-base").expect("settled"));
+
+        let plan = storage.note_sync_plan(&notes).expect("plan");
+        assert_eq!(
+            plan.stale,
+            vec!["alpha".to_string(), "beta".to_string()],
+            "every note re-embeds, though no file changed"
+        );
+
+        // The old width is now rejected, the new one accepted.
+        assert!(matches!(
+            storage.sync_notes(&notes, &[("alpha".to_string(), vector(0, 0.0))]),
+            Err(StorageError::EmbeddingDimensions { expected, got })
+                if expected == WIDE_DIM && got == crate::embed::FAKE_DIM
+        ));
+        let embeddings = vec![
+            ("alpha".to_string(), wide_vector(0, 0.0, WIDE_DIM)),
+            ("beta".to_string(), wide_vector(10, 0.0, WIDE_DIM)),
+        ];
+        assert!(storage.sync_notes(&notes, &embeddings).expect("re-embed"));
+
+        let relisted = storage.list_memories().expect("relist");
+        assert_eq!(relisted[0].id, alpha.id, "ids survive the swap");
+        assert_eq!(relisted[0].created_at, alpha.created_at);
+        assert_eq!(
+            storage.stats_for(vec![relisted[0].clone()]).expect("stats")[0].hits,
+            1,
+            "hit history survives the swap"
+        );
+        let found = storage
+            .knn(&wide_vector(0, 0.0, WIDE_DIM), 1)
+            .expect("knn at the new width");
+        assert_eq!(found[0].0.id, alpha.id);
+        assert!(storage
+            .note_sync_plan(&notes)
+            .expect("settled")
+            .stale
+            .is_empty());
     }
 
+    /// A vector lost without a content change is repaired by the next sync:
+    /// the index cannot be quietly missing a memory retrieval should see.
     #[test]
-    fn an_episodic_memory_stores_its_embedding_under_the_same_rowid() {
-        let (_dir, storage) = open("episodic");
-        let memory = storage
-            .add_memory(
-                MemoryTier::Episodic,
-                "mitul prefers rustls",
-                Some(&vector(0, 0.0)),
-            )
-            .expect("add");
+    fn a_memory_without_a_vector_is_stale_even_when_its_content_is_unchanged() {
+        let (_dir, storage) = open("orphan");
+        let notes = vec![note("alpha", "one")];
+        sync_spread(&storage, &notes);
+        assert!(storage
+            .note_sync_plan(&notes)
+            .expect("plan")
+            .stale
+            .is_empty());
 
-        assert_eq!(memory.tier, MemoryTier::Episodic);
-        let indexed: i64 = storage
+        let id = storage.list_memories().expect("list")[0].id;
+        storage
             .conn
-            .query_row(
-                "SELECT count(*) FROM memories_vec WHERE rowid = ?1",
-                params![memory.id],
-                |row| row.get(0),
-            )
-            .expect("count");
-        assert_eq!(indexed, 1);
+            .execute("DELETE FROM memories_vec WHERE rowid = ?1", params![id])
+            .expect("drop the vector");
 
-        let (nearest, distance) = storage
-            .knn_episodic(&vector(0, 0.0), 1)
-            .expect("knn")
-            .remove(0);
-        assert_eq!(nearest, memory);
-        assert!(distance.abs() < 1e-6, "distance {distance}");
-    }
-
-    #[test]
-    fn core_memories_never_touch_the_vec_table() {
-        let (_dir, storage) = open("core");
-        storage
-            .add_memory(MemoryTier::Core, "name is Mitul", None)
-            .expect("add core");
-        assert_eq!(vec_rows(&storage), 0);
-
-        let memory = storage.list_memories(Some(MemoryTier::Core)).expect("list")[0].clone();
-        storage
-            .update_memory(memory.id, "name is still Mitul", None)
-            .expect("update core");
-        assert_eq!(vec_rows(&storage), 0);
-
-        storage.delete_memory(memory.id).expect("delete core");
-        assert!(storage.list_memories(None).expect("list").is_empty());
-    }
-
-    #[test]
-    fn tier_rules_are_enforced() {
-        let (_dir, storage) = open("tiers");
-        assert!(matches!(
-            storage.add_memory(MemoryTier::Core, "core", Some(&vector(0, 0.0))),
-            Err(StorageError::EmbeddingForbidden)
-        ));
-        assert!(matches!(
-            storage.add_memory(MemoryTier::Episodic, "episodic", None),
-            Err(StorageError::EmbeddingRequired)
-        ));
-        assert!(matches!(
-            storage.add_memory(MemoryTier::Episodic, "short", Some(&[1.0, 0.0])),
-            Err(StorageError::EmbeddingDimensions {
-                expected: EMBEDDING_DIM,
-                got: 2
-            })
-        ));
-        assert!(matches!(
-            storage.add_memory(MemoryTier::Core, " \n ", None),
-            Err(StorageError::EmptyMemory)
-        ));
-        assert!(matches!(
-            storage.knn_episodic(&[1.0], 3),
-            Err(StorageError::EmbeddingDimensions {
-                expected: EMBEDDING_DIM,
-                got: 1
-            })
-        ));
-        assert!(storage.list_memories(None).expect("list").is_empty());
-        assert_eq!(vec_rows(&storage), 0);
-    }
-
-    #[test]
-    fn content_is_stored_single_line_with_chars_over_four_tokens() {
-        let (_dir, storage) = open("normalize");
-        let memory = storage
-            .add_memory(MemoryTier::Core, "  a\nb\r\n\nc  d\te ", None)
-            .expect("add");
-        assert_eq!(memory.content, "a b c  d\te");
-        assert_eq!(memory.tokens, 3, "10 chars round up to 3");
-        assert_eq!(approx_tokens("abcd"), 1);
-        assert_eq!(approx_tokens("abcde"), 2);
+        let plan = storage.note_sync_plan(&notes).expect("plan");
+        assert_eq!(plan.stale, vec!["alpha".to_string()]);
+        assert!(plan.changed);
+        sync_spread(&storage, &notes);
+        assert_eq!(vec_rows(&storage), 1, "the sync put it back");
     }
 
     #[test]
     fn knn_returns_the_query_cluster_closest_first() {
         let (_dir, storage) = open("knn");
-        let a1 = storage
-            .add_memory(MemoryTier::Episodic, "a1", Some(&vector(0, 0.0)))
-            .expect("a1");
-        let a2 = storage
-            .add_memory(MemoryTier::Episodic, "a2", Some(&vector(0, 0.1)))
-            .expect("a2");
-        let a3 = storage
-            .add_memory(MemoryTier::Episodic, "a3", Some(&vector(0, 0.2)))
-            .expect("a3");
-        for (axis, name) in [(10, "b1"), (10, "b2"), (20, "c1")] {
-            let lean = if name == "b2" { 0.1 } else { 0.0 };
-            storage
-                .add_memory(MemoryTier::Episodic, name, Some(&vector(axis, lean)))
-                .expect(name);
-        }
-        storage
-            .add_memory(MemoryTier::Core, "never retrieved", None)
-            .expect("core");
+        let notes = vec![note("a1", "x"), note("a2", "x"), note("a3", "x")];
+        let embeddings = vec![
+            ("a1".to_string(), vector(0, 0.0)),
+            ("a2".to_string(), vector(0, 0.1)),
+            ("a3".to_string(), vector(10, 0.0)),
+        ];
+        storage.sync_notes(&notes, &embeddings).expect("sync");
 
-        let neighbors = storage.knn_episodic(&vector(0, 0.0), 3).expect("knn");
-        let ids: Vec<i64> = neighbors.iter().map(|(memory, _)| memory.id).collect();
-        assert_eq!(ids, vec![a1.id, a2.id, a3.id]);
-        assert!(neighbors[0].1 < neighbors[1].1 && neighbors[1].1 < neighbors[2].1);
+        let neighbors = storage.knn(&vector(0, 0.0), 2).expect("knn");
+        let slugs: Vec<&str> = neighbors
+            .iter()
+            .map(|(memory, _)| memory.slug.as_str())
+            .collect();
+        assert_eq!(slugs, vec!["a1", "a2"]);
+        assert!(neighbors[0].1 < neighbors[1].1);
+        assert_eq!(storage.knn(&vector(0, 0.0), 100).expect("all").len(), 3);
+        assert!(matches!(
+            storage.knn(&[1.0], 3),
+            Err(StorageError::EmbeddingDimensions { .. })
+        ));
 
-        let all = storage.knn_episodic(&vector(0, 0.0), 100).expect("knn all");
-        assert_eq!(all.len(), 6, "core rows must never be retrievable");
+        let near = storage.neighbors(neighbors[0].0.id, 1).expect("neighbors");
+        assert_eq!(near.len(), 1);
+        assert_ne!(near[0].0, neighbors[0].0.id, "self is excluded");
     }
 
     #[test]
-    fn updating_an_episodic_memory_replaces_its_index_entry() {
-        let (_dir, storage) = open("update");
-        let memory = storage
-            .add_memory(MemoryTier::Episodic, "old spot", Some(&vector(0, 0.0)))
-            .expect("add");
-        storage
-            .add_memory(MemoryTier::Episodic, "bystander", Some(&vector(20, 0.0)))
-            .expect("add bystander");
-
-        let updated = storage
-            .update_memory(memory.id, "new\nspot", Some(&vector(10, 0.0)))
-            .expect("update");
-        assert_eq!(updated.content, "new spot");
-        assert_eq!(updated.created_at, memory.created_at);
-        assert!(updated.updated_at >= memory.updated_at);
-        assert_eq!(vec_rows(&storage), 2);
-
-        let (nearest, distance) = storage
-            .knn_episodic(&vector(10, 0.0), 1)
-            .expect("knn")
-            .remove(0);
-        assert_eq!(nearest.id, memory.id);
-        assert!(distance.abs() < 1e-6);
-        let (at_old_spot, old_distance) = storage
-            .knn_episodic(&vector(0, 0.0), 1)
-            .expect("knn old")
-            .remove(0);
-        assert!(
-            at_old_spot.id != memory.id || old_distance > 1.0,
-            "the old embedding must be gone"
-        );
-
-        assert!(matches!(
-            storage.update_memory(memory.id, "no embedding", None),
-            Err(StorageError::EmbeddingRequired)
-        ));
-        assert!(matches!(
-            storage.update_memory(9999, "ghost", None),
-            Err(StorageError::MemoryNotFound(9999))
-        ));
-    }
-
-    #[test]
-    fn deleting_an_episodic_memory_removes_its_index_entry() {
-        let (_dir, storage) = open("delete");
-        let memory = storage
-            .add_memory(MemoryTier::Episodic, "gone soon", Some(&vector(0, 0.0)))
-            .expect("add");
-        storage.delete_memory(memory.id).expect("delete");
-        assert_eq!(vec_rows(&storage), 0);
-        assert!(matches!(
-            storage.memory(memory.id),
-            Err(StorageError::MemoryNotFound(_))
-        ));
-        assert!(matches!(
-            storage.delete_memory(memory.id),
-            Err(StorageError::MemoryNotFound(_))
-        ));
-        assert!(storage
-            .knn_episodic(&vector(0, 0.0), 5)
-            .expect("knn")
-            .is_empty());
-    }
-
-    #[test]
-    fn list_filters_by_tier() {
-        let (_dir, storage) = open("list");
-        let core = storage
-            .add_memory(MemoryTier::Core, "core row", None)
-            .expect("core");
-        let episodic = storage
-            .add_memory(MemoryTier::Episodic, "episodic row", Some(&vector(0, 0.0)))
-            .expect("episodic");
-
-        let all = storage.list_memories(None).expect("all");
-        assert_eq!(all, vec![core.clone(), episodic.clone()]);
+    fn links_resolve_case_insensitively_and_skip_dangling_and_self() {
+        let (_dir, storage) = open("links");
+        let notes = vec![
+            note_with_links(
+                "Alpha",
+                "see [[beta]], [[ghost]] and [[alpha]]",
+                &["beta", "ghost", "alpha"],
+            ),
+            note("beta", "linked to"),
+        ];
+        sync_spread(&storage, &notes);
+        let ids: HashMap<String, i64> = storage
+            .list_memories()
+            .expect("list")
+            .into_iter()
+            .map(|memory| (memory.slug.clone(), memory.id))
+            .collect();
         assert_eq!(
-            storage.list_memories(Some(MemoryTier::Core)).expect("core"),
-            vec![core]
-        );
-        assert_eq!(
-            storage
-                .list_memories(Some(MemoryTier::Episodic))
-                .expect("episodic"),
-            vec![episodic]
+            storage.links().expect("links"),
+            vec![(ids["Alpha"], ids["beta"])],
+            "dangling and self links resolve to nothing"
         );
     }
+
     #[test]
     fn recording_injections_again_for_a_message_replaces_the_record() {
         let (_dir, storage) = open("reinject");
-        let first = storage
-            .add_memory(MemoryTier::Episodic, "first", Some(&vector(0, 0.0)))
-            .expect("first");
-        let second = storage
-            .add_memory(MemoryTier::Episodic, "second", Some(&vector(10, 0.0)))
-            .expect("second");
+        let notes = vec![note("first", "x"), note("second", "y")];
+        sync_spread(&storage, &notes);
+        let ids: Vec<i64> = storage
+            .list_memories()
+            .expect("list")
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect();
         let conversation = storage
             .create_conversation("c", "ollama", "llama3.2:3b")
             .expect("create");
@@ -796,10 +862,10 @@ mod tests {
             .expect("message");
 
         storage
-            .record_injections(conversation.id, Some(message.id), &[first.id])
+            .record_injections(conversation.id, Some(message.id), &[ids[0]])
             .expect("record");
         storage
-            .record_injections(conversation.id, Some(message.id), &[second.id])
+            .record_injections(conversation.id, Some(message.id), &[ids[1]])
             .expect("re-record");
 
         let recorded: Vec<i64> = storage
@@ -808,24 +874,52 @@ mod tests {
             .into_iter()
             .map(|injection| injection.memory_id)
             .collect();
-        assert_eq!(recorded, vec![second.id], "the retry must replace, not add");
+        assert_eq!(recorded, vec![ids[1]], "the retry must replace, not add");
     }
+
     #[test]
-    fn the_episodic_overview_sorts_by_recency_hits_and_creation() {
+    fn co_injections_count_pairs_used_together() {
+        let (_dir, storage) = open("co");
+        let notes = vec![note("a", "x"), note("b", "y"), note("c", "z")];
+        sync_spread(&storage, &notes);
+        let ids: Vec<i64> = storage
+            .list_memories()
+            .expect("list")
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect();
+        let conversation = storage
+            .create_conversation("co", "ollama", "llama3.2:3b")
+            .expect("create");
+        for question in ["one", "two", "three"] {
+            let row = storage
+                .append_message(
+                    conversation.id,
+                    crate::chat::Role::User,
+                    question,
+                    None,
+                    None,
+                )
+                .expect("message");
+            storage
+                .record_injections(conversation.id, Some(row.id), &[ids[0], ids[1]])
+                .expect("inject");
+        }
+        assert_eq!(
+            storage.co_injections(2).expect("pairs"),
+            vec![(ids[0], ids[1], 3)]
+        );
+        assert!(storage.co_injections(4).expect("pairs").is_empty());
+    }
+
+    #[test]
+    fn the_overview_sorts_by_recency_hits_and_creation() {
         let (_dir, storage) = open("overview");
-        let a = storage
-            .add_memory(MemoryTier::Episodic, "a", Some(&vector(0, 0.0)))
-            .expect("a");
-        let b = storage
-            .add_memory(MemoryTier::Episodic, "b", Some(&vector(10, 0.0)))
-            .expect("b");
-        let c = storage
-            .add_memory(MemoryTier::Episodic, "c", Some(&vector(20, 0.0)))
-            .expect("c");
-        storage
-            .add_memory(MemoryTier::Core, "never listed", None)
-            .expect("core");
-        for (id, created, updated) in [(a.id, 10, 40), (b.id, 20, 60), (c.id, 30, 50)] {
+        let notes = vec![note("a", "x"), note("b", "y"), note("c", "z")];
+        sync_spread(&storage, &notes);
+        let listed = storage.list_memories().expect("list");
+        let (a, b, c) = (listed[0].id, listed[1].id, listed[2].id);
+        for (id, created, updated) in [(a, 10, 40), (b, 20, 60), (c, 30, 50)] {
             storage
                 .conn
                 .execute(
@@ -838,10 +932,10 @@ mod tests {
             .create_conversation("s", "ollama", "llama3.2:3b")
             .expect("create");
         storage
-            .record_injections(conversation.id, None, &[a.id])
+            .record_injections(conversation.id, None, &[a])
             .expect("inject a");
         storage
-            .record_injections(conversation.id, None, &[a.id, c.id])
+            .record_injections(conversation.id, None, &[a, c])
             .expect("inject a and c");
 
         let ids = |rows: Vec<MemoryStats>| {
@@ -850,31 +944,31 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let recent = storage
-            .episodic_overview(EpisodicSort::Recent, 10, 0)
+            .memories_overview(MemorySort::Recent, 10, 0)
             .expect("recent");
-        assert_eq!(recent[0].memory.id, b.id);
-        assert_eq!(ids(recent), vec![b.id, c.id, a.id]);
+        assert_eq!(ids(recent), vec![b, c, a]);
         let hits = storage
-            .episodic_overview(EpisodicSort::Hits, 10, 0)
+            .memories_overview(MemorySort::Hits, 10, 0)
             .expect("hits");
-        assert_eq!(hits[0].memory.id, a.id, "a was injected twice");
+        assert_eq!(hits[0].memory.id, a, "a was injected twice");
         assert_eq!(hits[0].hits, 2);
         assert!(hits[0].last_injected_at.is_some());
         assert_eq!(
             ids(storage
-                .episodic_overview(EpisodicSort::Created, 10, 0)
+                .memories_overview(MemorySort::Created, 10, 0)
                 .expect("created")),
-            vec![c.id, b.id, a.id]
+            vec![c, b, a]
         );
         assert_eq!(
             ids(storage
-                .episodic_overview(EpisodicSort::Created, 2, 1)
+                .memories_overview(MemorySort::Created, 2, 1)
                 .expect("page")),
-            vec![b.id, a.id]
+            vec![b, a]
         );
 
+        let listed = storage.list_memories().expect("list");
         let stats = storage
-            .stats_for(vec![a.clone(), b.clone()])
+            .stats_for(vec![listed[0].clone(), listed[1].clone()])
             .expect("stats");
         assert_eq!(stats[0].hits, 2);
         assert_eq!(stats[1].hits, 0);

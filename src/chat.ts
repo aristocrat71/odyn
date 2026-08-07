@@ -1,6 +1,7 @@
 import type { Conversation, Message } from "./api";
 import { renderBrevity } from "./brevctl";
-import { el } from "./dom";
+import { accept, ghost } from "./complete";
+import { el, waiting } from "./dom";
 import { renderMarkdown } from "./markdown";
 import { renderPickers } from "./picker";
 import {
@@ -22,17 +23,33 @@ const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 const SLACK = 24;
 // Chips shown before the tail collapses to `◈ +N more`.
 const CHIP_LIMIT = 5;
+// The only thing a message completes to. It is a mention, not a command: it
+// can sit anywhere in the line, so the word under the caret is what is matched.
+const MENTION = "/brain";
 
 // The composer outlives every redraw: a draft being typed, its height and the
 // caret in it survive a render that has nothing to do with the chat.
 const input = el("textarea", "composer-input");
 input.rows = 1;
 input.placeholder = "Message Odyn…";
+const hint = ghost(input, "composer-ask");
 input.addEventListener("input", () => {
   grow();
+  hint.draw(MENTION);
   schedulePreview(input.value);
 });
 input.addEventListener("keydown", (event) => {
+  // ⇥ takes the completion, → takes it only from the end of the draft. Neither
+  // is swallowed when there is nothing to complete: ⇥ still moves focus on.
+  const end = input.selectionStart === input.value.length;
+  if (event.key === "Tab" || (event.key === "ArrowRight" && end)) {
+    if (!accept(input, MENTION)) return;
+    event.preventDefault();
+    hint.draw(MENTION);
+    // The mention is what turns recall on, so the CONTEXT line answers for it.
+    schedulePreview(input.value);
+    return;
+  }
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
   submit();
@@ -89,6 +106,7 @@ export function refreshLedger(): void {
 // sent on someone's behalf, but nothing has to be typed twice either.
 export function prefillComposer(text: string): void {
   input.value = text;
+  hint.draw(MENTION);
   schedulePreview(text);
 }
 
@@ -137,6 +155,12 @@ function speaker(role: Message["role"]): HTMLElement {
 }
 
 function fill(node: HTMLElement, content: string, cursor: boolean): void {
+  // Nothing has streamed yet: a lone cursor under the speaker reads as idle,
+  // so the wait line stands in until the first token replaces it.
+  if (cursor && content === "") {
+    node.replaceChildren(waiting());
+    return;
+  }
   const interrupted = content.endsWith(INTERRUPTED);
   const blocks = renderMarkdown(
     interrupted ? content.slice(0, -INTERRUPTED.length) : content,
@@ -158,6 +182,8 @@ function failed(message: string): HTMLElement {
 }
 
 // DESIGN.md §5.1: one mono status line fused to the top of the composer.
+// Nothing is injected without a /brain mention, and the line says so instead
+// of sitting empty.
 function ledger(): HTMLElement {
   const line = el("div", "ledger");
   line.append(el("span", "ledger-label", "CONTEXT"));
@@ -167,24 +193,25 @@ function ledger(): HTMLElement {
   }
   const preview = state.ledger.preview;
   if (preview === null) return line;
-
-  if (preview.core_tokens > 0) {
-    const chip = el("span", "chip chip-core");
-    chip.append("● core ", el("span", "chip-tokens", String(preview.core_tokens)));
-    if (preview.over_budget) chip.classList.add("over");
-    chip.dataset.tip = preview.core.map((item) => item.content).join(" · ");
-    line.append(chip);
+  if (!preview.active) {
+    line.append(el("span", "ledger-note", "mention /brain to recall memory"));
+    return line;
   }
+  if (preview.memories.length === 0) {
+    line.append(el("span", "ledger-note", "/brain · nothing to recall yet"));
+    return line;
+  }
+
   const visible = state.ledger.expanded
-    ? preview.episodic
-    : preview.episodic.slice(0, CHIP_LIMIT);
+    ? preview.memories
+    : preview.memories.slice(0, CHIP_LIMIT);
   for (const item of visible) {
     const chip = el("span", "chip chip-epi");
     chip.append("◈ ", item.id, " ", el("span", "chip-tokens", String(item.tokens)));
     chip.dataset.tip = item.content;
     line.append(chip);
   }
-  const rest = preview.episodic.slice(CHIP_LIMIT);
+  const rest = preview.memories.slice(CHIP_LIMIT);
   if (!state.ledger.expanded && rest.length > 0) {
     const total = rest.reduce((sum, item) => sum + item.tokens, 0);
     const more = el("button", "chip chip-epi chip-more");
@@ -192,8 +219,9 @@ function ledger(): HTMLElement {
     more.addEventListener("click", expandLedger);
     line.append(more);
   }
-  const total = preview.core_tokens + preview.episodic_tokens;
-  line.append(el("span", "ledger-total", `${count(total)} / ${count(preview.cap_tokens)} tk`));
+  line.append(
+    el("span", "ledger-total", `${count(preview.tokens)} / ${count(preview.cap_tokens)} tk`),
+  );
   return line;
 }
 
@@ -206,7 +234,7 @@ function composer(): HTMLElement {
   const field = el("div", "composer-field");
   const glyph = el("button", "send", "↵");
   glyph.addEventListener("click", submit);
-  field.append(input, glyph);
+  field.append(hint.wrap, glyph);
   box.append(ledger(), field, foot());
   return box;
 }
@@ -234,6 +262,7 @@ function submit(): void {
   if (text === "" || streaming()) return;
   input.value = "";
   grow();
+  hint.draw(MENTION);
   void send(text);
 }
 

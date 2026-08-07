@@ -45,14 +45,58 @@ button {
   color: var(--epi);
 }
 
+/* The wrap carries the typography, so the field and the ghost over it are the
+   same text in the same place by construction. */
+.spot-ask {
+  flex: 1;
+  font-family: var(--sans);
+  font-size: 14.5px;
+}
+
 #spot-input {
   flex: 1;
+  min-width: 0;
+  padding: 0;
   background: none;
   border: none;
   outline: none;
   color: var(--ink);
-  font-family: var(--sans);
-  font-size: 14.5px;
+  font: inherit;
+}
+
+/* Inline completion for `/` commands: the rest of the highlighted one, drawn
+   where the caret is. Shared with the main window — app.css has the same
+   rules, which this window never loads. */
+
+.ghost-wrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+/* Over the field, not under it: what was typed is repeated transparently so
+   the remainder starts exactly where the real text ends. */
+.ghost {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  /* Absolute inset lands on the wrap's padding box, so the field's own padding
+     has to be repeated here for the two texts to start at the same place. */
+  padding: inherit;
+  overflow: hidden;
+  font: inherit;
+  white-space: pre;
+  pointer-events: none;
+}
+
+.ghost-typed {
+  color: transparent;
+}
+
+.ghost-rest {
+  color: var(--faint);
 }
 
 #spot-results {
@@ -116,6 +160,78 @@ button {
   }
 }
 
+/* The wait before the first token: one quiet line, three breathing dots.
+   Replaced the moment text starts arriving. Shared with the chat window,
+   which never loads this file — app.css carries the same rules. */
+
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+#spot-results .waiting {
+  padding: 4px 0 8px;
+}
+
+.waiting-word {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.waiting-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.waiting-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--epi);
+  opacity: 0.25;
+  animation: wait 1.2s ease-in-out infinite;
+}
+
+.waiting-dot:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.waiting-dot:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes wait {
+  0%,
+  65%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waiting-word,
+  .waiting-dot {
+    animation: none;
+  }
+  .waiting-dot {
+    opacity: 0.55;
+  }
+}
+
 /* DESIGN.md §7: the minimal one-line ledger between field and answer. */
 
 #spot-ledger {
@@ -127,10 +243,6 @@ button {
   font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
-}
-
-#spot-ledger .chip-core {
-  color: var(--core);
 }
 
 #spot-ledger .chip-epi {
@@ -206,6 +318,12 @@ button {
 
 .spot-cmd-hint {
   color: var(--dim);
+}
+
+/* Only on the row the field is completing to, so it reads as an offer. */
+.spot-cmd-key {
+  margin-left: auto;
+  color: var(--faint);
 }
 
 .spot-cmd-none {

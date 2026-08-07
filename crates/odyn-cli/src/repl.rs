@@ -49,7 +49,10 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
         }
         let _ = editor.add_history_entry(line);
 
-        if let Some(command) = line.strip_prefix('/') {
+        // `/brain` looks like a command but is a chat message with recall on,
+        // so it must never fall into the command parser.
+        let ask = odyn_core::brain::parse_ask(line);
+        if let Some(command) = line.strip_prefix('/').filter(|_| !ask.recall) {
             let (name, arg) = match command.split_once(char::is_whitespace) {
                 Some((name, arg)) => (name, arg.trim()),
                 None => (command, ""),
@@ -103,17 +106,18 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
                     Err(err) => warn(&err.to_string()),
                 },
                 _ => warn(&format!(
-                    "unknown command: /{name}; try /model, /brevity, /new, /quit"
+                    "unknown command: /{name}; try /model, /brevity, /new, /quit — \
+                     or mention /brain in a message to recall memory"
                 )),
             }
             continue;
         }
 
-        let context = memory_context(Some(&storage), &session.memory, &history, line, brevity);
+        let context = memory_context(Some(&storage), &session.config, &history, &ask, brevity);
         if show_context {
-            print_context(context.as_ref(), &session.memory, false)?;
+            print_context(context.as_ref(), &session.config.brain, false)?;
         }
-        history.push(Message::new(Role::User, line));
+        history.push(Message::new(Role::User, ask.message.as_str()));
         let outgoing = with_context(context.as_ref(), &history);
         let mut streamed = false;
         let reply = runtime.block_on(stream_reply(
@@ -144,7 +148,7 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
         let injected = context
             .map(|context| context.memory_ids())
             .unwrap_or_default();
-        pending.push((line.to_string(), reply, injected));
+        pending.push((ask.message, reply, injected));
         if let Err(err) = record(
             &storage,
             &mut conversation,

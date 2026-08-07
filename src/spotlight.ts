@@ -6,7 +6,8 @@ import "./spotlight.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import { el } from "./dom";
+import { accept, ghost } from "./complete";
+import { el, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
 import { renderMarkdown } from "./markdown";
 
@@ -15,8 +16,7 @@ type SpotEvent =
       request_id: number;
       kind: "context";
       used: string[];
-      core_tokens: number;
-      episodic_tokens: number;
+      tokens: number;
     }
   | { request_id: number; kind: "delta"; text: string }
   | { request_id: number; kind: "done" }
@@ -36,6 +36,9 @@ const ledger = document.getElementById("spot-ledger") as HTMLDivElement;
 const results = document.getElementById("spot-results") as HTMLDivElement;
 const picks = document.getElementById("spot-picks") as HTMLSpanElement;
 
+// The field completes itself while a `/` command is being typed.
+const hint = ghost(input, "spot-ask");
+
 // Menus drop below the footer, into the window's empty lower half — above
 // the footer sits the whole surface, and the window's top edge would clip.
 const providerDrop = dropdown({
@@ -49,7 +52,10 @@ const modelDrop = dropdown({
 });
 picks.append(providerDrop.root, modelDrop.root);
 
-type Command = { cmd: string; view: string; hint: string };
+/// `view: null` is the `/brain` mention: not somewhere to go, a prefix to
+/// finish typing. Taking it leaves the text in the field — the question is what
+/// comes next.
+type Command = { cmd: string; view: string | null; hint: string };
 
 const COMMANDS: Command[] = [
   { cmd: "/home", view: "home", hint: "the front door" },
@@ -57,6 +63,7 @@ const COMMANDS: Command[] = [
   { cmd: "/convos", view: "conversations", hint: "every conversation, searchable" },
   { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
   { cmd: "/guide", view: "guide", hint: "how everything works" },
+  { cmd: "/brain", view: null, hint: "ask with what odyn remembers" },
 ];
 
 let current: number | null = null;
@@ -123,23 +130,24 @@ function keyCard(): void {
 }
 
 // DESIGN.md §7: a minimal one-line ledger between the field and the answer.
+// It only ever fills on a /brain ask — everything else injects nothing.
 function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.replaceChildren();
-  const total = event.core_tokens + event.episodic_tokens;
-  if (total === 0) return;
-  if (event.core_tokens > 0) {
-    ledger.append(el("span", "chip-core", `● core ${event.core_tokens}`));
-  }
+  if (event.tokens === 0) return;
   for (const id of event.used) {
     ledger.append(el("span", "chip-epi", `◈ ${id}`));
   }
-  ledger.append(el("span", "spot-ledger-total", `${total} tk`));
+  ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
   ledger.hidden = commandMode;
 }
 
 function draw(): void {
   if (commandMode) return;
   results.hidden = false;
+  if (streaming && answer === "") {
+    results.replaceChildren(waiting());
+    return;
+  }
   const body = renderMarkdown(answer);
   if (streaming) {
     const last = body[body.length - 1] ?? el("p");
@@ -158,6 +166,8 @@ function draw(): void {
 
 function fail(message: string, detail?: string): void {
   streaming = false;
+  // Nothing is being waited on any more, whatever else is on screen stays.
+  results.querySelector(".waiting")?.remove();
   // Whatever streamed before the failure is kept, minus the streaming cursor.
   if (answer !== "") draw();
   results.hidden = false;
@@ -176,6 +186,7 @@ function clearScreen(): void {
   commandMode = false;
   cursor = 0;
   input.value = "";
+  hint.draw(undefined);
   ledger.hidden = true;
   ledger.replaceChildren();
   results.hidden = true;
@@ -193,6 +204,9 @@ function drawCommands(): void {
   if (cursor >= shown.length) cursor = 0;
   ledger.hidden = true;
   results.hidden = false;
+  // The highlighted row is what the field completes to, so the arrows move the
+  // ghost as well as the highlight.
+  const completing = hint.draw(shown[cursor]?.cmd);
   if (shown.length === 0) {
     results.replaceChildren(el("div", "spot-cmd-none", "no such command"));
     return;
@@ -206,6 +220,7 @@ function drawCommands(): void {
         el("span", "spot-cmd-name", command.cmd),
         el("span", "spot-cmd-hint", command.hint),
       );
+      if (index === cursor && completing) row.append(el("span", "spot-cmd-key", "⇥"));
       row.addEventListener("click", () => void run(command));
       row.addEventListener("pointerenter", () => {
         cursor = index;
@@ -219,7 +234,10 @@ function drawCommands(): void {
 
 function drawAsk(): void {
   ledger.hidden = ledger.childElementCount === 0;
-  if (answer !== "") {
+  hint.draw(undefined);
+  // An ask typed over mid-flight comes back to whatever it left: the answer so
+  // far, or the wait line if the first token is still out.
+  if (answer !== "" || streaming) {
     draw();
     return;
   }
@@ -228,6 +246,12 @@ function drawAsk(): void {
 }
 
 async function run(command: Command): Promise<void> {
+  // The mention is finished in place, not run: `/brain` alone goes nowhere,
+  // and the field is now an ask with recall on.
+  if (command.view === null) {
+    take(command);
+    return;
+  }
   try {
     await invoke("spotlight_open_view", { view: command.view });
   } catch (err) {
@@ -235,6 +259,20 @@ async function run(command: Command): Promise<void> {
     return;
   }
   clearScreen();
+}
+
+// ⇥ on any row, ⏎ or a click on a mention: the completion lands in the field.
+// A field that has become a `/brain` ask leaves the command list behind.
+function take(command: Command | undefined): boolean {
+  if (!accept(input, command?.cmd)) return false;
+  input.focus();
+  if (brainAsk(input.value)) {
+    commandMode = false;
+    drawAsk();
+  } else {
+    drawCommands();
+  }
+  return true;
 }
 
 async function ask(): Promise<void> {
@@ -249,7 +287,7 @@ async function ask(): Promise<void> {
   used = [];
   ledger.hidden = true;
   ledger.replaceChildren();
-  results.replaceChildren();
+  draw();
   try {
     current = await invoke<number>("spotlight_ask", { text });
   } catch (err) {
@@ -313,8 +351,13 @@ function cycleModel(): void {
   if (next !== undefined) void pick(target.provider, next);
 }
 
+// A `/brain` mention is a question with recall on, never a command — the
+// same rule as chat and the CLI.
+const brainAsk = (text: string): boolean =>
+  /(^|\s)\/brain([\s.,;:!?]|$)/i.test(text);
+
 input.addEventListener("input", () => {
-  if (!keyMode && input.value.startsWith("/")) {
+  if (!keyMode && input.value.startsWith("/") && !brainAsk(input.value)) {
     cursor = 0;
     commandMode = true;
     drawCommands();
@@ -356,6 +399,13 @@ document.addEventListener("keydown", (e) => {
   }
   if (commandMode) {
     const shown = commands();
+    // ⇥ takes the completion, → takes it only from the end of the line, where
+    // there is no caret left to move.
+    const end = input.selectionStart === input.value.length;
+    if (e.key === "Tab" || (e.key === "ArrowRight" && end)) {
+      if (take(shown[cursor])) e.preventDefault();
+      return;
+    }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       if (shown.length === 0) return;
