@@ -584,15 +584,28 @@ pub async fn spotlight_target(state: State<'_, AppState>) -> Result<SpotTarget, 
     let mut providers = Vec::with_capacity(configured.len());
     for (name, config) in configured {
         let kind = config.kind();
-        let models = match config {
-            ProviderConfig::OpenAiCompat { default_model, .. } => {
-                default_model.into_iter().collect()
-            }
+        let models = match &config {
+            // What the endpoint itself lists, not just the one model the file
+            // happens to name.
+            ProviderConfig::OpenAiCompat {
+                base_url,
+                default_model,
+                ..
+            } => crate::commands::served(
+                base_url,
+                config.api_key(&name).ok().flatten(),
+                default_model.as_deref(),
+            )
+            .await
+            .1
+            .into_iter()
+            .map(|model| model.name)
+            .collect(),
             // The models Ollama actually has installed, not a guess.
             ProviderConfig::Ollama {
                 base_url,
                 keep_alive,
-            } => crate::commands::installed(&base_url, keep_alive)
+            } => crate::commands::installed(base_url, keep_alive.clone())
                 .await
                 .1
                 .into_iter()

@@ -1,10 +1,13 @@
-import type { ProviderDraft, ProviderEntry } from "./api";
+import type { CatalogItem, ProviderDraft, ProviderEntry } from "./api";
 import { el } from "./dom";
 import { dropdown } from "./dropdown";
 import {
   cancelProviderEdit,
   chooseDefaultProvider,
+  connectProvider,
   deleteProvider,
+  openKeysPage,
+  pickCatalogProvider,
   saveProvider,
   startProviderEdit,
   state,
@@ -40,10 +43,12 @@ export function renderProviders(): HTMLElement {
       view.append(row(entry));
     }
   }
+  // The custom form and the connect panel edit the same file; only one of them
+  // is on screen at a time.
   if (editing !== null && editing.name === null && formBox !== null) {
     view.append(formBox);
   } else {
-    view.append(addLink());
+    view.append(connectPanel(entries), customLink());
   }
   view.append(
     el(
@@ -105,8 +110,180 @@ function key(entry: ProviderEntry): HTMLElement {
   return el("span", "prov-key dim", "no key");
 }
 
-function addLink(): HTMLElement {
-  const link = el("button", "prov-add", "+ add provider");
+// ── connect ───────────────────────────────────────────────────────────────
+//
+// One field. The endpoint and the model list are already known for everything
+// in the catalog, so a key is the whole of what a person has that Odyn does
+// not. Built once and refilled in place: a redraw between the paste and the
+// click must not take the key with it.
+
+const panel = el("div", "conn");
+const keyField = el("input", "conn-key");
+const aim = el("div", "conn-aim");
+const tiles = el("div", "conn-tiles");
+const go = el("button", "conn-go");
+const keysLink = el("button", "conn-keys", "get a key ↗");
+const defaultBox = el("input");
+const defaultLabel = el("label", "conn-default");
+const notice = el("div", "conn-notice");
+
+keyField.type = "password";
+keyField.placeholder = "paste an api key";
+keyField.setAttribute("aria-label", "api key");
+keyField.autocomplete = "off";
+keyField.spellcheck = false;
+defaultBox.type = "checkbox";
+defaultLabel.append(defaultBox, el("span", "conn-default-text", "use by default"));
+
+// A key that names its own provider aims the panel as it is typed; one that
+// names nobody leaves whatever tile was picked alone.
+keyField.addEventListener("input", () => {
+  const found = detect(keyField.value);
+  if (found !== null) pickCatalogProvider(found.id);
+  fill();
+});
+keyField.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  submit();
+});
+go.addEventListener("click", submit);
+keysLink.addEventListener("click", () => {
+  const chosen = picked();
+  if (chosen !== null) void openKeysPage(chosen.id);
+});
+
+{
+  const foot = el("div", "conn-foot");
+  foot.append(go, keysLink, defaultLabel);
+  panel.append(
+    el("div", "conn-head", "connect a provider"),
+    keyField,
+    aim,
+    tiles,
+    foot,
+    notice,
+  );
+}
+
+// Whether the box below is the user's answer or ours, so a redraw never
+// re-ticks what they just cleared.
+let defaultTouched = false;
+defaultBox.addEventListener("change", () => (defaultTouched = true));
+
+function connectPanel(entries: ProviderEntry[]): HTMLElement {
+  // Nothing but a local Ollama yet: the first key is also the one that should
+  // answer by default, so the box starts ticked and the choice stays visible.
+  const first = entries.every((entry) => entry.kind === "ollama");
+  if (first && !defaultTouched) defaultBox.checked = true;
+  fill();
+  return panel;
+}
+
+function picked(): CatalogItem | null {
+  const catalog = state.providers.catalog;
+  if (catalog === null) return null;
+  return catalog.find((item) => item.id === state.providers.pick) ?? null;
+}
+
+/// The provider a pasted key belongs to, by the longest prefix that matches.
+/// A shape half the industry issues belongs to nobody: guessing wrong costs
+/// more than the click it saves.
+function detect(text: string): CatalogItem | null {
+  const value = text.trim();
+  if (value === "") return null;
+  let best: CatalogItem | null = null;
+  let longest = 0;
+  for (const item of state.providers.catalog ?? []) {
+    for (const prefix of item.key_prefixes) {
+      if (value.startsWith(prefix) && prefix.length > longest) {
+        longest = prefix.length;
+        best = item;
+      }
+    }
+  }
+  return best;
+}
+
+function fill(): void {
+  const catalog = state.providers.catalog;
+  const chosen = picked();
+  const connecting = state.providers.connecting;
+
+  tiles.replaceChildren(...(catalog ?? []).map((item) => tile(item, chosen)));
+
+  const typed = keyField.value.trim() !== "";
+  if (chosen === null) {
+    aim.textContent = typed
+      ? "that key is not one Odyn recognises — pick where it is from"
+      : "paste a key, or pick a provider";
+    aim.className = "conn-aim";
+  } else {
+    aim.textContent = `${chosen.label} · ${chosen.base_url}`;
+    aim.className = "conn-aim on";
+  }
+
+  go.textContent = connecting
+    ? "connecting…"
+    : chosen === null
+      ? "connect"
+      : `connect ${chosen.id}`;
+  go.disabled = connecting || chosen === null || (chosen.needs_key && !typed);
+  keysLink.hidden = chosen === null || !chosen.needs_key;
+  keyField.disabled = connecting;
+  keyField.placeholder =
+    chosen !== null && !chosen.needs_key ? "no key needed" : "paste an api key";
+
+  const said = state.providers.connected;
+  notice.textContent = said ?? "";
+  notice.hidden = said === null;
+}
+
+function tile(item: CatalogItem, chosen: CatalogItem | null): HTMLElement {
+  const button = el("button", "conn-tile", item.label);
+  if (item.id === chosen?.id) button.classList.add("on");
+  // Already in the file: connecting again is how a rotated key gets in, so the
+  // tile stays live and only says what it already is.
+  if (item.configured) button.append(el("span", "conn-have", "●"));
+  if (!item.needs_key) button.append(el("span", "conn-local", "local"));
+  button.disabled = state.providers.connecting;
+  button.addEventListener("click", () => {
+    // A local endpoint has nothing left to ask for.
+    if (!item.needs_key) {
+      run(item, "");
+      return;
+    }
+    pickCatalogProvider(item.id);
+    keyField.focus();
+  });
+  return button;
+}
+
+function submit(): void {
+  const chosen = picked();
+  if (chosen === null) return;
+  const value = keyField.value.trim();
+  if (chosen.needs_key && value === "") return;
+  run(chosen, value);
+}
+
+function run(item: CatalogItem, apiKey: string): void {
+  if (state.providers.connecting) return;
+  void connectProvider(item.id, apiKey, defaultBox.checked).then(() => {
+    // The field empties only once the key it held has reached the config file:
+    // a key the endpoint refused stays where it is, to be fixed rather than
+    // found and pasted a second time, and a local endpoint that wanted no key
+    // has no business clearing one meant for somewhere else.
+    if (state.providers.connected === null) return;
+    if (apiKey !== "") keyField.value = "";
+    defaultBox.checked = false;
+    defaultTouched = false;
+    fill();
+  });
+}
+
+function customLink(): HTMLElement {
+  const link = el("button", "prov-add", "+ custom endpoint");
   link.addEventListener("click", () => startProviderEdit(null));
   return link;
 }

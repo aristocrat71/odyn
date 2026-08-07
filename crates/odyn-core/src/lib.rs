@@ -2,6 +2,7 @@
 
 pub mod brain;
 pub mod brevity;
+pub mod catalog;
 pub mod chat;
 pub mod config;
 pub mod config_edit;

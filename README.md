@@ -83,9 +83,10 @@ bun run build
 
 `odyn.toml` is written from a built-in template the first time it is read, then
 parsed as the running configuration — the file and the process can never
-disagree. Unknown keys are rejected by name. API keys are never stored in the
-file: `api_key_env` names an environment variable, read only when that provider
-is actually used.
+disagree. Unknown keys are rejected by name. A key you paste into the providers
+view is stored as `api_key`; to keep keys out of the file entirely, use
+`api_key_env` instead, which names an environment variable read only when that
+provider is actually used.
 
 Edit it by hand, or through `odyn config get` / `odyn config set`, which
 preserve comments and formatting and validate the whole file before writing.
@@ -106,8 +107,25 @@ Any number of entries. `kind` selects the shape; the name is yours and is what
 | `kind` | both | — | `"ollama"` or `"openai_compat"`. Required. |
 | `base_url` | both | `"http://localhost:11434"` for `ollama`, required for `openai_compat` | Endpoint root. Must not be empty. |
 | `keep_alive` | `ollama` | unset | How long Ollama keeps the model in RAM, e.g. `"5m"`. `"0"` unloads it immediately. |
-| `api_key_env` | `openai_compat` | unset | Name of the environment variable holding the key. Omit for keyless endpoints; no auth header is sent then. Must look like an environment variable name. |
+| `api_key` | `openai_compat` | unset | The key itself, which is what the providers view writes. Wins over `api_key_env`. |
+| `api_key_env` | `openai_compat` | unset | Name of the environment variable holding the key instead. Omit both for keyless endpoints; no auth header is sent then. Must look like an environment variable name. |
 | `default_model` | `openai_compat` | unset | Model new sessions start on. Without it, `--model` (or `/model`) is required. |
+
+#### Connecting one
+
+The providers view knows the endpoint and the model list for a handful of
+open-weight providers — OpenRouter, Groq, Cerebras, DeepSeek, Together,
+Mistral, OpenCode Zen and a local Ollama — so a key is the whole of what it
+asks for. Paste one and a shape only one provider issues (`sk-or-`, `gsk_`,
+`csk-`) names its own; anything else is one click on a tile. Connecting asks
+the endpoint what it serves, starts you on a sensible model, and writes
+`[providers.<name>]` under the catalog's own name, so `--provider openrouter`
+works from the CLI straight away.
+
+A key the endpoint rejects is the one refusal — nothing is written. An endpoint
+that is merely unreachable still connects, since being offline now says nothing
+about whether the key is good. `+ custom endpoint` writes the same table by
+hand for anything the catalog has never heard of.
 
 ### `[memory]`
 
@@ -232,7 +250,7 @@ checkout.
 | `ODYN_CONFIG` | Full path to the config file, replacing the default location. |
 | `ODYN_DB` | Full path to the database file, replacing the default location. |
 | `ODYN_SPOTLIGHT_FALLBACK` | `1` forces the spotlight fallback window on any platform. |
-| `<api_key_env>` | Whatever variable a provider's `api_key_env` names. Read only when that provider is built. |
+| `<api_key_env>` | Whatever variable a provider's `api_key_env` names. Read only when that provider is built, and only when it has no `api_key`. |
 
 ## Cross-platform notes
 

@@ -10,6 +10,7 @@ use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, 
 use odyn_core::config::{MemoryConfig, ProviderConfig};
 use odyn_core::embed::load_default_embedder;
 use odyn_core::providers::ollama::OllamaProvider;
+use odyn_core::providers::openai_compat::OpenAiCompatProvider;
 use odyn_core::providers::{ollama, openai_compat};
 use odyn_core::storage::{Conversation as StoredConversation, MemoryTier, StorageError};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -429,16 +430,10 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
             base_url,
             default_model,
             ..
-        } => (
-            openai_compat::ping(base_url).await,
-            default_model
-                .iter()
-                .map(|model| Model {
-                    name: model.clone(),
-                    size_bytes: None,
-                })
-                .collect(),
-        ),
+        } => {
+            let key = provider.api_key(&name).ok().flatten();
+            served(base_url, key, default_model.as_deref()).await
+        }
         ProviderConfig::Ollama {
             base_url,
             keep_alive,
@@ -449,6 +444,44 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
         kind: provider.kind(),
         reachable,
         models,
+    }
+}
+
+/// What an OpenAI-compatible endpoint offers, from its own `/models`. The
+/// listing doubles as the reachability answer — an endpoint that refuses the
+/// key still answered, so it counts as up — and `default_model` leads the list
+/// whether or not the endpoint names it, so the model a conversation is on is
+/// never missing from the menu it is chosen in.
+pub(crate) async fn served(
+    base_url: &str,
+    api_key: Option<String>,
+    default_model: Option<&str>,
+) -> (bool, Vec<Model>) {
+    let named = |names: Vec<String>| -> Vec<Model> {
+        default_model
+            .map(str::to_string)
+            .into_iter()
+            .chain(
+                names
+                    .into_iter()
+                    .filter(|name| Some(name.as_str()) != default_model),
+            )
+            .map(|name| Model {
+                name,
+                size_bytes: None,
+            })
+            .collect()
+    };
+    let Ok(provider) = OpenAiCompatProvider::new(base_url, api_key, Vec::new()) else {
+        return (false, named(Vec::new()));
+    };
+    match provider.list_models().await {
+        Ok(models) => (true, named(models)),
+        // The endpoint answered, just not with a listing: no `/models` route,
+        // or a key it would not accept for one. Both are still reachable, and
+        // `ping` would have said so at the cost of a second request.
+        Err(ChatError::Api { .. }) => (true, named(Vec::new())),
+        Err(_) => (false, named(Vec::new())),
     }
 }
 

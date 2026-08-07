@@ -60,6 +60,13 @@ export const state = {
     entries: null as api.ProviderEntry[] | null,
     // `{ name: null }` is the add form; a string names the row being edited.
     editing: null as { name: string | null } | null,
+    catalog: null as api.CatalogItem[] | null,
+    // The catalog entry the connect panel is aimed at. A recognised key aims
+    // it on its own; a tile is how the rest get aimed.
+    pick: null as string | null,
+    connecting: false,
+    // What the last connection came to, shown until the next one starts.
+    connected: null as string | null,
   },
   error: "",
 };
@@ -438,8 +445,53 @@ export const loadConfig = (): Promise<void> =>
 
 export const loadProvidersConfig = (): Promise<void> =>
   guard(async () => {
+    // What the last visit connected is not news on this one.
+    state.providers.connected = null;
     state.providers.entries = await api.providersConfig();
+    state.providers.catalog = await api.providerCatalog();
   });
+
+// Which endpoint the key in the panel is for. Aiming is not connecting: the
+// key stays where it is, and nothing is written until connect is asked for.
+export function pickCatalogProvider(id: string | null): void {
+  if (state.providers.pick === id) return;
+  state.providers.pick = id;
+  render();
+}
+
+/// One paste, one write: the endpoint is asked what it serves, the answer
+/// picks the starting model, and the table lands in `odyn.toml`.
+export const connectProvider = (
+  id: string,
+  apiKey: string,
+  makeDefault: boolean,
+): Promise<void> =>
+  guard(async () => {
+    state.providers.connecting = true;
+    state.providers.connected = null;
+    render();
+    try {
+      const result = await api.providerConnect(id, apiKey, makeDefault);
+      state.providers.entries = result.providers;
+      state.providers.catalog = await api.providerCatalog();
+      state.providers.pick = null;
+      state.providers.connected = summarise(result);
+    } finally {
+      state.providers.connecting = false;
+    }
+    void refreshStatus();
+  });
+
+function summarise(result: api.Connected): string {
+  const models =
+    result.models === 0 ? "" : ` · ${result.models} model${result.models === 1 ? "" : "s"}`;
+  const model = result.model === null ? "" : ` · starting on ${result.model}`;
+  const note = result.note === null ? "" : ` · ${result.note}`;
+  return `${result.name} connected${models}${model}${note}`;
+}
+
+export const openKeysPage = (id: string): Promise<void> =>
+  guard(() => api.openKeysPage(id));
 
 export function startProviderEdit(name: string | null): void {
   state.providers.editing = { name };
@@ -456,6 +508,7 @@ export function cancelProviderEdit(): void {
 export const saveProvider = (draft: api.ProviderDraft): Promise<void> =>
   guard(async () => {
     state.providers.entries = await api.providerSave(draft);
+    state.providers.catalog = await api.providerCatalog();
     state.providers.editing = null;
     void refreshStatus();
   });
@@ -463,6 +516,7 @@ export const saveProvider = (draft: api.ProviderDraft): Promise<void> =>
 export const deleteProvider = (name: string): Promise<void> =>
   guard(async () => {
     state.providers.entries = await api.providerRemove(name);
+    state.providers.catalog = await api.providerCatalog();
     void refreshStatus();
   });
 
