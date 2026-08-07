@@ -113,9 +113,9 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
             continue;
         }
 
-        let context = memory_context(Some(&storage), &session.brain, &history, &ask, brevity);
+        let context = memory_context(Some(&storage), &session.config, &history, &ask, brevity);
         if show_context {
-            print_context(context.as_ref(), &session.brain, false)?;
+            print_context(context.as_ref(), &session.config.brain, false)?;
         }
         history.push(Message::new(Role::User, ask.message.as_str()));
         let outgoing = with_context(context.as_ref(), &history);

@@ -154,12 +154,48 @@ brain v1 still parses and is ignored.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | data dir | Where the note files live. `~` expands; point it at an Obsidian vault if you like. |
+| `model` | `bge-small` | Which model embeds notes and questions — see below. Changing it re-embeds the whole folder. |
 | `top_k` | `6` | How many nearest notes seed the recall walk. Must be at least 1. |
 | `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
 | `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
 Token counts are a chars/4 approximation, in the config and in every ledger
 that reports them.
+
+#### The embedding model
+
+`model` names a backend and a model within it. The brain view's picker writes
+this key for you and re-indexes on the spot; the value is what it wrote.
+
+| Form | Backend | Example |
+| --- | --- | --- |
+| bare name | bundled fastembed — local, offline, no setup | `bge-small`, `nomic-v1.5`, `BGELargeENV15` |
+| `ollama:<model>` | the local Ollama daemon, over `/api/embed` | `ollama:nomic-embed-text` |
+| `<provider>:<model>` | a configured OpenAI-compatible endpoint | `zen:some-embed-model` |
+
+Bundled models accept a short alias where one reads better (`bge-small`,
+`bge-base`, `nomic-v1.5`, `e5-base`, `jina-code`, …) and otherwise any name
+fastembed itself knows, so the whole catalog is reachable — the aliases are a
+convenience, not the list of what is allowed. Ollama's picker entries are read
+live from the daemon and filtered to models it tags `embedding`.
+
+**A `<provider>:` model sends every note's text to that provider.** The other
+two backends run on your machine and work offline; this one does not, and
+recall stops working without a network. The picker marks it, and so does the
+brain view's header while such a model is active.
+
+Changing the model **re-embeds every note**, because vectors from two models
+are not comparable — not even at equal width. The vector table is rebuilt at
+the new model's dimension, which is read from fastembed's catalog for bundled
+models and measured by embedding one short string for the others. Memory rows
+survive, so ids, hit counts and recall history are kept; only the vectors are
+rebuilt. An index whose model no longer matches the config is rebuilt on the
+next recall, whether the key was changed from the UI, the CLI or the file.
+
+Odyn asks every model for an 8192-token input window and each one clamps that
+to its own maximum, so a long-context model actually reads long notes while a
+512-token model still stops at 512. Text past a model's window is truncated
+before embedding and cannot influence whether that note is recalled.
 
 ### `[style]`
 

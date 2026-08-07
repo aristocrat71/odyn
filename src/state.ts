@@ -71,6 +71,10 @@ export const state = {
     // The slug being edited in place; "new" is the add-note row.
     editing: null as string | null,
     graph: null as api.Graph | null,
+    // Everything selectable, loaded when the brain view opens.
+    models: null as api.EmbedOption[] | null,
+    // Set while a swap re-embeds the folder — it can take a while.
+    swapping: false,
   },
   config: {
     file: null as api.ConfigFile | null,
@@ -381,6 +385,31 @@ export const loadBrain = (): Promise<void> =>
     state.brain.overview = await api.brainOverview();
     state.brain.memories = await api.brainMemories(state.brain.sort, 0);
     state.brain.exhausted = state.brain.memories.length < BRAIN_PAGE;
+    // The catalog probes Ollama and every configured endpoint, so it lands
+    // after the list rather than holding it up.
+    void loadEmbedModels();
+  });
+
+const loadEmbedModels = (): Promise<void> =>
+  guard(async () => {
+    state.brain.models = await api.embedCatalog();
+  });
+
+/// Swapping the model re-embeds every note, so the view says so while it
+/// runs rather than looking hung.
+export const chooseEmbedModel = (model: string): Promise<void> =>
+  guard(async () => {
+    if (model === state.brain.overview?.model) return;
+    state.brain.swapping = true;
+    render();
+    try {
+      state.brain.overview = await api.brainSetModel(model);
+      state.brain.memories = await api.brainMemories(state.brain.sort, 0);
+      state.brain.graph = null;
+      if (state.brain.mode === "graph") await loadBrainGraph();
+    } finally {
+      state.brain.swapping = false;
+    }
   });
 
 export async function loadMoreMemories(): Promise<void> {

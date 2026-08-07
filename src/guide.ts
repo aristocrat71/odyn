@@ -119,6 +119,7 @@ keep_alive = "5m"
 
 [brain]
 # path = "~/odyn-brain"
+model = "bge-small"
 top_k = 6
 cap_tokens = 1200
 similarity_edge_threshold = 0.78
@@ -395,13 +396,47 @@ odyn chat`),
           "invalidated on every sync or recall. It is deterministic — the same brain " +
           "always draws the same map.",
       ),
-      sub("the model download"),
+      sub("the embedding model"),
       p(
-        "Embedding uses bge-small-en-v1.5, 384 dimensions, about " +
-          "100MB, fetched into `<data dir>/models/` the first time an embedding is actually " +
-          "needed, with a progress line. It is loaded, used and dropped again, so the " +
-          "weights never sit resident. An empty brain never loads the embedder, and a " +
-          "`/brain` mention on one never downloads anything.",
+        "`[brain] model` decides what turns notes and questions into vectors. " +
+          "The picker in the brain view's header writes it and re-indexes on the spot; " +
+          "the same value works from `odyn config set brain.model`. Three backends:",
+      ),
+      rows([
+        [
+          "a bare name",
+          "bundled fastembed — local, offline, no setup. Short aliases like `bge-small`, `nomic-v1.5` and `jina-code` where they read better, and otherwise any name fastembed knows: the whole catalog is reachable, the aliases are only a convenience.",
+        ],
+        [
+          "ollama:<model>",
+          "the local Ollama daemon over `/api/embed`. Also local and offline, and nothing has to be loaded into Odyn's own process. The picker lists what your daemon has that it tags `embedding`.",
+        ],
+        [
+          "<provider>:<model>",
+          "a configured OpenAI-compatible endpoint. **This one sends every note's text to that provider**, and recall stops working offline. The picker marks it, and the brain header keeps saying so while it is active.",
+        ],
+      ]),
+      p(
+        "Changing the model re-embeds every note — vectors from two models are not " +
+          "comparable, not even at equal width. The vector table is rebuilt at the new " +
+          "model's dimension, read from fastembed's catalog for a bundled model and " +
+          "measured by embedding one short string for the others. Notes are files, so " +
+          "nothing is at risk: rows keep their ids, hit counts and recall history, and " +
+          "only the vectors are rebuilt. An index whose model no longer matches the " +
+          "config rebuilds itself on the next recall, however the key was changed.",
+      ),
+      p(
+        "Odyn asks every model for an 8192-token window and each clamps that to its own " +
+          "maximum, so a long-context model really does read long notes while a " +
+          "512-token one still stops at 512. Text past the window is truncated before " +
+          "embedding and cannot affect whether that note is recalled.",
+      ),
+      p(
+        "A bundled model is fetched into `<data dir>/models/` the first time an " +
+          "embedding is actually needed, with a progress line — bge-small is about " +
+          "100MB. It is loaded, used and dropped again, so the weights never sit " +
+          "resident. An empty brain never loads an embedder, and a `/brain` mention on " +
+          "one never downloads anything.",
       ),
     ],
   },
@@ -541,6 +576,7 @@ memories 13/1200 tk
       ),
       list([
         "Outbound traffic goes to the providers you configured, and nowhere else — plus one download of the embedding model, once, the first time an embedding is needed.",
+        "Your notes are embedded on this machine by default, whether by the bundled model or by Ollama. The one exception is a `<provider>:` embedding model, which sends every note's full text to that endpoint — the brain view says so whenever one is active, and it is never the default.",
         "A key you paste is written to `odyn.toml` as `api_key`, and nowhere else — never to a log, and never over the wire except to the provider it belongs to. `api_key_env` keeps it out of the file entirely by naming an environment variable instead; either is read only when that provider is actually built.",
         "Memories are the files in the brain folder; `odyn.db` holds conversations, the recall records, and an index derived from those files. Deleting a note's file deletes the memory; deleting a conversation takes its messages with it.",
         "Spotlight asks are never stored unless you promote them; dismissing drops the exchange.",

@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 use rusqlite::{params, Row};
 
 use super::{now_secs, Storage, StorageError};
-use crate::embed::EMBEDDING_DIM;
 use crate::notes::NoteFile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,13 +74,75 @@ pub struct NotePlan {
 }
 
 impl Storage {
+    /// Whether the index was built by something other than `model`, and so
+    /// has to be rebuilt before it can be trusted. Cheap: one row read.
+    pub fn index_matches(&self, model: &str) -> Result<bool, StorageError> {
+        Ok(self.active_model()?.as_deref() == Some(model))
+    }
+
+    /// Points the index at `model`, whose vectors are `dim` wide, dropping
+    /// every vector the previous model produced: vectors from two models are
+    /// incomparable, so the old ones go whole rather than being mixed with the
+    /// new. Memory rows survive — and with them every id, hit count and
+    /// injection record — so a model swap costs re-embedding, never history.
+    pub fn rebuild_index(&self, model: &str, dim: usize) -> Result<(), StorageError> {
+        if dim == 0 {
+            return Err(StorageError::EmbeddingDimensions {
+                expected: 1,
+                got: 0,
+            });
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(&format!(
+            "DROP TABLE IF EXISTS memories_vec;
+             CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[{dim}]);"
+        ))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO brain_meta (id, model, dim) VALUES (1, ?1, ?2)",
+            params![model, dim as i64],
+        )?;
+        // Similarity edges are the old model's opinion; they go with it.
+        invalidate_graph(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The model the index was built with, if it has ever been recorded.
+    pub fn active_model(&self) -> Result<Option<String>, StorageError> {
+        let found = self
+            .conn
+            .query_row("SELECT model FROM brain_meta WHERE id = 1", [], |row| {
+                row.get(0)
+            });
+        match found {
+            Ok(model) => Ok(Some(model)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(other) => Err(StorageError::Sqlite(other)),
+        }
+    }
+
+    /// The width the vector table was created at; 0 before anything is built.
+    pub fn index_dim(&self) -> Result<usize, StorageError> {
+        let found = self
+            .conn
+            .query_row("SELECT dim FROM brain_meta WHERE id = 1", [], |row| {
+                row.get::<_, i64>(0)
+            });
+        match found {
+            Ok(dim) => Ok(dim as usize),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(other) => Err(StorageError::Sqlite(other)),
+        }
+    }
+
     /// Compares the folder against the index. Read-only, so callers can embed
     /// the stale notes without holding whatever lock guards this storage.
     pub fn note_sync_plan(&self, notes: &[NoteFile]) -> Result<NotePlan, StorageError> {
         let indexed = self.indexed_hashes()?;
+        let vectored = self.vec_rowids()?;
         let stale: Vec<String> = notes
             .iter()
-            .filter(|note| indexed.get(&note.slug).map(|(_, hash)| *hash) != Some(note.hash))
+            .filter(|note| is_stale(&indexed, &vectored, note))
             .map(|note| note.slug.clone())
             .collect();
         let kept: HashSet<&str> = notes.iter().map(|note| note.slug.as_str()).collect();
@@ -102,14 +163,16 @@ impl Storage {
         notes: &[NoteFile],
         embeddings: &[(String, Vec<f32>)],
     ) -> Result<bool, StorageError> {
+        let dim = self.index_dim()?;
         for (_, embedding) in embeddings {
-            check_dimensions(embedding)?;
+            check_dimensions(embedding, dim)?;
         }
         let vectors: HashMap<&str, &[f32]> = embeddings
             .iter()
             .map(|(slug, embedding)| (slug.as_str(), embedding.as_slice()))
             .collect();
         let indexed = self.indexed_hashes()?;
+        let vectored = self.vec_rowids()?;
         let now = now_secs();
         let mut changed = false;
         let tx = self.conn.unchecked_transaction()?;
@@ -125,8 +188,13 @@ impl Storage {
         }
 
         for note in notes {
+            // The same staleness rule the plan used, so a note whose vector
+            // went missing — a model swap dropped the table — is rebuilt even
+            // though its content never changed.
+            if !is_stale(&indexed, &vectored, note) {
+                continue;
+            }
             let id = match indexed.get(&note.slug) {
-                Some((_, hash)) if *hash == note.hash => continue,
                 Some((id, _)) => {
                     tx.execute(
                         "UPDATE memories
@@ -176,6 +244,18 @@ impl Storage {
             Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?)))
         })?;
         Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+    }
+
+    /// Which memories currently have a vector. A memory row without one is a
+    /// memory retrieval cannot see, so this is what makes the index
+    /// self-healing rather than quietly incomplete.
+    fn vec_rowids(&self) -> Result<HashSet<i64>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id FROM memories AS m WHERE EXISTS (
+                         SELECT 1 FROM memories_vec AS v WHERE v.rowid = m.id)",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        Ok(rows.collect::<Result<HashSet<_>, _>>()?)
     }
 
     pub fn list_memories(&self) -> Result<Vec<Memory>, StorageError> {
@@ -301,7 +381,7 @@ impl Storage {
 
     /// Nearest memories, closest first, with their L2 distances.
     pub fn knn(&self, embedding: &[f32], k: usize) -> Result<Vec<(Memory, f64)>, StorageError> {
-        check_dimensions(embedding)?;
+        check_dimensions(embedding, self.index_dim()?)?;
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -395,10 +475,23 @@ fn invalidate_graph(conn: &rusqlite::Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn check_dimensions(embedding: &[f32]) -> Result<(), StorageError> {
-    if embedding.len() != EMBEDDING_DIM {
+/// A note is stale when its content moved, or when it has no vector at all —
+/// which is how a model swap re-embeds a folder whose files never changed.
+fn is_stale(
+    indexed: &HashMap<String, (i64, i64)>,
+    vectored: &HashSet<i64>,
+    note: &NoteFile,
+) -> bool {
+    match indexed.get(&note.slug) {
+        None => true,
+        Some((id, hash)) => *hash != note.hash || !vectored.contains(id),
+    }
+}
+
+fn check_dimensions(embedding: &[f32], expected: usize) -> Result<(), StorageError> {
+    if embedding.len() != expected {
         return Err(StorageError::EmbeddingDimensions {
-            expected: EMBEDDING_DIM,
+            expected,
             got: embedding.len(),
         });
     }
@@ -460,10 +553,16 @@ pub(crate) mod tests {
         }
     }
 
-    /// A 384-dim unit vector along `axis`, optionally leaning towards the next
-    /// axis — leaning further means farther from the pure axis vector.
+    /// A unit vector along `axis` at the default model's width, optionally
+    /// leaning towards the next axis — leaning further means farther from the
+    /// pure axis vector.
     pub(crate) fn vector(axis: usize, lean: f32) -> Vec<f32> {
-        let mut values = vec![0.0f32; EMBEDDING_DIM];
+        wide_vector(axis, lean, crate::embed::FAKE_DIM)
+    }
+
+    /// The same, at an arbitrary width — for the model-swap tests.
+    pub(crate) fn wide_vector(axis: usize, lean: f32, dim: usize) -> Vec<f32> {
+        let mut values = vec![0.0f32; dim];
         values[axis] = 1.0 - lean;
         values[axis + 1] = lean;
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
@@ -587,8 +686,107 @@ pub(crate) mod tests {
                 &[("alpha".to_string(), vec![1.0, 2.0])]
             ),
             Err(StorageError::EmbeddingDimensions { expected, got })
-                if expected == EMBEDDING_DIM && got == 2
+                if expected == crate::embed::FAKE_DIM && got == 2
         ));
+    }
+
+    /// The model swap: the vector table is rebuilt at the new width, every
+    /// note comes back stale even though no file changed, and the rows —
+    /// with their ids, hit counts and injection records — survive it.
+    #[test]
+    fn changing_the_model_rebuilds_the_index_but_keeps_history() {
+        let (_dir, storage) = open("swap");
+        let notes = vec![note("alpha", "one"), note("beta", "two")];
+        sync_spread(&storage, &notes);
+        let alpha = storage.list_memories().expect("list")[0].clone();
+
+        let conversation = storage
+            .create_conversation("c", "ollama", "llama3.2:3b")
+            .expect("create");
+        let message = storage
+            .append_message(conversation.id, crate::chat::Role::User, "q", None, None)
+            .expect("message");
+        storage
+            .record_injections(conversation.id, Some(message.id), &[alpha.id])
+            .expect("inject");
+        assert_eq!(
+            storage.active_model().expect("model").as_deref(),
+            Some("bge-small")
+        );
+        assert!(storage.index_matches("bge-small").expect("matches"));
+
+        // A wider model: the table is rebuilt, so nothing has a vector left.
+        const WIDE_DIM: usize = 768;
+        assert!(!storage.index_matches("bge-base").expect("differs"));
+        storage.rebuild_index("bge-base", WIDE_DIM).expect("swap");
+        assert_eq!(
+            storage.active_model().expect("model").as_deref(),
+            Some("bge-base")
+        );
+        assert!(storage.index_matches("bge-base").expect("settled"));
+
+        let plan = storage.note_sync_plan(&notes).expect("plan");
+        assert_eq!(
+            plan.stale,
+            vec!["alpha".to_string(), "beta".to_string()],
+            "every note re-embeds, though no file changed"
+        );
+
+        // The old width is now rejected, the new one accepted.
+        assert!(matches!(
+            storage.sync_notes(&notes, &[("alpha".to_string(), vector(0, 0.0))]),
+            Err(StorageError::EmbeddingDimensions { expected, got })
+                if expected == WIDE_DIM && got == crate::embed::FAKE_DIM
+        ));
+        let embeddings = vec![
+            ("alpha".to_string(), wide_vector(0, 0.0, WIDE_DIM)),
+            ("beta".to_string(), wide_vector(10, 0.0, WIDE_DIM)),
+        ];
+        assert!(storage.sync_notes(&notes, &embeddings).expect("re-embed"));
+
+        let relisted = storage.list_memories().expect("relist");
+        assert_eq!(relisted[0].id, alpha.id, "ids survive the swap");
+        assert_eq!(relisted[0].created_at, alpha.created_at);
+        assert_eq!(
+            storage.stats_for(vec![relisted[0].clone()]).expect("stats")[0].hits,
+            1,
+            "hit history survives the swap"
+        );
+        let found = storage
+            .knn(&wide_vector(0, 0.0, WIDE_DIM), 1)
+            .expect("knn at the new width");
+        assert_eq!(found[0].0.id, alpha.id);
+        assert!(storage
+            .note_sync_plan(&notes)
+            .expect("settled")
+            .stale
+            .is_empty());
+    }
+
+    /// A vector lost without a content change is repaired by the next sync:
+    /// the index cannot be quietly missing a memory retrieval should see.
+    #[test]
+    fn a_memory_without_a_vector_is_stale_even_when_its_content_is_unchanged() {
+        let (_dir, storage) = open("orphan");
+        let notes = vec![note("alpha", "one")];
+        sync_spread(&storage, &notes);
+        assert!(storage
+            .note_sync_plan(&notes)
+            .expect("plan")
+            .stale
+            .is_empty());
+
+        let id = storage.list_memories().expect("list")[0].id;
+        storage
+            .conn
+            .execute("DELETE FROM memories_vec WHERE rowid = ?1", params![id])
+            .expect("drop the vector");
+
+        let plan = storage.note_sync_plan(&notes).expect("plan");
+        assert_eq!(plan.stale, vec!["alpha".to_string()]);
+        assert!(plan.changed);
+        sync_spread(&storage, &notes);
+        assert_eq!(vec_rows(&storage), 1, "the sync put it back");
     }
 
     #[test]

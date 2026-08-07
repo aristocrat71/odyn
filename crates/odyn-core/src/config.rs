@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::brevity::Brevity;
 use crate::chat::ChatProvider;
+use crate::embed::EmbedModel;
 use crate::providers::ollama::OllamaProvider;
 use crate::providers::openai_compat::{OpenAiCompatProvider, ProviderInitError};
 
@@ -48,6 +49,7 @@ keep_alive = "5m"  # how long a model stays in RAM; "0" unloads it immediately
 
 [brain]
 # path = "~/odyn-brain"  # the folder of .md notes; default: the platform data dir
+model = "bge-small"      # embedding model; changing it re-embeds every note
 top_k = 6                # recall walk seeds per /brain mention
 cap_tokens = 1200        # token budget for one recall
 similarity_edge_threshold = 0.78
@@ -145,6 +147,13 @@ pub enum ProviderConfig {
 pub struct BrainConfig {
     /// Where the note files live; `None` is the platform data dir.
     pub path: Option<PathBuf>,
+    /// Which model embeds notes and questions: a bare name is bundled
+    /// (fastembed), `ollama:<model>` is the local daemon, `<provider>:<model>`
+    /// an OpenAI-compatible endpoint. Changing it re-embeds the whole folder —
+    /// vectors from two models cannot be compared. Never rejected at parse
+    /// time: a name that resolves to nothing breaks the brain when it is used,
+    /// not the whole config on load.
+    pub model: EmbedModel,
     /// How many walk seeds a recall starts from.
     pub top_k: u32,
     /// The token budget one recall may inject.
@@ -172,6 +181,7 @@ impl Default for BrainConfig {
     fn default() -> Self {
         Self {
             path: None,
+            model: EmbedModel::default(),
             top_k: 6,
             cap_tokens: 1200,
             similarity_edge_threshold: 0.78,
@@ -566,11 +576,39 @@ kind = "ollama"
         assert_eq!(config.brain.similarity_edge_threshold, 0.78);
         assert_eq!(config.spotlight, SpotlightConfig::default());
 
+        assert_eq!(config.brain.model, EmbedModel::default());
+
         let partial = format!("{MINIMAL}[brain]\ntop_k = 3\npath = \"~/notes\"\n");
         let config = Config::parse(&partial).expect("parse partial brain section");
         assert_eq!(config.brain.top_k, 3);
         assert_eq!(config.brain.path, Some(PathBuf::from("~/notes")));
         assert_eq!(config.brain.cap_tokens, 1200);
+        assert_eq!(config.brain.model, EmbedModel::default());
+    }
+
+    #[test]
+    fn the_embedding_model_names_its_backend() {
+        let builtin = Config::parse(&format!("{MINIMAL}[brain]\nmodel = \"nomic-v1.5\"\n"))
+            .expect("parse a bundled model");
+        assert_eq!(builtin.brain.model.known_dim(), Some(768));
+        assert!(!builtin.brain.model.is_remote());
+
+        let ollama = Config::parse(&format!(
+            "{MINIMAL}[brain]\nmodel = \"ollama:nomic-embed-text\"\n"
+        ))
+        .expect("parse an ollama model");
+        assert_eq!(ollama.brain.model.canonical(), "ollama:nomic-embed-text");
+        assert!(!ollama.brain.model.is_remote(), "the daemon is local");
+
+        let remote = Config::parse(&format!("{MINIMAL}[brain]\nmodel = \"zen:embed-1\"\n"))
+            .expect("parse a provider model");
+        assert!(remote.brain.model.is_remote());
+
+        // The issue-#8 lesson: a model name that resolves to nothing must not
+        // take the whole config — and with it chat — down on load.
+        let nonsense = Config::parse(&format!("{MINIMAL}[brain]\nmodel = \"gpt-9000\"\n"))
+            .expect("an unresolvable model still parses");
+        assert_eq!(nonsense.brain.model.known_dim(), None);
     }
 
     #[test]

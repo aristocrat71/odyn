@@ -8,7 +8,7 @@ use std::io::Write;
 
 use odyn_core::brain;
 use odyn_core::config::Config;
-use odyn_core::embed::load_default_embedder;
+use odyn_core::embed::load_embedder;
 use odyn_core::notes;
 use odyn_core::storage::{Memory, Storage};
 
@@ -75,7 +75,7 @@ pub fn run(action: Action) -> Result<(), Failure> {
             if count == 0 {
                 return Ok(());
             }
-            let embedding = embed_one(&query)?;
+            let embedding = embed_one(&config, &query)?;
             let neighbors = storage
                 .knn(&embedding, SEARCH_LIMIT)
                 .map_err(|err| Failure::run(format!("could not search memories: {err}")))?;
@@ -102,8 +102,10 @@ pub fn run(action: Action) -> Result<(), Failure> {
 /// Mirrors the folder into the index; the model loads only when a note is
 /// new or edited.
 fn sync(storage: &Storage, config: &Config) -> Result<(), Failure> {
-    brain::sync(storage, &config.brain, load_default_embedder)
-        .map_err(|err| Failure::run(format!("could not sync the brain folder: {err}")))?;
+    brain::sync(storage, &config.brain, || {
+        load_embedder(config, &config.brain.model)
+    })
+    .map_err(|err| Failure::run(format!("could not sync the brain folder: {err}")))?;
     Ok(())
 }
 
@@ -117,8 +119,8 @@ fn find(storage: &Storage, slug: &str) -> Result<Memory, Failure> {
 }
 
 /// Loads the model, embeds one text, drops the model.
-fn embed_one(text: &str) -> Result<Vec<f32>, Failure> {
-    let mut embedder = load_default_embedder()
+fn embed_one(config: &Config, text: &str) -> Result<Vec<f32>, Failure> {
+    let mut embedder = load_embedder(config, &config.brain.model)
         .map_err(|err| Failure::run(format!("could not load the embedding model: {err}")))?;
     embedder
         .embed(&[text])

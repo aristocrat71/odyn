@@ -1,8 +1,10 @@
 import type { MemoryRow } from "./api";
 import { el } from "./dom";
+import { dropdown } from "./dropdown";
 import { renderGraph } from "./graph";
 import {
   cancelMemoryEdit,
+  chooseEmbedModel,
   commitMemoryEdit,
   loadMoreMemories,
   removeMemory,
@@ -47,16 +49,24 @@ export function renderBrain(): HTMLElement {
   return root;
 }
 
+// The model picker outlives redraws, like every other persistent control.
+const models = dropdown({
+  label: "model",
+  empty: "…",
+  onPick: (value) => void chooseEmbedModel(value),
+});
+
 function header(): HTMLElement {
   const row = el("div", "brain-header");
   const overview = state.brain.overview;
   const stats =
     overview === null
       ? ""
-      : `${overview.count} memories · ${overview.model} · ` +
-        `top-k ${overview.top_k} · cap ${overview.cap_tokens} tk`;
+      : `${overview.count} memories · top-k ${overview.top_k} · ` +
+        `cap ${overview.cap_tokens} tk`;
   const left = el("div", "brain-stats", stats);
   if (overview !== null) left.title = overview.path;
+  left.append(" ", modelPicker());
   row.append(left);
   const toggle = el("div", "brain-toggle");
   for (const mode of ["list", "graph"] as const) {
@@ -68,6 +78,40 @@ function header(): HTMLElement {
   }
   row.append(toggle);
   return row;
+}
+
+// Which model embeds this brain. Changing it re-embeds every note, so the
+// control says so while that runs, and a remote model is marked as one —
+// it is the only kind that sends note text off the machine.
+function modelPicker(): HTMLElement {
+  const wrap = el("span", "brain-model");
+  const overview = state.brain.overview;
+  if (state.brain.swapping) {
+    wrap.append(el("span", "brain-reindex", "re-embedding every note…"));
+    return wrap;
+  }
+  const options = state.brain.models;
+  const current = overview?.model ?? "";
+  models.set(
+    (options ?? []).map((option) => ({
+      value: option.id,
+      label: option.id,
+      hint:
+        (option.dim === null ? "" : `${option.dim}d · `) +
+        (option.remote ? `⚠ ${option.description}` : option.description),
+    })),
+    current,
+  );
+  models.setDisabled(options === null);
+  wrap.append(models.root);
+  if (overview !== null && overview.dim > 0) {
+    wrap.append(el("span", "brain-dim", `${overview.dim}d`));
+  }
+  if (overview?.model_remote === true) {
+    const warn = el("span", "brain-remote", "⚠ notes are sent to this provider");
+    wrap.append(warn);
+  }
+  return wrap;
 }
 
 // One flat pool: every memory is a markdown note in the brain folder,

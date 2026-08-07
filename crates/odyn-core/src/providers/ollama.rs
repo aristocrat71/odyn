@@ -46,6 +46,31 @@ pub struct OllamaProvider {
 pub struct ModelInfo {
     pub name: String,
     pub size_bytes: u64,
+    /// What Ollama says the model does — `embedding` for an embedder,
+    /// `completion` for a chat model. Empty on daemons too old to report it.
+    pub capabilities: Vec<String>,
+}
+
+impl ModelInfo {
+    /// Whether this model can embed, so the brain's picker offers only what
+    /// would actually work rather than every model installed.
+    pub fn embeds(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == "embedding")
+    }
+}
+
+/// The installed models that can embed. An unreachable daemon is an empty
+/// list, not an error: the picker still has its bundled models to offer.
+pub async fn embedding_models(base_url: &str) -> Vec<ModelInfo> {
+    let Ok(provider) = OllamaProvider::new(base_url, None) else {
+        return Vec::new();
+    };
+    let Ok(models) = provider.list_models().await else {
+        return Vec::new();
+    };
+    models.into_iter().filter(ModelInfo::embeds).collect()
 }
 
 impl OllamaProvider {
@@ -115,6 +140,7 @@ impl OllamaProvider {
             .map(|model| ModelInfo {
                 name: model.name,
                 size_bytes: model.size,
+                capabilities: model.capabilities,
             })
             .collect())
     }
@@ -214,6 +240,10 @@ struct TagsModel {
     name: String,
     #[serde(default)]
     size: u64,
+    /// Ollama tags each model with what it can do. Absent on older daemons,
+    /// which is why nothing keys off it being present.
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -825,13 +855,18 @@ mod tests {
                 ModelInfo {
                     name: "llama3.2:3b".to_string(),
                     size_bytes: 2_019_393_189,
+                    capabilities: Vec::new(),
                 },
                 ModelInfo {
                     name: "qwen2.5-coder:7b".to_string(),
                     size_bytes: 4_683_087_519,
+                    capabilities: Vec::new(),
                 },
             ]
         );
+        // A daemon too old to report capabilities offers no embedders, and
+        // that is a quiet empty list rather than a failure.
+        assert!(!models[0].embeds());
         let request = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("captured request");

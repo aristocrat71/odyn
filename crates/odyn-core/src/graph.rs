@@ -223,7 +223,7 @@ mod tests {
     use crate::storage::Storage;
 
     fn vector(axis: usize, lean: f32) -> Vec<f32> {
-        let mut values = vec![0.0f32; crate::embed::EMBEDDING_DIM];
+        let mut values = vec![0.0f32; crate::embed::FAKE_DIM];
         values[axis] = 1.0 - lean;
         values[axis + 1] = lean;
         let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();

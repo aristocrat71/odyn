@@ -8,7 +8,7 @@ use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
 use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
 use odyn_core::config::ProviderConfig;
-use odyn_core::embed::load_default_embedder;
+use odyn_core::embed::{self, load_embedder};
 use odyn_core::notes;
 use odyn_core::providers::ollama::OllamaProvider;
 use odyn_core::providers::openai_compat::OpenAiCompatProvider;
@@ -565,20 +565,66 @@ pub(crate) fn context_body(context: &InjectedContext) -> Body {
 /// second `storage()` call on the same thread is the self-deadlock that
 /// froze the whole app once. Call only from blocking contexts: a changed
 /// folder loads the embedding model.
+/// `brain::sync`'s steps, staged so the storage mutex is taken one statement
+/// at a time and never held across an embed. The CLI can hand `brain::sync` a
+/// `&Storage` and wait; the app cannot — an embed here may be a first-run
+/// model download, and holding the lock through it would stall every other
+/// command for the length of it. The rules themselves (what is stale, how
+/// wide the vectors are, when to rebuild) stay in core; only the ordering
+/// lives here.
 pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
     let config = &ready.config.brain;
+    let wanted = config.model.canonical();
+    let swapping = !ready
+        .storage()
+        .index_matches(&wanted)
+        .map_err(|err| err.to_string())?;
+
     let dir = notes::brain_dir(config.path.as_deref()).map_err(|err| err.to_string())?;
     let notes = notes::read_notes(&dir).map_err(|err| err.to_string())?;
-    let plan = ready
-        .storage()
-        .note_sync_plan(&notes)
-        .map_err(|err| err.to_string())?;
-    if !plan.changed {
-        return Ok(());
+    // A swap invalidates every vector, so nothing the old index says about
+    // staleness is worth asking.
+    let stale: Vec<String> = if swapping {
+        notes.iter().map(|note| note.slug.clone()).collect()
+    } else {
+        let plan = ready
+            .storage()
+            .note_sync_plan(&notes)
+            .map_err(|err| err.to_string())?;
+        if !plan.changed {
+            return Ok(());
+        }
+        plan.stale
+    };
+
+    let mut embedder = if swapping || !stale.is_empty() {
+        Some(load_embedder(&ready.config, &config.model).map_err(|err| err.to_string())?)
+    } else {
+        None
+    };
+    if swapping {
+        let dim = match config.model.known_dim() {
+            Some(dim) => dim,
+            None => embed::probe_dim(
+                embedder
+                    .as_deref_mut()
+                    .expect("an embedder is loaded whenever a swap is in flight"),
+            )
+            .map_err(|err| err.to_string())?,
+        };
+        ready
+            .storage()
+            .rebuild_index(&wanted, dim)
+            .map_err(|err| err.to_string())?;
     }
+
     // The embed runs between the locks, never under one.
-    let embeddings = brain::embed_stale(&notes, &plan.stale, load_default_embedder)
-        .map_err(|err| err.to_string())?;
+    let embeddings = match embedder.as_deref_mut() {
+        Some(embedder) => {
+            brain::embed_notes(&notes, &stale, embedder).map_err(|err| err.to_string())?
+        }
+        None => Vec::new(),
+    };
     ready
         .storage()
         .sync_notes(&notes, &embeddings)
@@ -614,7 +660,7 @@ pub(crate) async fn build_context(
             &prior,
             &ask.query,
             brevity,
-            load_default_embedder,
+            || load_embedder(&ready.config, &ready.config.brain.model),
         );
         context.ok()
     })
@@ -683,7 +729,7 @@ pub async fn context_preview(
             &prior,
             &ask.query,
             brevity,
-            load_default_embedder,
+            || load_embedder(&ready.config, &ready.config.brain.model),
         )
         .map_err(|err| err.to_string())?;
         Ok(preview(context, cap_tokens, true))

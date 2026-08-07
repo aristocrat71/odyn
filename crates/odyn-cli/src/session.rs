@@ -8,7 +8,7 @@ use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
 use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
 use odyn_core::config::{BrainConfig, Config, ConfigError, ProviderConfig, ProviderRegistry};
-use odyn_core::embed::load_default_embedder;
+use odyn_core::embed::load_embedder;
 use odyn_core::storage::{Storage, StorageError};
 
 const TITLE_CHARS: usize = 40;
@@ -50,7 +50,9 @@ pub struct Session {
     pub provider: String,
     pub model: String,
     pub handle: Box<dyn ChatProvider>,
-    pub brain: BrainConfig,
+    /// The whole file: the brain settings need it, and so does building an
+    /// embedder that lives behind a provider entry.
+    pub config: Config,
     /// The `[style]` default; a `--brevity` flag overrides it per invocation.
     pub brevity: Brevity,
 }
@@ -73,8 +75,8 @@ impl Session {
             provider,
             model,
             handle,
-            brain: config.brain.clone(),
             brevity: config.style.brevity,
+            config,
         })
     }
 
@@ -141,7 +143,7 @@ pub fn save_turn(
 /// that. No database is not a failure either: style still applies.
 pub fn memory_context(
     storage: Option<&Storage>,
-    brain_config: &BrainConfig,
+    config: &Config,
     history: &[Message],
     ask: &Ask,
     brevity: Brevity,
@@ -152,18 +154,16 @@ pub fn memory_context(
     let Some(storage) = storage else {
         return Some(brain::empty_context(brevity));
     };
+    let brain_config = &config.brain;
     // The folder is the truth: recall reads the files as they are now.
-    if let Err(err) = brain::sync(storage, brain_config, load_default_embedder) {
+    if let Err(err) = brain::sync(storage, brain_config, || {
+        load_embedder(config, &brain_config.model)
+    }) {
         warn(&format!("brain folder not synced: {err}"));
     }
-    let context = brain::build_context(
-        storage,
-        brain_config,
-        history,
-        &ask.query,
-        brevity,
-        load_default_embedder,
-    );
+    let context = brain::build_context(storage, brain_config, history, &ask.query, brevity, || {
+        load_embedder(config, &brain_config.model)
+    });
     match context {
         Ok(context) => Some(context),
         Err(err) => {

@@ -40,6 +40,8 @@ pub fn run() {
             brain::brain_update_note,
             brain::brain_delete_note,
             brain::brain_graph,
+            brain::embed_catalog,
+            brain::brain_set_model,
             config::config_file,
             config::open_config,
             config::providers_config,

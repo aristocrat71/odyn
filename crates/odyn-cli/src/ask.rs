@@ -49,9 +49,15 @@ pub async fn run(
             }
         }
     };
-    let context = memory_context(storage.as_ref(), &session.brain, &[], &ask, session.brevity);
+    let context = memory_context(
+        storage.as_ref(),
+        &session.config,
+        &[],
+        &ask,
+        session.brevity,
+    );
     if show_context {
-        print_context(context.as_ref(), &session.brain, json)?;
+        print_context(context.as_ref(), &session.config.brain, json)?;
     }
     let messages = with_context(
         context.as_ref(),

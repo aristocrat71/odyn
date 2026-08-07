@@ -722,6 +722,30 @@ button {
   color: var(--epi);
 }
 
+.brain-model {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.brain-dim,
+.brain-reindex {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.brain-reindex {
+  color: var(--epi);
+}
+
+/* The one backend that sends note text off the machine says so, always. */
+.brain-remote {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--danger);
+}
+
 .brain-path {
   margin-top: 8px;
   overflow: hidden;

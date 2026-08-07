@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crate::brevity::Brevity;
 use crate::chat::{Message, Role};
 use crate::config::BrainConfig;
-use crate::embed::{EmbedError, Embedder};
+use crate::embed::{self, EmbedError, Embedder};
 use crate::graph::{self, GraphError};
 use crate::notes::{self, NotesError};
 use crate::storage::{Memory, Storage, StorageError};
@@ -151,6 +151,10 @@ pub fn empty_context(brevity: Brevity) -> InjectedContext {
 /// re-embedded, rows whose file is gone are dropped. The embedder is behind
 /// a loader so it is only ever loaded — and on first use, downloaded — when
 /// a note actually changed. Answers whether the index moved.
+///
+/// Pointing the index at the configured model comes first, so a `brain.model`
+/// change is noticed here: the vector table is rebuilt at the new width and
+/// every note comes back stale, which is what re-embeds the folder.
 pub fn sync<F>(
     storage: &Storage,
     config: &BrainConfig,
@@ -159,14 +163,49 @@ pub fn sync<F>(
 where
     F: FnOnce() -> Result<Box<dyn Embedder>, EmbedError>,
 {
+    let wanted = config.model.canonical();
+    let swapping = !storage.index_matches(&wanted)?;
     let dir = notes::brain_dir(config.path.as_deref())?;
     let notes = notes::read_notes(&dir)?;
-    let plan = storage.note_sync_plan(&notes)?;
-    if !plan.changed {
-        return Ok(false);
+    // A swap invalidates every vector, so nothing the old index says about
+    // staleness is worth asking; everything is stale by definition.
+    let stale: Vec<String> = if swapping {
+        notes.iter().map(|note| note.slug.clone()).collect()
+    } else {
+        let plan = storage.note_sync_plan(&notes)?;
+        if !plan.changed {
+            return Ok(false);
+        }
+        plan.stale
+    };
+
+    // One load serves both the width probe and the batch: the expensive part
+    // of an embedder is getting hold of it, not using it.
+    let mut embedder = if swapping || !stale.is_empty() {
+        Some(load_embedder()?)
+    } else {
+        None
+    };
+    if swapping {
+        let dim = match config.model.known_dim() {
+            Some(dim) => dim,
+            // Only the model itself can say how wide an HTTP backend's
+            // vectors are, so ask it before sizing the table.
+            None => embed::probe_dim(
+                embedder
+                    .as_deref_mut()
+                    .expect("an embedder is loaded whenever a swap is in flight"),
+            )?,
+        };
+        storage.rebuild_index(&wanted, dim)?;
     }
-    let embeddings = embed_stale(&notes, &plan.stale, load_embedder)?;
-    Ok(storage.sync_notes(&notes, &embeddings)?)
+
+    let embeddings = match embedder.as_deref_mut() {
+        Some(embedder) => embed_notes(&notes, &stale, embedder)?,
+        None => Vec::new(),
+    };
+    storage.sync_notes(&notes, &embeddings)?;
+    Ok(true)
 }
 
 /// One batch through the model for exactly the notes the plan named.
@@ -181,6 +220,19 @@ where
     if stale.is_empty() {
         return Ok(Vec::new());
     }
+    embed_notes(notes, stale, load_embedder()?.as_mut())
+}
+
+/// Embeds exactly the named notes with an embedder the caller already holds —
+/// what a surface uses when it must control when the model is loaded.
+pub fn embed_notes(
+    notes: &[notes::NoteFile],
+    stale: &[String],
+    embedder: &mut dyn Embedder,
+) -> Result<Vec<(String, Vec<f32>)>, BrainError> {
+    if stale.is_empty() {
+        return Ok(Vec::new());
+    }
     let by_slug: HashMap<&str, &str> = notes
         .iter()
         .map(|note| (note.slug.as_str(), note.content.as_str()))
@@ -189,7 +241,6 @@ where
         .iter()
         .filter_map(|slug| by_slug.get(slug.as_str()).copied())
         .collect();
-    let mut embedder = load_embedder()?;
     let vectors = embedder.embed(&texts)?;
     Ok(stale.iter().cloned().zip(vectors).collect())
 }

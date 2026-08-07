@@ -127,11 +127,33 @@ export type BrainOverview = {
   cap_tokens: number;
   // The brain folder of .md notes, spelled out.
   path: string;
+  // What [brain] model names, exactly as the config spells it.
   model: string;
+  // Whether that model sends note text off the machine.
+  model_remote: boolean;
+  // The width the index was built at; 0 before anything is built.
+  dim: number;
+};
+
+// One selectable embedding model.
+export type EmbedOption = {
+  id: string;
+  backend: "builtin" | "ollama" | "provider";
+  // Known ahead of time only for the bundled models.
+  dim: number | null;
+  description: string;
+  remote: boolean;
 };
 
 export const brainOverview = (): Promise<BrainOverview> =>
   invoke("brain_overview");
+
+export const embedCatalog = (): Promise<EmbedOption[]> =>
+  invoke("embed_catalog");
+
+// Writes the config key and re-indexes; slow by nature.
+export const brainSetModel = (model: string): Promise<BrainOverview> =>
+  invoke("brain_set_model", { model });
 
 export const brainMemories = (
   sort: MemorySort,

@@ -107,6 +107,18 @@ CREATE TABLE injections (
     injected_at     INTEGER NOT NULL
 );
 ",
+    // Which embedding model built the index. The vector table's width is that
+    // model's, so it can no longer be declared here — `ensure_index` owns it
+    // from now on. The row states what migration 5 created, so an existing
+    // index stays valid and nothing re-embeds just for this upgrade.
+    r"
+CREATE TABLE brain_meta (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    model TEXT    NOT NULL,
+    dim   INTEGER NOT NULL
+);
+INSERT INTO brain_meta (id, model, dim) VALUES (1, 'bge-small', 384);
+",
 ];
 
 #[derive(Debug, thiserror::Error)]

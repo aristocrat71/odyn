@@ -1,10 +1,13 @@
 //! Brain view commands: the note pool, search, and edits — every write goes
 //! through the folder, never straight into the index.
 
-use odyn_core::embed::load_default_embedder;
+use odyn_core::config::{config_path, ProviderConfig};
+use odyn_core::config_edit;
+use odyn_core::embed::{self, load_embedder, EmbedOption};
 use odyn_core::notes;
+use odyn_core::providers::ollama;
 use odyn_core::storage::{MemorySort, MemoryStats, StorageError};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 use crate::commands::sync_index;
 use crate::state::{AppState, Ready};
@@ -31,8 +34,12 @@ pub struct BrainOverview {
     cap_tokens: u32,
     /// The brain folder, spelled out so the view can say where the files live.
     path: String,
-    /// The embedding model's display name; fixed in v1.
-    model: &'static str,
+    /// What `[brain] model` names, exactly as the config spells it.
+    model: String,
+    /// Whether that model sends note text off the machine.
+    model_remote: bool,
+    /// The width the index was actually built at; 0 before anything is built.
+    dim: usize,
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -78,16 +85,99 @@ pub async fn brain_overview(app: AppHandle) -> Result<BrainOverview, String> {
         let dir =
             notes::brain_dir(ready.config.brain.path.as_deref()).map_err(|err| err.to_string())?;
         let count = ready.storage().count_memories().map_err(say)?;
+        let dim = ready.storage().index_dim().map_err(say)?;
         Ok(BrainOverview {
             count,
             top_k: ready.config.brain.top_k,
             cap_tokens: ready.config.brain.cap_tokens,
             path: dir.display().to_string(),
-            model: "bge-small",
+            model: ready.config.brain.model.canonical(),
+            model_remote: ready.config.brain.model.is_remote(),
+            dim,
         })
     })
     .await
     .map_err(|err| err.to_string())?
+}
+
+/// Everything selectable: the bundled fastembed catalog, whatever the local
+/// Ollama has that can embed, and — flagged, because it is the only one that
+/// sends note text off the machine — each configured endpoint's models.
+#[tauri::command]
+pub async fn embed_catalog(state: State<'_, AppState>) -> Result<Vec<EmbedOption>, String> {
+    let (ollama_url, providers) = {
+        let ready = state.ready()?;
+        let ollama = ready
+            .config
+            .providers
+            .values()
+            .find_map(|provider| match provider {
+                ProviderConfig::Ollama { base_url, .. } => Some(base_url.clone()),
+                ProviderConfig::OpenAiCompat { .. } => None,
+            })
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+        let configured: Vec<(String, ProviderConfig)> = ready
+            .config
+            .providers
+            .iter()
+            .filter(|(_, provider)| matches!(provider, ProviderConfig::OpenAiCompat { .. }))
+            .map(|(name, provider)| (name.clone(), provider.clone()))
+            .collect();
+        (ollama, configured)
+    };
+
+    let mut options = embed::builtin_catalog();
+    for model in ollama::embedding_models(&ollama_url).await {
+        let size = model.size_bytes / 1_048_576;
+        options.push(EmbedOption {
+            id: format!("ollama:{}", model.name),
+            backend: "ollama",
+            // Only a probe can answer, and that means loading the model.
+            dim: None,
+            description: format!("local, via ollama · {size} MB"),
+            remote: false,
+        });
+    }
+    for (name, provider) in providers {
+        let ProviderConfig::OpenAiCompat {
+            base_url,
+            default_model,
+            ..
+        } = &provider
+        else {
+            continue;
+        };
+        let key = provider.api_key(&name).ok().flatten();
+        let (_, models) = crate::commands::served(base_url, key, default_model.as_deref()).await;
+        for model in models {
+            options.push(EmbedOption {
+                id: format!("{name}:{}", model.name),
+                backend: "provider",
+                dim: None,
+                description: format!("sends note text to {name}"),
+                remote: true,
+            });
+        }
+    }
+    Ok(options)
+}
+
+/// Writes `[brain] model` and re-indexes on the spot, so the answer already
+/// reflects a brain that has been re-embedded rather than one about to be.
+/// Long by nature: it may download a model and embed the whole folder.
+#[tauri::command]
+pub async fn brain_set_model(app: AppHandle, model: String) -> Result<BrainOverview, String> {
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "brain.model", model.trim()).map_err(|err| err.to_string())?;
+    app.state::<AppState>().inner().reload()?;
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ready = handle.state::<AppState>().inner().ready()?;
+        sync_index(&ready)
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+    brain_overview(app).await
 }
 
 #[tauri::command]
@@ -121,7 +211,8 @@ pub async fn brain_search(app: AppHandle, query: String) -> Result<Vec<MemoryRow
         }
         // The embed happens without the storage lock: it can take seconds on
         // a cold model and a send must not queue behind it.
-        let mut embedder = load_default_embedder().map_err(|err| err.to_string())?;
+        let mut embedder = load_embedder(&ready.config, &ready.config.brain.model)
+            .map_err(|err| err.to_string())?;
         let embedding = embedder
             .embed(&[query.as_str()])
             .map_err(|err| err.to_string())?
