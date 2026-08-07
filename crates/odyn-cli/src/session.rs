@@ -153,7 +153,7 @@ pub fn memory_context(
     brevity: Brevity,
 ) -> Option<InjectedContext> {
     let brain_config = &config.brain;
-    if ask.recall {
+    if ask.recall || ask.memorize {
         if let Some(storage) = storage {
             // The folder is the truth: recall reads the files as they are now.
             if let Err(err) = brain::sync(storage, brain_config, || {

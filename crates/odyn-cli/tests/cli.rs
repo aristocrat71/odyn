@@ -635,10 +635,9 @@ fn a_memory_mention_offers_the_tool_and_the_saving_section() {
     let dir = TempDir::new("memorize");
     let (addr, request) = spawn_capturing_provider();
     dir.write_config(&dir.brain_dir(&openai_config(addr)));
-    let brain = dir.0.join("brain");
-    std::fs::create_dir_all(&brain).expect("create brain dir");
-    std::fs::write(brain.join("espresso.md"), "espresso notes\n").expect("write note");
 
+    // The brain folder stays empty: `/memory` recalls, and a synced note would
+    // need the real embedding model. Slug listing is covered in core.
     let output = odyn(
         &dir,
         &["ask", "--show-context", "/memory I now drink flat whites"],
@@ -647,7 +646,6 @@ fn a_memory_mention_offers_the_tool_and_the_saving_section() {
     assert_eq!(code(&output), Some(0), "{}", stderr(&output));
     let shown = stderr(&output);
     assert!(shown.contains("## Saving"), "{shown}");
-    assert!(shown.contains("Existing memories: espresso."), "{shown}");
 
     let request = request.recv().expect("the provider saw the request");
     assert!(request.contains(r#""tools""#), "{request}");

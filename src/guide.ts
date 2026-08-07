@@ -343,9 +343,11 @@ odyn chat`),
       sub("saving — the /memory mention"),
       p(
         "Mention `/memory` and the model is handed one tool for that turn: " +
-          "`save_memory`, which writes a new `.md` note into the brain folder. Tell " +
-          "it what to keep — or ask it to save what you just worked out — and it " +
-          "distills the note, links related memories with `[[slug]]`, and confirms. " +
+          "`save_memory`, which writes a new `.md` note into the brain folder. The " +
+          "turn also recalls the notes nearest your message — that is how the model " +
+          "knows what `[[slug]]` links to write. Tell it what to keep — or ask it to " +
+          "save what you just worked out — and it distills the note, links related " +
+          "memories, and confirms. " +
           "A `✎ saved {slug}` trace appears under the reply; the note is a plain " +
           "file you can edit or delete like any other. The model never touches the " +
           "brain without this mention, and saving needs a model that supports tool " +

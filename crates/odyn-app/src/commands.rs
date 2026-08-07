@@ -652,10 +652,8 @@ pub(crate) async fn build_context(
             return Some(brain::empty_context(brevity));
         }
         // The folder is the truth: recall reads the files as they are now.
-        if ask.recall {
-            if let Err(err) = sync_index(&ready) {
-                eprintln!("odyn: brain folder not synced: {err}");
-            }
+        if let Err(err) = sync_index(&ready) {
+            eprintln!("odyn: brain folder not synced: {err}");
         }
         // One lock per statement — see `sync_index`.
         let storage = ready.storage();
@@ -723,9 +721,7 @@ pub async fn context_preview(
         if !ask.recall && !ask.memorize {
             return Ok(preview(brain::empty_context(brevity), cap_tokens, false));
         }
-        if ask.recall {
-            sync_index(&ready)?;
-        }
+        sync_index(&ready)?;
         // One lock per statement — see `sync_index`.
         let storage = ready.storage();
         let context = brain::build_context(
@@ -737,7 +733,7 @@ pub async fn context_preview(
             || load_embedder(&ready.config, &ready.config.brain.model),
         )
         .map_err(|err| err.to_string())?;
-        Ok(preview(context, cap_tokens, ask.recall))
+        Ok(preview(context, cap_tokens, true))
     })
     .await
     .map_err(|err| err.to_string())?

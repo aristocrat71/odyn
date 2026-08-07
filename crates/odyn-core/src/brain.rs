@@ -243,9 +243,10 @@ pub fn embed_notes(
     Ok(stale.iter().cloned().zip(vectors).collect())
 }
 
-/// Assembles the context for one turn: recalled notes for `/brain`, the saving
-/// section for `/memory`, the style directive always. `history` excludes the
-/// ask. A turn that does not recall never loads the embedder. `None` storage
+/// Assembles the context for one turn: recalled notes for `/brain` — and for
+/// `/memory`, which recalls too so the model can see what it should link —
+/// the saving section, and the style directive always. `history` excludes the
+/// ask. A turn with no triggers never loads the embedder. `None` storage
 /// means no database: saving still works, recall has nothing to read.
 pub fn build_context<F>(
     storage: Option<&Storage>,
@@ -267,7 +268,7 @@ where
     };
     let mut kept = Vec::new();
     let mut tokens = 0;
-    if let Some(storage) = storage.filter(|_| ask.recall) {
+    if let Some(storage) = storage.filter(|_| ask.recall || ask.memorize) {
         let count = storage.count_memories()?;
         if count > 0 {
             let query = query_text(history, &ask.query);
@@ -428,9 +429,11 @@ that you were told earlier. [[name]] links one memory to another. Use what \
 is relevant and ignore the rest.";
 
 const SAVING: &str = "The user asked you to save a memory. Call save_memory \
-with the fact to remember, distilled to a short third-person note. Link a \
-related existing memory inline as [[slug]] only where one truly relates. \
-Then confirm in one line.";
+with the fact to remember, distilled to a short third-person note. Name the \
+user if a memory gives their name, and write every mention of a person or \
+topic that already has a memory as a [[slug]] link — for example: \
+\"[[anna]] left her car keys on the desk.\" The memories above show what \
+exists. Then confirm in one line.";
 
 /// Link targets offered to the model; past this, a link can dangle — harmless.
 const SAVING_SLUGS: usize = 50;
@@ -610,6 +613,8 @@ mod tests {
         );
     }
 
+    /// An empty index is what keeps the embedder cold here: `/memory` recalls
+    /// like `/brain` does, so the model can see what it should link against.
     #[test]
     fn a_memorize_turn_gets_the_saving_section_without_the_embedder() {
         let brain = TempDir::new("saving-brain");
@@ -642,6 +647,44 @@ mod tests {
         };
         let context = build_context(None, &empty, &[], &ask, Brevity::Off, never).expect("build");
         assert_eq!(context.system_message, format!("## Saving\n{SAVING}"));
+    }
+
+    /// The linking fix: a save is informed. `/memory` alone recalls the notes
+    /// nearest the message, so `[[slug]]` links have something to land on.
+    #[test]
+    fn a_memorize_turn_recalls_related_notes_to_link_against() {
+        let (_dir, storage) = seeded("informed");
+        let brain = TempDir::new("informed-brain");
+        std::fs::create_dir_all(&brain.0).expect("create brain dir");
+        crate::notes::write_note(&brain.0, Some("cern-trip"), "went to CERN in june")
+            .expect("write");
+        let config = BrainConfig {
+            path: Some(brain.0.clone()),
+            ..config(6, 900)
+        };
+        let ask = Ask {
+            message: "remember the cern talk".to_string(),
+            query: "remember the cern talk".to_string(),
+            recall: false,
+            memorize: true,
+        };
+        let context = build_context(
+            Some(&storage),
+            &config,
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(!context.is_empty(), "a save must see what it can link");
+        assert!(context.system_message.contains("### cern-trip"));
+        assert!(context
+            .system_message
+            .contains("## Saving\nThe user asked you to save a memory."));
+        assert!(context
+            .system_message
+            .contains("Existing memories: cern-trip."));
     }
 
     #[test]

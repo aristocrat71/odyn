@@ -203,7 +203,7 @@ function ledger(): HTMLElement {
     return line;
   }
   if (preview.memories.length === 0) {
-    line.append(el("span", "ledger-note", "/brain · nothing to recall yet"));
+    line.append(el("span", "ledger-note", "nothing to recall yet"));
     return line;
   }
 

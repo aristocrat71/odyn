@@ -276,7 +276,9 @@ Ctrl-D leaves.
 decide about tokio?` — is a chat message with recall on. Likewise `/memory`:
 that turn the model is handed a `save_memory` tool and asked to distill what
 you told it into a new note in the brain folder (the model must support tool
-calls). Both tokens are stripped before the model or the transcript sees them.
+calls). A `/memory` turn also recalls the notes nearest your message, so the
+new note can `[[link]]` what already exists. Both tokens are stripped before
+the model or the transcript sees them.
 
 ### `odyn config`
 
