@@ -1,6 +1,6 @@
 import type { Conversation, Message } from "./api";
 import { renderBrevity } from "./brevctl";
-import { el } from "./dom";
+import { el, waiting } from "./dom";
 import { renderMarkdown } from "./markdown";
 import { renderPickers } from "./picker";
 import {
@@ -137,6 +137,12 @@ function speaker(role: Message["role"]): HTMLElement {
 }
 
 function fill(node: HTMLElement, content: string, cursor: boolean): void {
+  // Nothing has streamed yet: a lone cursor under the speaker reads as idle,
+  // so the wait line stands in until the first token replaces it.
+  if (cursor && content === "") {
+    node.replaceChildren(waiting());
+    return;
+  }
   const interrupted = content.endsWith(INTERRUPTED);
   const blocks = renderMarkdown(
     interrupted ? content.slice(0, -INTERRUPTED.length) : content,

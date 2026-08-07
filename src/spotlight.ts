@@ -6,7 +6,7 @@ import "./spotlight.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import { el } from "./dom";
+import { el, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
 import { renderMarkdown } from "./markdown";
 
@@ -136,6 +136,10 @@ function drawLedger(event: SpotEvent & { kind: "context" }): void {
 function draw(): void {
   if (commandMode) return;
   results.hidden = false;
+  if (streaming && answer === "") {
+    results.replaceChildren(waiting());
+    return;
+  }
   const body = renderMarkdown(answer);
   if (streaming) {
     const last = body[body.length - 1] ?? el("p");
@@ -154,6 +158,8 @@ function draw(): void {
 
 function fail(message: string, detail?: string): void {
   streaming = false;
+  // Nothing is being waited on any more, whatever else is on screen stays.
+  results.querySelector(".waiting")?.remove();
   // Whatever streamed before the failure is kept, minus the streaming cursor.
   if (answer !== "") draw();
   results.hidden = false;
@@ -215,7 +221,9 @@ function drawCommands(): void {
 
 function drawAsk(): void {
   ledger.hidden = ledger.childElementCount === 0;
-  if (answer !== "") {
+  // An ask typed over mid-flight comes back to whatever it left: the answer so
+  // far, or the wait line if the first token is still out.
+  if (answer !== "" || streaming) {
     draw();
     return;
   }
@@ -245,7 +253,7 @@ async function ask(): Promise<void> {
   used = [];
   ledger.hidden = true;
   ledger.replaceChildren();
-  results.replaceChildren();
+  draw();
   try {
     current = await invoke<number>("spotlight_ask", { text });
   } catch (err) {
