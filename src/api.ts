@@ -22,7 +22,7 @@ export type ConversationView = Conversation & {
 export type Message = {
   role: "system" | "user" | "assistant";
   content: string;
-  // Assistant rows: the note slugs injected for the question this answers.
+  // Assistant rows: the slugs injected for the question this answers.
   used: string[];
 };
 
@@ -31,6 +31,11 @@ export type Usage = { input_tokens: number; output_tokens: number };
 export type ChatEvent = { request_id: number } & (
   | { kind: "context"; used: string[]; tokens: number }
   | { kind: "delta"; text: string }
+  | { kind: "saved"; slug: string }
+  | { kind: "updated"; slug: string }
+  | { kind: "deleted"; slug: string }
+  | { kind: "linked"; from: string; to: string }
+  | { kind: "unlinked"; from: string; to: string }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );
@@ -125,17 +130,16 @@ export type BrainOverview = {
   count: number;
   top_k: number;
   cap_tokens: number;
-  // The brain folder of .md notes, spelled out.
   path: string;
-  // What [brain] model names, exactly as the config spells it.
   model: string;
   // Whether that model sends note text off the machine.
   model_remote: boolean;
   // The width the index was built at; 0 before anything is built.
   dim: number;
+  save_temperature: number;
+  min_relevance: number;
 };
 
-// One selectable embedding model.
 export type EmbedOption = {
   id: string;
   backend: "builtin" | "ollama" | "provider";
@@ -154,6 +158,15 @@ export const embedCatalog = (): Promise<EmbedOption[]> =>
 // Writes the config key and re-indexes; slow by nature.
 export const brainSetModel = (model: string): Promise<BrainOverview> =>
   invoke("brain_set_model", { model });
+
+export const brainSetSaveTemperature = (value: number): Promise<BrainOverview> =>
+  invoke("brain_set_save_temperature", { value });
+
+export const brainSetTopK = (value: number): Promise<BrainOverview> =>
+  invoke("brain_set_top_k", { value });
+
+export const brainSetMinRelevance = (value: number): Promise<BrainOverview> =>
+  invoke("brain_set_min_relevance", { value });
 
 export const brainMemories = (
   sort: MemorySort,

@@ -21,14 +21,19 @@ function topbar(): HTMLElement {
   const left = el("div", "topbar-left");
   const current = selected();
 
-  left.append(
-    el("h1", "title", state.view === "chat" && current ? current.title : state.view),
+  const head = el(
+    "h1",
+    "title",
+    state.view === "chat" && current ? current.title : state.view,
   );
+  const count = state.brain.overview?.count;
+  if (state.view === "brain" && count !== undefined) {
+    head.append(" ", el("span", "title-note", `${count} memories`));
+  }
+  left.append(head);
   const crumbs = crumbLine(current);
   if (crumbs !== "") left.append(el("div", "crumbs", crumbs));
 
-  // Model and brevity used to sit here; they belong to the message being
-  // written, so they live in the composer's footer now.
   bar.append(left);
   return bar;
 }
@@ -45,10 +50,8 @@ function body(): HTMLElement {
   return view;
 }
 
-// The guide is a chunk of its own — nothing it contains is in the main bundle
-// until the view is first opened, which is why it is reached by `import()` and
-// never by a static import. The promise is cached, not just the module, so a
-// redraw while the chunk is in flight does not start a second load.
+// The guide is its own chunk, reached by `import()`. The promise is cached,
+// not just the module, so a redraw mid-flight does not start a second load.
 let loaded: typeof import("./guide") | null = null;
 let loading: Promise<typeof import("./guide")> | null = null;
 
@@ -60,8 +63,7 @@ function guide(): HTMLElement {
   }
   box.append(el("div", "guide-loading", "loading guide…"));
   if (loading === null) loading = import("./guide");
-  // A view switched away from leaves `box` detached, and writing to it is a
-  // no-op — so nothing has to be cancelled.
+  // A view switched away leaves `box` detached; writing to it is a no-op.
   void loading.then(
     (module) => {
       loaded = module;
@@ -78,8 +80,7 @@ function selected(): Conversation | undefined {
   return state.conversations.find((row) => row.id === state.selected);
 }
 
-// Nothing to say about an empty conversation, so it says nothing. Token counts
-// come from the provider, and not every provider reports them.
+// Token counts come from the provider, and not every provider reports them.
 function crumbLine(current: Conversation | undefined): string {
   if (state.view !== "chat" || current === undefined || state.turns === 0) return "";
   const turns = state.turns === 1 ? "1 turn" : `${state.turns} turns`;

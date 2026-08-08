@@ -5,8 +5,10 @@ use std::io::Write;
 use odyn_core::chat::{Message, Role};
 use odyn_core::storage::Storage;
 
+use odyn_core::tools::TurnEvent;
+
 use crate::session::{
-    memory_context, print_context, save_turn, stream_reply, title_from, warn, with_context,
+    memory_context, print_context, save_turn, stream_reply, title_from, trace, warn, with_context,
     write_failure, Failure, Reply, Session,
 };
 
@@ -28,13 +30,12 @@ pub async fn run(
             "no prompt: pass one as an argument or on stdin",
         ));
     }
-    // A `/brain` mention turns recall on for this ask and never reaches the
-    // model or the transcript.
+    // A `/brain` mention turns recall on and never reaches the model or the
+    // transcript.
     let ask = odyn_core::brain::parse_ask(prompt);
 
-    // `--save` needs the database and creates it; a plain ask only reads
-    // memory, so it opens the database if one exists and otherwise stays
-    // ephemeral — asking must not conjure a database.
+    // `--save` creates the database; a plain ask must not conjure one, so it
+    // opens an existing one or stays ephemeral.
     let storage = if save {
         match Storage::open_default() {
             Ok(storage) => Some(storage),
@@ -69,17 +70,78 @@ pub async fn run(
     let reply = stream_reply(
         session.handle.as_ref(),
         &session.model,
-        &messages,
-        |delta| {
-            streamed = true;
-            if json {
-                writeln!(
-                    out,
-                    "{}",
-                    serde_json::json!({"type": "delta", "text": delta})
-                )?;
-            } else {
-                write!(out, "{delta}")?;
+        messages,
+        &session.config,
+        &ask,
+        |event| {
+            match event {
+                TurnEvent::Delta(delta) => {
+                    streamed = true;
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "delta", "text": delta})
+                        )?;
+                    } else {
+                        write!(out, "{delta}")?;
+                    }
+                }
+                TurnEvent::Saved(slug) => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "saved", "slug": slug})
+                        )?;
+                    } else {
+                        trace(&format!("saved {slug}"));
+                    }
+                }
+                TurnEvent::Updated(slug) => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "updated", "slug": slug})
+                        )?;
+                    } else {
+                        trace(&format!("updated {slug}"));
+                    }
+                }
+                TurnEvent::Deleted(slug) => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "deleted", "slug": slug})
+                        )?;
+                    } else {
+                        trace(&format!("deleted {slug}"));
+                    }
+                }
+                TurnEvent::Linked { from, to } => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "linked", "from": from, "to": to})
+                        )?;
+                    } else {
+                        trace(&format!("linked {from} to {to}"));
+                    }
+                }
+                TurnEvent::Unlinked { from, to } => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "unlinked", "from": from, "to": to})
+                        )?;
+                    } else {
+                        trace(&format!("unlinked {from} from {to}"));
+                    }
+                }
             }
             out.flush()
         },
@@ -89,7 +151,6 @@ pub async fn run(
     let reply = match reply {
         Ok(reply) => reply,
         Err(failure) => {
-            // Keep the partial answer, but end its line before the error.
             if streamed && !json {
                 let _ = writeln!(out);
             }

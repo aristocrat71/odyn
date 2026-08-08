@@ -3,10 +3,9 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
-use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
+use odyn_core::chat::{ChatError, ChatProvider, Message, Role, ToolDef, Usage};
 use odyn_core::config::ProviderConfig;
 use odyn_core::embed::{self, load_embedder};
 use odyn_core::notes;
@@ -14,6 +13,7 @@ use odyn_core::providers::ollama::OllamaProvider;
 use odyn_core::providers::openai_compat::OpenAiCompatProvider;
 use odyn_core::providers::{ollama, openai_compat};
 use odyn_core::storage::{Conversation as StoredConversation, StorageError};
+use odyn_core::tools::{self, TurnError, TurnEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::state::{AppState, Ready, Stream};
@@ -42,8 +42,7 @@ pub struct ConversationView {
     provider: String,
     model: String,
     turns: usize,
-    /// `None` until a provider reports usage: an invented number would be worse
-    /// than a missing one.
+    /// `None` until a provider reports usage; never invented.
     tokens: Option<u64>,
 }
 
@@ -51,12 +50,10 @@ pub struct ConversationView {
 pub struct MessageView {
     role: Role,
     content: String,
-    /// Assistant rows only: the note slugs injected for the question this
-    /// answers — the `◈ used …` trace line.
+    /// Assistant rows only: the slugs injected for the question this answers.
     used: Vec<String>,
 }
 
-/// One ledger chip: a memory and the tokens it costs.
 #[derive(serde::Serialize)]
 pub struct LedgerItem {
     id: String,
@@ -64,12 +61,10 @@ pub struct LedgerItem {
     content: String,
 }
 
-/// What the composer ledger renders — built by `brain::build_context`, the
-/// same call the send path makes, which is the whole point.
+/// What the composer ledger renders, built by the send path's own `build_context`.
 #[derive(serde::Serialize)]
 pub struct ContextPreview {
-    /// Whether the draft mentions `/brain`: false means the send would
-    /// inject nothing, and the ledger shows the hint instead of chips.
+    /// Whether the draft mentions `/brain`; false means the send injects nothing.
     active: bool,
     memories: Vec<LedgerItem>,
     tokens: i64,
@@ -77,7 +72,6 @@ pub struct ContextPreview {
     system_message: String,
 }
 
-/// One configured provider and what it can serve right now.
 #[derive(serde::Serialize)]
 pub struct ProviderGroup {
     name: String,
@@ -89,8 +83,7 @@ pub struct ProviderGroup {
 #[derive(serde::Serialize)]
 pub struct Model {
     pub(crate) name: String,
-    /// On-disk size, which only Ollama reports. Config names no context length
-    /// for API models, and an invented one would be worse than none.
+    /// On-disk size; only Ollama reports it, and it is never invented.
     size_bytes: Option<u64>,
 }
 
@@ -100,8 +93,7 @@ pub struct Status {
     brevity_default: Brevity,
 }
 
-/// One shape for the whole stream: the frontend keys on `request_id` and
-/// switches on `kind`.
+/// One shape for the whole stream: keyed on `request_id`, switched on `kind`.
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct Event {
     pub(crate) request_id: u64,
@@ -112,9 +104,7 @@ pub(crate) struct Event {
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub(crate) enum Body {
-    /// What was injected for this reply, before its first delta: the note
-    /// slugs for the trace line, and the total the spotlight's one-line
-    /// ledger shows.
+    /// What was injected for this reply, before its first delta.
     Context {
         used: Vec<String>,
         tokens: i64,
@@ -122,21 +112,36 @@ pub(crate) enum Body {
     Delta {
         text: String,
     },
+    Saved {
+        slug: String,
+    },
+    Updated {
+        slug: String,
+    },
+    Deleted {
+        slug: String,
+    },
+    Linked {
+        from: String,
+        to: String,
+    },
+    Unlinked {
+        from: String,
+        to: String,
+    },
     Done {
         usage: Option<Usage>,
         interrupted: bool,
     },
     Error {
         message: String,
-        /// The provider's own words when `message` stands in for them. Never
-        /// rendered: the frontend logs it to the webview console.
+        /// The provider's own words; logged to the webview console, never rendered.
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
 }
 
 impl Body {
-    /// An error whose text is the whole story.
     pub(crate) fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
@@ -171,10 +176,8 @@ pub async fn create_conversation(state: State<'_, AppState>) -> Result<Conversat
     Ok(Conversation::from(row))
 }
 
-/// A new chat opens on the last one's target: whatever was picked a minute ago
-/// is almost always what the next question wants. A provider that has since
-/// left the config falls back to the default — the picker is still one click
-/// away either way.
+/// A new chat opens on the last one's target. A provider that has since left
+/// the config falls back to the default.
 fn inherited(
     ready: &crate::state::Ready,
     last: Option<odyn_core::storage::Conversation>,
@@ -212,8 +215,7 @@ pub async fn delete_conversation(state: State<'_, AppState>, id: i64) -> Result<
     deleted.map_err(say)
 }
 
-/// An explicit level for this conversation, written immediately; it affects
-/// the next send, never the past.
+/// An explicit level for this conversation: it affects the next send, never the past.
 #[tauri::command]
 pub async fn set_conversation_brevity(
     state: State<'_, AppState>,
@@ -254,7 +256,7 @@ pub async fn get_conversation(
         title: row.title,
         provider: row.provider,
         model: row.model,
-        // A turn is a question and its answer, so the questions are what to count.
+        // A turn is a question and its answer, so count the questions.
         turns: stored
             .iter()
             .filter(|message| message.role == Role::User)
@@ -310,7 +312,7 @@ pub async fn messages(
                     .take()
                     .and_then(|id| by_question.remove(&id))
                     .unwrap_or_default(),
-                Role::System => Vec::new(),
+                Role::System | Role::Tool => Vec::new(),
             };
             MessageView {
                 role: row.role,
@@ -322,8 +324,7 @@ pub async fn messages(
 }
 
 /// Answers with the id the reply's events carry. `retry` re-runs a turn whose
-/// question is already stored, so a failed stream is retried without asking it
-/// twice.
+/// question is already stored, so a failed stream is not asked twice.
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
@@ -334,8 +335,8 @@ pub async fn send_message(
 ) -> Result<u64, String> {
     let ready = state.ready()?;
     let row = conversation(&ready, conversation_id)?;
-    // A `/brain` mention turns recall on for this turn; the transcript and
-    // the model both see the message without it.
+    // A `/brain` mention turns recall on; the transcript and the model both
+    // see the message without it.
     let mut ask = brain::parse_ask(&text);
     if !retry {
         let storage = ready.storage();
@@ -378,7 +379,12 @@ pub async fn send_message(
         Ok(provider) => provider,
         Err(err) => return fail(&app, &state, request_id, err.to_string()),
     };
+    let brain_dir = match notes::brain_dir(ready.config.brain.path.as_deref()) {
+        Ok(dir) => dir,
+        Err(err) => return fail(&app, &state, request_id, err.to_string()),
+    };
     let brevity = row.brevity.unwrap_or(ready.config.style.brevity);
+    let save_temperature = ready.config.brain.save_temperature;
     let task = tauri::async_runtime::spawn(run(
         app.clone(),
         request_id,
@@ -389,6 +395,8 @@ pub async fn send_message(
         ask,
         question_id,
         brevity,
+        brain_dir,
+        save_temperature,
     ));
     stream.attach(task);
     Ok(request_id)
@@ -416,9 +424,8 @@ pub async fn status(state: State<'_, AppState>) -> Result<Status, String> {
     Ok(Status { brevity_default })
 }
 
-/// Every configured provider, in config order, whether it answers or not:
-/// a picker that hides what is down explains nothing. Probed on each call, so
-/// the reachability shown is the reachability now.
+/// Every configured provider, whether it answers or not: a picker that hides
+/// what is down explains nothing. Probed on each call.
 #[tauri::command]
 pub async fn providers_overview(state: State<'_, AppState>) -> Result<Vec<ProviderGroup>, String> {
     let configured: Vec<(String, ProviderConfig)> = {
@@ -459,11 +466,8 @@ async fn group(name: String, provider: ProviderConfig) -> ProviderGroup {
     }
 }
 
-/// What an OpenAI-compatible endpoint offers, from its own `/models`. The
-/// listing doubles as the reachability answer — an endpoint that refuses the
-/// key still answered, so it counts as up — and `default_model` joins the list
-/// whether or not the endpoint names it, so the model a conversation is on is
-/// never missing from the menu it is chosen in.
+/// The listing doubles as the reachability answer. `default_model` always joins
+/// it, so a conversation's model is never missing from its own menu.
 pub(crate) async fn served(
     base_url: &str,
     api_key: Option<String>,
@@ -490,16 +494,14 @@ pub(crate) async fn served(
     };
     match provider.list_models().await {
         Ok(models) => (true, named(models)),
-        // The endpoint answered, just not with a listing: no `/models` route,
-        // or a key it would not accept for one. Both are still reachable, and
-        // `ping` would have said so at the cost of a second request.
+        // The endpoint answered, just not with a listing: still reachable.
         Err(ChatError::Api { .. }) => (true, named(Vec::new())),
         Err(_) => (false, named(Vec::new())),
     }
 }
 
-/// The installed list doubles as the reachability answer: the menu can only
-/// offer what Ollama names. `ping` is what bounds the wait on a dead endpoint.
+/// The installed list doubles as the reachability answer; `ping` bounds the
+/// wait on a dead endpoint.
 pub(crate) async fn installed(base_url: &str, keep_alive: Option<String>) -> (bool, Vec<Model>) {
     if !ollama::ping(base_url).await {
         return (false, Vec::new());
@@ -532,6 +534,8 @@ async fn run(
     ask: Ask,
     question_id: Option<i64>,
     brevity: Brevity,
+    brain_dir: std::path::PathBuf,
+    save_temperature: f32,
 ) {
     let context = build_context(&app, prior.clone(), ask.clone(), brevity).await;
     if let Some(context) = &context {
@@ -539,13 +543,13 @@ async fn run(
         emit(&app, request_id, context_body(context));
     }
     let mut history = Vec::with_capacity(prior.len() + 2);
-    // Checked on the message, not the memories: a brevity directive alone
-    // still has to reach the model.
+    // A brevity directive alone still has to reach the model.
     if let Some(context) = context.filter(|context| !context.system_message.is_empty()) {
         history.push(Message::new(Role::System, context.system_message));
     }
     history.extend(prior);
     history.push(Message::new(Role::User, ask.message));
+    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link, ask.unlink);
 
     let outcome = drive(
         &app,
@@ -553,7 +557,10 @@ async fn run(
         &stream,
         provider.as_ref(),
         &model,
-        &history,
+        history,
+        &tools,
+        &brain_dir,
+        save_temperature,
     )
     .await;
     let state = app.state::<AppState>();
@@ -582,18 +589,8 @@ pub(crate) fn context_body(context: &InjectedContext) -> Body {
     }
 }
 
-/// Mirrors the brain folder into the index. The storage mutex is taken one
-/// statement at a time and NEVER across the embed — a guard held into a
-/// second `storage()` call on the same thread is the self-deadlock that
-/// froze the whole app once. Call only from blocking contexts: a changed
-/// folder loads the embedding model.
-/// `brain::sync`'s steps, staged so the storage mutex is taken one statement
-/// at a time and never held across an embed. The CLI can hand `brain::sync` a
-/// `&Storage` and wait; the app cannot — an embed here may be a first-run
-/// model download, and holding the lock through it would stall every other
-/// command for the length of it. The rules themselves (what is stale, how
-/// wide the vectors are, when to rebuild) stay in core; only the ordering
-/// lives here.
+/// Mirrors the brain folder into the index; blocking contexts only. One storage lock per
+/// statement, NEVER across the embed — a held guard self-deadlocks and once froze the app.
 pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
     let config = &ready.config.brain;
     let wanted = config.model.canonical();
@@ -604,8 +601,8 @@ pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
 
     let dir = notes::brain_dir(config.path.as_deref()).map_err(|err| err.to_string())?;
     let notes = notes::read_notes(&dir).map_err(|err| err.to_string())?;
-    // A swap invalidates every vector, so nothing the old index says about
-    // staleness is worth asking.
+    // A swap invalidates every vector, so the old index says nothing useful
+    // about staleness.
     let stale: Vec<String> = if swapping {
         notes.iter().map(|note| note.slug.clone()).collect()
     } else {
@@ -654,10 +651,8 @@ pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
     Ok(())
 }
 
-/// Memory is opt-in and additive in the GUI too: no `/brain`, no injection —
-/// and a brain failure means an uninjected turn, not a failed one; the
-/// ledger preview is where the error shows. The embed is CPU work, so it
-/// runs off the async workers.
+/// Memory is opt-in and additive here too: no `/brain`, no injection, and a
+/// brain failure means an uninjected turn rather than a failed one.
 pub(crate) async fn build_context(
     app: &AppHandle,
     prior: Vec<Message>,
@@ -667,7 +662,7 @@ pub(crate) async fn build_context(
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
-        if !ask.recall {
+        if !ask.any() {
             return Some(brain::empty_context(brevity));
         }
         // The folder is the truth: recall reads the files as they are now.
@@ -677,10 +672,10 @@ pub(crate) async fn build_context(
         // One lock per statement — see `sync_index`.
         let storage = ready.storage();
         let context = brain::build_context(
-            &storage,
+            Some(&storage),
             &ready.config.brain,
             &prior,
-            &ask.query,
+            &ask,
             brevity,
             || load_embedder(&ready.config, &ready.config.brain.model),
         );
@@ -692,7 +687,7 @@ pub(crate) async fn build_context(
 }
 
 /// An injection record that cannot be written must not block the reply; the
-/// ledger heals on the next successful turn.
+/// ledger heals on the next turn.
 fn record(app: &AppHandle, stream: &Stream, question_id: Option<i64>, context: &InjectedContext) {
     if context.is_empty() {
         return;
@@ -702,15 +697,14 @@ fn record(app: &AppHandle, stream: &Stream, question_id: Option<i64>, context: &
         return;
     };
     let _ = ready.storage().record_injections(
-        stream.conversation_id,
+        Some(stream.conversation_id),
         question_id,
         &context.memory_ids(),
     );
 }
 
-/// The composer ledger's data source — the same `build_context` the send path
-/// uses, on the same history, so the line previews exactly what a send now
-/// would inject.
+/// The composer ledger's data source — the same `build_context` and history a
+/// send would use, so the line previews exactly what it would inject.
 #[tauri::command]
 pub async fn context_preview(
     app: AppHandle,
@@ -737,19 +731,18 @@ pub async fn context_preview(
         };
         let brevity = chosen.unwrap_or(ready.config.style.brevity);
         let cap_tokens = ready.config.brain.cap_tokens;
-        // A draft without `/brain` previews exactly what it would send:
-        // nothing — rendered as the hint, not as an error.
-        if !ask.recall {
+        // A draft without triggers previews what it would send: nothing.
+        if !ask.any() {
             return Ok(preview(brain::empty_context(brevity), cap_tokens, false));
         }
         sync_index(&ready)?;
         // One lock per statement — see `sync_index`.
         let storage = ready.storage();
         let context = brain::build_context(
-            &storage,
+            Some(&storage),
             &ready.config.brain,
             &prior,
-            &ask.query,
+            &ask,
             brevity,
             || load_embedder(&ready.config, &ready.config.brain.model),
         )
@@ -778,31 +771,89 @@ fn preview(context: InjectedContext, cap_tokens: u32, active: bool) -> ContextPr
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     app: &AppHandle,
     request_id: u64,
     stream: &Stream,
     provider: &dyn ChatProvider,
     model: &str,
-    history: &[Message],
+    history: Vec<Message>,
+    tools: &[ToolDef],
+    brain_dir: &std::path::Path,
+    save_temperature: f32,
 ) -> Outcome {
-    let mut events = provider.chat_stream(ChatRequest::new(history, model));
-    while let Some(event) = events.next().await {
-        match event {
-            Ok(ChatEvent::TextDelta(delta)) => {
-                stream.push(&delta);
-                emit(app, request_id, Body::Delta { text: delta });
+    let driven = tools::run_turn(
+        provider,
+        model,
+        history,
+        tools,
+        brain_dir,
+        save_temperature,
+        |event| {
+            match event {
+                TurnEvent::Delta(delta) => {
+                    stream.push(delta);
+                    emit(
+                        app,
+                        request_id,
+                        Body::Delta {
+                            text: delta.to_string(),
+                        },
+                    );
+                }
+                TurnEvent::Saved(slug) => emit(
+                    app,
+                    request_id,
+                    Body::Saved {
+                        slug: slug.to_string(),
+                    },
+                ),
+                TurnEvent::Updated(slug) => emit(
+                    app,
+                    request_id,
+                    Body::Updated {
+                        slug: slug.to_string(),
+                    },
+                ),
+                TurnEvent::Deleted(slug) => emit(
+                    app,
+                    request_id,
+                    Body::Deleted {
+                        slug: slug.to_string(),
+                    },
+                ),
+                TurnEvent::Linked { from, to } => emit(
+                    app,
+                    request_id,
+                    Body::Linked {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    },
+                ),
+                TurnEvent::Unlinked { from, to } => emit(
+                    app,
+                    request_id,
+                    Body::Unlinked {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    },
+                ),
             }
-            Ok(ChatEvent::Done { usage }) => return Outcome::Done(usage),
-            Err(ChatError::Cancelled) => return Outcome::Interrupted,
-            Err(err) => return Outcome::Failed(format!("stream failed: {}", describe(&err))),
-        }
+            Ok(())
+        },
+    )
+    .await;
+    match driven {
+        Ok(reply) => Outcome::Done(reply.usage),
+        Err(TurnError::Chat(ChatError::Cancelled)) => Outcome::Interrupted,
+        Err(TurnError::Chat(err)) => Outcome::Failed(format!("stream failed: {}", describe(&err))),
+        Err(TurnError::Write(err)) => Outcome::Failed(err.to_string()),
     }
-    Outcome::Done(None)
 }
 
-/// The one place a reply becomes a row: the end of a stream and a cancel both
-/// land here, so an interrupted answer is stored like a finished one.
+/// The one place a reply becomes a row: an interrupted answer is stored like a
+/// finished one.
 fn settle(
     app: &AppHandle,
     ready: &Ready,
@@ -813,7 +864,6 @@ fn settle(
 ) {
     let mut text = stream.text();
     if text.trim().is_empty() {
-        // Nothing was said, so there is nothing to keep.
         emit(app, request_id, Body::Done { usage, interrupted });
         return;
     }
@@ -834,8 +884,7 @@ fn settle(
     emit(app, request_id, body);
 }
 
-/// A send that never reaches a provider still answers on the event channel, so
-/// the frontend renders every failure in the same place.
+/// A send that never reaches a provider still answers on the event channel.
 fn fail(
     app: &AppHandle,
     state: &AppState,
@@ -847,8 +896,6 @@ fn fail(
     Ok(request_id)
 }
 
-/// A window that has gone away cannot be told anything, and there is nothing to
-/// be done about it here.
 fn emit(app: &AppHandle, request_id: u64, body: Body) {
     let _ = app.emit(CHAT_EVENT, Event { request_id, body });
 }

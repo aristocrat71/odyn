@@ -3,27 +3,24 @@ import "./dropdown.css";
 import { el } from "./dom";
 
 // The one dropdown for the whole app: native selects render as the OS's own
-// menus, which no design language can reach. Trigger and menu follow the
-// model picker's pattern — the menu exists only while it is open.
+// menus, which no design language can reach. The menu exists only while open.
 
 export type DropdownItem = {
   value: string;
   /// Shown in the row; `value` stands in when absent.
   label?: string;
-  /// A dim note on the row's right edge.
   hint?: string;
 };
 
 export type Dropdown = {
   root: HTMLElement;
-  /// Replaces the items and the selection; redraws the trigger.
   set: (items: DropdownItem[], selected: string) => void;
   value: () => string;
   setDisabled: (disabled: boolean) => void;
 };
 
-// One menu open at a time, closed by any click outside it — a single
-// document listener serves every instance.
+// One menu open at a time, closed by any click outside it: a single document
+// listener serves every instance.
 let openNow: { root: HTMLElement; close: () => void } | null = null;
 
 document.addEventListener("pointerdown", (event) => {
@@ -33,7 +30,7 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 /// Closes whichever menu is open. Callers with their own Escape semantics
-/// (spotlight hides itself) check this first: the menu goes before the window.
+/// check this first: the menu goes before the window.
 export function closeOpenDropdown(): boolean {
   if (openNow === null) return false;
   openNow.close();

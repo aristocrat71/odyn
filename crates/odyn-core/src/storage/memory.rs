@@ -1,10 +1,9 @@
 //! The brain's index: rows derived from the note files, never authored here.
 //!
-//! `sync_notes` is the only writer of memory rows. It mirrors the brain
-//! folder into SQLite — content, hash, tokens, links, and one `memories_vec`
-//! row per memory under the same rowid, written in the same transaction,
-//! because an index entry the folder no longer backs silently corrupts
-//! retrieval. Everything else here reads the mirror or records injections.
+//! `sync_notes` is the only writer of memory rows; the folder is the truth. A
+//! memory row and its `memories_vec` row share a rowid and are written in one
+//! transaction, because an index entry the folder no longer backs corrupts
+//! retrieval silently.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,7 +15,7 @@ use crate::notes::NoteFile;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Memory {
     pub id: i64,
-    /// The note's file stem — the id every surface shows.
+    /// The note's file stem.
     pub slug: String,
     pub content: String,
     /// Unix epoch seconds — of the index row, not the file.
@@ -27,14 +26,12 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// What the template, ledger and CLI print. The slug is the display id.
     pub fn display_id(&self) -> String {
         self.slug.clone()
     }
 }
 
-/// One recorded use of a memory: which conversation and message it was
-/// injected for. `message_id` outlives its message as `None`.
+/// One recorded use of a memory. `message_id` outlives its message as `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Injection {
     pub id: i64,
@@ -47,15 +44,11 @@ pub struct Injection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemorySort {
-    /// Most recently touched first.
     Recent,
-    /// Most often injected first.
     Hits,
-    /// Newest first.
     Created,
 }
 
-/// A memory with what the injections log says about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryStats {
     pub memory: Memory,
@@ -63,8 +56,6 @@ pub struct MemoryStats {
     pub last_injected_at: Option<i64>,
 }
 
-/// What a folder scan means for the index: the slugs that need an embedding
-/// before `sync_notes` can mirror them, and whether anything changed at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotePlan {
     /// New or edited notes, in folder order. Embed exactly these.
@@ -74,17 +65,15 @@ pub struct NotePlan {
 }
 
 impl Storage {
-    /// Whether the index was built by something other than `model`, and so
-    /// has to be rebuilt before it can be trusted. Cheap: one row read.
+    /// Whether the index was built by `model`; if not it must be rebuilt before
+    /// it can be trusted.
     pub fn index_matches(&self, model: &str) -> Result<bool, StorageError> {
         Ok(self.active_model()?.as_deref() == Some(model))
     }
 
-    /// Points the index at `model`, whose vectors are `dim` wide, dropping
-    /// every vector the previous model produced: vectors from two models are
-    /// incomparable, so the old ones go whole rather than being mixed with the
-    /// new. Memory rows survive — and with them every id, hit count and
-    /// injection record — so a model swap costs re-embedding, never history.
+    /// Points the index at `model`, whose vectors are `dim` wide, dropping every
+    /// vector the previous model produced: vectors from two models are
+    /// incomparable. Memory rows, ids, hit counts and injections all survive.
     pub fn rebuild_index(&self, model: &str, dim: usize) -> Result<(), StorageError> {
         if dim == 0 {
             return Err(StorageError::EmbeddingDimensions {
@@ -107,7 +96,6 @@ impl Storage {
         Ok(())
     }
 
-    /// The model the index was built with, if it has ever been recorded.
     pub fn active_model(&self) -> Result<Option<String>, StorageError> {
         let found = self
             .conn
@@ -121,7 +109,7 @@ impl Storage {
         }
     }
 
-    /// The width the vector table was created at; 0 before anything is built.
+    /// 0 before an index has been built.
     pub fn index_dim(&self) -> Result<usize, StorageError> {
         let found = self
             .conn
@@ -136,7 +124,7 @@ impl Storage {
     }
 
     /// Compares the folder against the index. Read-only, so callers can embed
-    /// the stale notes without holding whatever lock guards this storage.
+    /// the stale notes without holding the lock that guards this storage.
     pub fn note_sync_plan(&self, notes: &[NoteFile]) -> Result<NotePlan, StorageError> {
         let indexed = self.indexed_hashes()?;
         let vectored = self.vec_rowids()?;
@@ -153,10 +141,8 @@ impl Storage {
         })
     }
 
-    /// Mirrors the folder into the index: inserts new notes, rewrites edited
-    /// ones in place (same slug, same id — hit history survives edits), and
-    /// drops rows whose file is gone, injections cascading with them.
-    /// `embeddings` must cover every stale slug; unchanged notes need none.
+    /// Mirrors the folder into the index. An edit rewrites in place, keeping the
+    /// id and so the hit history. `embeddings` must cover every stale slug.
     /// Answers whether anything changed, and invalidates the graph when so.
     pub fn sync_notes(
         &self,
@@ -188,9 +174,8 @@ impl Storage {
         }
 
         for note in notes {
-            // The same staleness rule the plan used, so a note whose vector
-            // went missing — a model swap dropped the table — is rebuilt even
-            // though its content never changed.
+            // The same staleness rule the plan used, so a note whose vector went
+            // missing is rebuilt even though its content never changed.
             if !is_stale(&indexed, &vectored, note) {
                 continue;
             }
@@ -246,9 +231,8 @@ impl Storage {
         Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
     }
 
-    /// Which memories currently have a vector. A memory row without one is a
-    /// memory retrieval cannot see, so this is what makes the index
-    /// self-healing rather than quietly incomplete.
+    /// Which memories currently have a vector. A row without one is invisible to
+    /// retrieval, so this is what keeps the index self-healing.
     fn vec_rowids(&self) -> Result<HashSet<i64>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT m.id FROM memories AS m WHERE EXISTS (
@@ -284,15 +268,18 @@ impl Storage {
             .map_err(|error| not_found(error, id))
     }
 
-    /// Records what was injected for a message, replacing any earlier record
-    /// for it: a retried turn's context is the one the model last saw, and
-    /// counting it twice would inflate every hit statistic built on this table.
+    /// Records one recall event, replacing any earlier record for the same
+    /// message: a retried turn's context is the one the model last saw, and
+    /// counting it twice would inflate every hit statistic. A `None`
+    /// conversation is an ephemeral spotlight ask — it still counts hits and
+    /// co-use, under a negative `turn` id of its own. Answers the inserted
+    /// row ids, so a promotion can adopt them.
     pub fn record_injections(
         &self,
-        conversation_id: i64,
+        conversation_id: Option<i64>,
         message_id: Option<i64>,
         memory_ids: &[i64],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<i64>, StorageError> {
         let now = now_secs();
         let tx = self.conn.unchecked_transaction()?;
         if let Some(message_id) = message_id {
@@ -301,15 +288,47 @@ impl Storage {
                 params![message_id],
             )?;
         }
+        let turn = match message_id {
+            Some(id) => id,
+            None => {
+                let low: i64 =
+                    tx.query_row("SELECT COALESCE(MIN(turn), 0) FROM injections", [], |row| {
+                        row.get(0)
+                    })?;
+                low.min(0) - 1
+            }
+        };
+        let mut rows = Vec::with_capacity(memory_ids.len());
         for memory_id in memory_ids {
             tx.execute(
-                "INSERT INTO injections (conversation_id, message_id, memory_id, injected_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![conversation_id, message_id, memory_id, now],
+                "INSERT INTO injections (conversation_id, message_id, turn, memory_id, injected_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![conversation_id, message_id, turn, memory_id, now],
             )?;
+            rows.push(tx.last_insert_rowid());
         }
         // Injections move co-injection edges and hit counts, so the graph too.
         invalidate_graph(&tx)?;
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    /// Promotion: ephemeral rows join the saved conversation and its user
+    /// message, keeping the hit history they already earned.
+    pub fn adopt_injections(
+        &self,
+        rows: &[i64],
+        conversation_id: i64,
+        message_id: i64,
+    ) -> Result<(), StorageError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for row in rows {
+            tx.execute(
+                "UPDATE injections SET conversation_id = ?1, message_id = ?2, turn = ?2
+                 WHERE id = ?3",
+                params![conversation_id, message_id, row],
+            )?;
+        }
         Ok(tx.commit()?)
     }
 
@@ -331,8 +350,6 @@ impl Storage {
     }
 
     /// One page of the brain list, with hit counts from the injections log.
-    /// Pages by offset: the list is append-mostly and the UI tolerates a row
-    /// sliding between pages.
     pub fn memories_overview(
         &self,
         sort: MemorySort,
@@ -360,7 +377,7 @@ impl Storage {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// The same stats for an arbitrary set — search results keep their order.
+    /// The same stats for an arbitrary set, which keeps its order.
     pub fn stats_for(&self, memories: Vec<Memory>) -> Result<Vec<MemoryStats>, StorageError> {
         let mut stmt = self
             .conn
@@ -417,14 +434,13 @@ impl Storage {
     }
 
     /// Pairs injected for the same message at least `min` times, smaller id
-    /// first, with how often.
+    /// first, with the count.
     pub fn co_injections(&self, min: i64) -> Result<Vec<(i64, i64, i64)>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT a.memory_id, b.memory_id, count(*)
              FROM injections AS a
              JOIN injections AS b
-               ON a.message_id = b.message_id AND a.memory_id < b.memory_id
-             WHERE a.message_id IS NOT NULL
+               ON a.turn = b.turn AND a.memory_id < b.memory_id
              GROUP BY a.memory_id, b.memory_id
              HAVING count(*) >= ?1",
         )?;
@@ -475,8 +491,8 @@ fn invalidate_graph(conn: &rusqlite::Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// A note is stale when its content moved, or when it has no vector at all —
-/// which is how a model swap re-embeds a folder whose files never changed.
+/// Stale when the content moved or the vector is missing — the latter is how a
+/// model swap re-embeds a folder whose files never changed.
 fn is_stale(
     indexed: &HashMap<String, (i64, i64)>,
     vectored: &HashSet<i64>,
@@ -536,7 +552,6 @@ pub(crate) mod tests {
         (dir, storage)
     }
 
-    /// A note as `read_notes` would parse it, with a hash that tracks content.
     pub(crate) fn note(slug: &str, content: &str) -> NoteFile {
         note_with_links(slug, content, &[])
     }
@@ -553,14 +568,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// A unit vector along `axis` at the default model's width, optionally
-    /// leaning towards the next axis — leaning further means farther from the
-    /// pure axis vector.
+    /// A unit vector along `axis` at the default model's width; a bigger `lean`
+    /// tilts it towards the next axis, and so further from the query.
     pub(crate) fn vector(axis: usize, lean: f32) -> Vec<f32> {
         wide_vector(axis, lean, crate::embed::FAKE_DIM)
     }
 
-    /// The same, at an arbitrary width — for the model-swap tests.
     pub(crate) fn wide_vector(axis: usize, lean: f32, dim: usize) -> Vec<f32> {
         let mut values = vec![0.0f32; dim];
         values[axis] = 1.0 - lean;
@@ -632,7 +645,6 @@ pub(crate) mod tests {
         );
         let alpha_id = listed[0].id;
 
-        // An edit keeps the id — the hit history and edges by name survive.
         let edited = vec![
             note_with_links("alpha", "now links to nothing", &[]),
             note("beta", "plain"),
@@ -648,12 +660,11 @@ pub(crate) mod tests {
         assert_eq!(nearest.id, alpha_id, "the embedding moved with the edit");
         assert!(distance.abs() < 1e-6);
 
-        // A deleted file prunes its row, its vec entry and its injections.
         let conversation = storage
             .create_conversation("c", "ollama", "llama3.2:3b")
             .expect("create");
         storage
-            .record_injections(conversation.id, None, &[alpha_id])
+            .record_injections(Some(conversation.id), None, &[alpha_id])
             .expect("inject");
         assert!(storage
             .sync_notes(&[note("beta", "plain")], &[])
@@ -665,7 +676,6 @@ pub(crate) mod tests {
             .expect("gone")
             .is_empty());
 
-        // Nothing changed: sync says so and touches nothing.
         assert!(!storage
             .sync_notes(&[note("beta", "plain")], &[])
             .expect("noop"));
@@ -690,9 +700,6 @@ pub(crate) mod tests {
         ));
     }
 
-    /// The model swap: the vector table is rebuilt at the new width, every
-    /// note comes back stale even though no file changed, and the rows —
-    /// with their ids, hit counts and injection records — survive it.
     #[test]
     fn changing_the_model_rebuilds_the_index_but_keeps_history() {
         let (_dir, storage) = open("swap");
@@ -707,7 +714,7 @@ pub(crate) mod tests {
             .append_message(conversation.id, crate::chat::Role::User, "q", None, None)
             .expect("message");
         storage
-            .record_injections(conversation.id, Some(message.id), &[alpha.id])
+            .record_injections(Some(conversation.id), Some(message.id), &[alpha.id])
             .expect("inject");
         assert_eq!(
             storage.active_model().expect("model").as_deref(),
@@ -715,7 +722,6 @@ pub(crate) mod tests {
         );
         assert!(storage.index_matches("bge-small").expect("matches"));
 
-        // A wider model: the table is rebuilt, so nothing has a vector left.
         const WIDE_DIM: usize = 768;
         assert!(!storage.index_matches("bge-base").expect("differs"));
         storage.rebuild_index("bge-base", WIDE_DIM).expect("swap");
@@ -732,7 +738,6 @@ pub(crate) mod tests {
             "every note re-embeds, though no file changed"
         );
 
-        // The old width is now rejected, the new one accepted.
         assert!(matches!(
             storage.sync_notes(&notes, &[("alpha".to_string(), vector(0, 0.0))]),
             Err(StorageError::EmbeddingDimensions { expected, got })
@@ -763,8 +768,6 @@ pub(crate) mod tests {
             .is_empty());
     }
 
-    /// A vector lost without a content change is repaired by the next sync:
-    /// the index cannot be quietly missing a memory retrieval should see.
     #[test]
     fn a_memory_without_a_vector_is_stale_even_when_its_content_is_unchanged() {
         let (_dir, storage) = open("orphan");
@@ -862,10 +865,10 @@ pub(crate) mod tests {
             .expect("message");
 
         storage
-            .record_injections(conversation.id, Some(message.id), &[ids[0]])
+            .record_injections(Some(conversation.id), Some(message.id), &[ids[0]])
             .expect("record");
         storage
-            .record_injections(conversation.id, Some(message.id), &[ids[1]])
+            .record_injections(Some(conversation.id), Some(message.id), &[ids[1]])
             .expect("re-record");
 
         let recorded: Vec<i64> = storage
@@ -902,7 +905,7 @@ pub(crate) mod tests {
                 )
                 .expect("message");
             storage
-                .record_injections(conversation.id, Some(row.id), &[ids[0], ids[1]])
+                .record_injections(Some(conversation.id), Some(row.id), &[ids[0], ids[1]])
                 .expect("inject");
         }
         assert_eq!(
@@ -910,6 +913,56 @@ pub(crate) mod tests {
             vec![(ids[0], ids[1], 3)]
         );
         assert!(storage.co_injections(4).expect("pairs").is_empty());
+    }
+
+    /// A spotlight ask that is never promoted still counts: hits accrue and
+    /// co-use pairs form, each ask under a turn id of its own. Promotion
+    /// adopts the rows instead of recording them twice.
+    #[test]
+    fn ephemeral_recordings_count_and_promotion_adopts_them() {
+        let (_dir, storage) = open("ephemeral");
+        let notes = vec![note("a", "x"), note("b", "y")];
+        sync_spread(&storage, &notes);
+        let ids: Vec<i64> = storage
+            .list_memories()
+            .expect("list")
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect();
+
+        let first = storage
+            .record_injections(None, None, &[ids[0], ids[1]])
+            .expect("record");
+        storage
+            .record_injections(None, None, &[ids[0], ids[1]])
+            .expect("record again");
+        assert_eq!(
+            storage.co_injections(2).expect("pairs"),
+            vec![(ids[0], ids[1], 2)],
+            "two asks, one pair — never four rows on one turn"
+        );
+        let listed = storage.list_memories().expect("list");
+        assert_eq!(storage.stats_for(listed).expect("stats")[0].hits, 2);
+
+        let conversation = storage
+            .create_conversation("promoted", "ollama", "llama3.2:3b")
+            .expect("create");
+        let question = storage
+            .append_message(conversation.id, crate::chat::Role::User, "q", None, None)
+            .expect("message");
+        storage
+            .adopt_injections(&first, conversation.id, question.id)
+            .expect("adopt");
+        let adopted = storage.injections(conversation.id).expect("injections");
+        assert_eq!(adopted.len(), 2, "adoption re-parents, it does not add");
+        assert!(adopted
+            .iter()
+            .all(|injection| injection.message_id == Some(question.id)));
+        assert_eq!(
+            storage.co_injections(2).expect("pairs"),
+            vec![(ids[0], ids[1], 2)],
+            "adoption must not change what was counted"
+        );
     }
 
     #[test]
@@ -932,10 +985,10 @@ pub(crate) mod tests {
             .create_conversation("s", "ollama", "llama3.2:3b")
             .expect("create");
         storage
-            .record_injections(conversation.id, None, &[a])
+            .record_injections(Some(conversation.id), None, &[a])
             .expect("inject a");
         storage
-            .record_injections(conversation.id, None, &[a, c])
+            .record_injections(Some(conversation.id), None, &[a, c])
             .expect("inject a and c");
 
         let ids = |rows: Vec<MemoryStats>| {

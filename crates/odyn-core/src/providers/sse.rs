@@ -3,8 +3,8 @@
 
 use crate::chat::ChatError;
 
-/// No legitimate SSE line approaches this; growth past it means the endpoint
-/// is not an event stream, and buffering it whole would betray the RAM rules.
+/// Growth past this means the endpoint is not an event stream, and buffering it
+/// whole would betray the RAM rules.
 const MAX_LINE_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,8 +23,8 @@ pub(crate) enum SseEvent {
 #[derive(Debug, Default)]
 pub(crate) struct SseParser {
     /// An unterminated line, kept as bytes because a chunk boundary can fall
-    /// inside a multi-byte character. Splitting on `\n` before decoding is safe:
-    /// UTF-8 continuation bytes are all >= 0x80.
+    /// inside a multi-byte character. Splitting on `\n` first is safe: UTF-8
+    /// continuation bytes are all >= 0x80.
     line: Vec<u8>,
     /// `data:` values of the event being assembled. A `Vec` (not a `String`) so
     /// that no field at all stays distinguishable from one empty field.
@@ -62,8 +62,7 @@ impl SseParser {
         (out, None)
     }
 
-    /// Flushes a trailing event left unterminated by a server that just closed
-    /// the connection.
+    /// Flushes a trailing event left unterminated by a closed connection.
     pub(crate) fn finish(&mut self) -> (Vec<SseEvent>, Option<ChatError>) {
         if self.dead {
             return (Vec::new(), None);
@@ -81,14 +80,13 @@ impl SseParser {
     }
 
     fn handle_line(&mut self, raw: &[u8], out: &mut Vec<SseEvent>) -> Result<(), ChatError> {
-        // CRLF streams leave the CR behind. A lone-CR delimiter, also legal per
-        // the spec, is unsupported: no such server exists in practice, and it
-        // would mean holding back a trailing CR until the next chunk arrives.
+        // CRLF streams leave the CR behind. A lone-CR delimiter, legal per the
+        // spec, is unsupported: no such server exists in practice.
         let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
         let mut line = std::str::from_utf8(raw)
             .map_err(|_| ChatError::Parse("stream contained invalid UTF-8".to_string()))?;
-        // The spec says strip a leading BOM; line level catches it even when a
-        // chunk boundary split it.
+        // Strip a leading BOM, at line level so a chunk boundary inside it is
+        // still caught.
         if !self.started {
             self.started = true;
             line = line.strip_prefix('\u{feff}').unwrap_or(line);
@@ -135,7 +133,6 @@ mod tests {
         SseEvent::Data(payload.to_string())
     }
 
-    /// Feed that must not error.
     fn ok(parser: &mut SseParser, chunk: &[u8]) -> Vec<SseEvent> {
         let (events, err) = parser.feed(chunk);
         assert!(err.is_none(), "unexpected error: {err:?}");
@@ -169,7 +166,6 @@ mod tests {
     #[test]
     fn value_keeps_everything_after_the_single_optional_space() {
         let mut parser = SseParser::default();
-        // Only one space is stripped, so the second space survives.
         assert_eq!(
             ok(&mut parser, b"data:  leading\n\ndata:tight\n\n"),
             vec![data(" leading"), data("tight")]
@@ -326,7 +322,6 @@ mod tests {
         let (events, err) = parser.feed(b"data: good\n\ndata: \xff\xfe\n\n");
         assert_eq!(events, vec![data("good")]);
         assert!(matches!(err, Some(ChatError::Parse(_))), "got {err:?}");
-        // Dead after an error: nothing more comes out.
         assert!(parser.feed(b"data: after\n\n").0.is_empty());
         assert!(parser.finish().0.is_empty());
     }

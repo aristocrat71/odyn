@@ -15,8 +15,6 @@ export type View = (typeof VIEWS)[number];
 export const isView = (name: string): name is View =>
   (VIEWS as readonly string[]).includes(name);
 
-// Provider and model are picked apart: one list of both is as long as every
-// provider's catalog put together.
 export type PickerMenu = "provider" | "model" | null;
 
 export type Stream = {
@@ -25,17 +23,22 @@ export type Stream = {
   prompt: string;
   text: string;
   error: string;
-  // The note slugs the backend injected for this reply, for the trace line.
+  // Note slugs the backend injected for this reply.
   used: string[];
+  saved: string[];
+  updated: string[];
+  deleted: string[];
+  // `from → to` pairs the model connected this reply.
+  linked: string[];
+  // `from → to` pairs it disconnected.
+  unlinked: string[];
 };
 
-// The backend's refusal when a conversation has no model. Picking one answers
-// it, so the line goes away with the selection.
+// The backend's refusal when a conversation has no model; picking one clears it.
 const NO_MODEL = "no model set · pick one";
 const PICKER_REFRESH_MS = 30_000;
 
 export const state = {
-  // The front door: commands from here, not straight into a conversation.
   view: "home" as View,
   conversations: [] as api.Conversation[],
   selected: null as number | null,
@@ -44,7 +47,6 @@ export const state = {
   tokens: null as number | null,
   stream: null as Stream | null,
   picker: {
-    // Which of the two menus is open, if either.
     open: null as PickerMenu,
     loading: false,
     groups: [] as api.ProviderGroup[],
@@ -57,7 +59,6 @@ export const state = {
   ledger: {
     preview: null as api.ContextPreview | null,
     error: null as string | null,
-    expanded: false,
   },
   brain: {
     mode: "list" as "list" | "graph",
@@ -71,9 +72,8 @@ export const state = {
     // The slug being edited in place; "new" is the add-note row.
     editing: null as string | null,
     graph: null as api.Graph | null,
-    // Everything selectable, loaded when the brain view opens.
     models: null as api.EmbedOption[] | null,
-    // Set while a swap re-embeds the folder — it can take a while.
+    // Set while a swap re-embeds the whole folder.
     swapping: false,
   },
   config: {
@@ -85,11 +85,10 @@ export const state = {
     editing: null as { name: string | null } | null,
     catalog: null as api.CatalogItem[] | null,
     connect: false,
-    // The catalog entry the connect panel is aimed at. A recognised key aims
-    // it on its own; a tile is how the rest get aimed.
+    // The catalog entry the connect panel is aimed at.
     pick: null as string | null,
     connecting: false,
-    // What the last connection came to, shown until the next one starts.
+    // The last connection's summary, shown until the next one starts.
     connected: null as string | null,
   },
   error: "",
@@ -162,12 +161,11 @@ export function togglePicker(which: PickerMenu): void {
     closePicker();
     return;
   }
-  // Only the first open probes: stepping from the provider menu to the model
-  // one is the same listing, read twice.
+  // Only the first open probes: provider → model is the same listing twice.
   const first = state.picker.open === null;
   state.picker.open = which;
   if (first) {
-    // Reachability from a minute ago is not a fact, so nothing stale is shown.
+    // Reachability from a minute ago is not a fact: nothing stale is shown.
     state.picker.loading = true;
     state.picker.groups = [];
     void loadProviders();
@@ -267,7 +265,6 @@ export async function commitRename(): Promise<void> {
     id === null
       ? undefined
       : state.conversations.find((candidate) => candidate.id === id);
-  // An empty or unchanged title is a cancel, not a write.
   if (id === null || row === undefined || title === "" || title === row.title) {
     render();
     return;
@@ -310,6 +307,11 @@ async function start(prompt: string, retry: boolean): Promise<void> {
     text: "",
     error: "",
     used: [],
+    saved: [],
+    updated: [],
+    deleted: [],
+    linked: [],
+    unlinked: [],
   };
   state.stream = stream;
   render();
@@ -348,6 +350,31 @@ function apply(event: api.ChatEvent, stream: Stream): void {
     renderStream();
     return;
   }
+  if (event.kind === "saved") {
+    stream.saved.push(event.slug);
+    render();
+    return;
+  }
+  if (event.kind === "updated") {
+    stream.updated.push(event.slug);
+    render();
+    return;
+  }
+  if (event.kind === "deleted") {
+    stream.deleted.push(event.slug);
+    render();
+    return;
+  }
+  if (event.kind === "linked") {
+    stream.linked.push(`${event.from} → ${event.to}`);
+    render();
+    return;
+  }
+  if (event.kind === "unlinked") {
+    stream.unlinked.push(`${event.from} ⇢ ${event.to}`);
+    render();
+    return;
+  }
   // A failed stream keeps its partial text on screen, and its retry link.
   if (event.kind === "error") {
     stream.error = event.message;
@@ -357,8 +384,7 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   state.stream = null;
   void guard(async () => {
     state.conversations = await api.listConversations();
-    // The stored turn is the truth now: it carries the interrupted marker and
-    // the token counts the crumbs read.
+    // The stored turn is the truth now: interrupted marker and token counts.
     if (state.selected === stream.conversation) await open(stream.conversation);
   });
 }
@@ -385,8 +411,7 @@ export const loadBrain = (): Promise<void> =>
     state.brain.overview = await api.brainOverview();
     state.brain.memories = await api.brainMemories(state.brain.sort, 0);
     state.brain.exhausted = state.brain.memories.length < BRAIN_PAGE;
-    // The catalog probes Ollama and every configured endpoint, so it lands
-    // after the list rather than holding it up.
+    // Probes every configured endpoint, so it lands after the list.
     void loadEmbedModels();
   });
 
@@ -395,8 +420,28 @@ const loadEmbedModels = (): Promise<void> =>
     state.brain.models = await api.embedCatalog();
   });
 
-/// Swapping the model re-embeds every note, so the view says so while it
-/// runs rather than looking hung.
+/// Swapping re-embeds every note, so the view says so rather than look hung.
+export const chooseSaveTemperature = (value: number): Promise<void> =>
+  guard(async () => {
+    if (value === state.brain.overview?.save_temperature) return;
+    state.brain.overview = await api.brainSetSaveTemperature(value);
+    render();
+  });
+
+export const chooseTopK = (value: number): Promise<void> =>
+  guard(async () => {
+    if (value === state.brain.overview?.top_k) return;
+    state.brain.overview = await api.brainSetTopK(value);
+    render();
+  });
+
+export const chooseMinRelevance = (value: number): Promise<void> =>
+  guard(async () => {
+    if (value === state.brain.overview?.min_relevance) return;
+    state.brain.overview = await api.brainSetMinRelevance(value);
+    render();
+  });
+
 export const chooseEmbedModel = (model: string): Promise<void> =>
   guard(async () => {
     if (model === state.brain.overview?.model) return;
@@ -480,7 +525,6 @@ export const commitMemoryEdit = (content: string): Promise<void> =>
     const editing = state.brain.editing;
     state.brain.editing = null;
     const text = content.trim();
-    // An empty edit is a cancel, matching how renames behave.
     if (editing === null || text === "") return;
     if (editing === "new") await api.brainAddNote(text);
     else await api.brainUpdateNote(editing, text);
@@ -500,23 +544,19 @@ export const loadConfig = (): Promise<void> =>
 
 export const loadProvidersConfig = (): Promise<void> =>
   guard(async () => {
-    // What the last visit connected is not news on this one.
     state.providers.connected = null;
     state.providers.connect = false;
     state.providers.entries = await api.providersConfig();
     state.providers.catalog = await api.providerCatalog();
   });
 
-// Which endpoint the key in the panel is for. Aiming is not connecting: the
-// key stays where it is, and nothing is written until connect is asked for.
+// Aiming is not connecting: nothing is written until connect is asked for.
 export function pickCatalogProvider(id: string | null): void {
   if (state.providers.pick === id) return;
   state.providers.pick = id;
   render();
 }
 
-/// One paste, one write: the endpoint is asked what it serves, the answer
-/// picks the starting model, and the table lands in `odyn.toml`.
 export const connectProvider = (
   id: string,
   apiKey: string,
@@ -568,8 +608,6 @@ export function cancelProviderEdit(): void {
   render();
 }
 
-// Every write answers with the reloaded list, so what the view shows is what
-// the running app just adopted.
 export const saveProvider = (draft: api.ProviderDraft): Promise<void> =>
   guard(async () => {
     state.providers.entries = await api.providerSave(draft);
@@ -591,8 +629,6 @@ export const chooseDefaultProvider = (name: string): Promise<void> =>
     void refreshStatus();
   });
 
-// The system's default program for the file; which one that is belongs to the
-// OS, not to us.
 export const openConfigInEditor = (): Promise<void> =>
   guard(() => api.openConfig());
 
@@ -600,8 +636,7 @@ const PREVIEW_DEBOUNCE_MS = 400;
 let previewTimer: number | null = null;
 let previewSeq = 0;
 
-// The ledger previews what a send would inject right now: ≥400ms after the
-// last keystroke, never applied out of order.
+// ≥400ms after the last keystroke, and never applied out of order.
 export function schedulePreview(draft: string): void {
   if (previewTimer !== null) clearTimeout(previewTimer);
   previewTimer = window.setTimeout(() => {
@@ -625,13 +660,7 @@ export async function refreshPreview(draft: string): Promise<void> {
   render();
 }
 
-export function expandLedger(): void {
-  state.ledger.expanded = true;
-  render();
-}
-
-// Every failure the backend reports — including a config or database that
-// never loaded — ends up on one inline line instead of a dialog.
+// Every failure the backend reports ends up on one inline line, never a dialog.
 async function guard(run: () => Promise<void>): Promise<void> {
   try {
     state.error = "";

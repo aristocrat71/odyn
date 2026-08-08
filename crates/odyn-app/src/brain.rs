@@ -15,6 +15,10 @@ use crate::state::{AppState, Ready};
 const PAGE: usize = 50;
 /// Same breadth as `odyn mem search`, whose order the GUI must reproduce.
 const SEARCH_LIMIT: usize = 20;
+/// What the brain view's field will set. Narrower than the config allows, which
+/// still takes anything from 1 up for hand-edits and `odyn config set`.
+const TOP_K_MIN: u32 = 5;
+const TOP_K_MAX: u32 = 100;
 
 #[derive(serde::Serialize)]
 pub struct MemoryRow {
@@ -32,14 +36,14 @@ pub struct BrainOverview {
     count: i64,
     top_k: u32,
     cap_tokens: u32,
-    /// The brain folder, spelled out so the view can say where the files live.
     path: String,
-    /// What `[brain] model` names, exactly as the config spells it.
     model: String,
     /// Whether that model sends note text off the machine.
     model_remote: bool,
     /// The width the index was actually built at; 0 before anything is built.
     dim: usize,
+    save_temperature: f32,
+    min_relevance: f32,
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -74,9 +78,8 @@ impl From<MemoryStats> for MemoryRow {
     }
 }
 
-/// Opening the brain view re-reads the folder, so a file dropped in by any
-/// editor or agent appears here without ceremony. A folder that cannot be
-/// synced still shows what the index has.
+/// Re-reads the folder, so a file dropped in by any editor appears here. A
+/// folder that cannot be synced still shows what the index has.
 #[tauri::command]
 pub async fn brain_overview(app: AppHandle) -> Result<BrainOverview, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -94,15 +97,16 @@ pub async fn brain_overview(app: AppHandle) -> Result<BrainOverview, String> {
             model: ready.config.brain.model.canonical(),
             model_remote: ready.config.brain.model.is_remote(),
             dim,
+            save_temperature: ready.config.brain.save_temperature,
+            min_relevance: ready.config.brain.min_relevance,
         })
     })
     .await
     .map_err(|err| err.to_string())?
 }
 
-/// Everything selectable: the bundled fastembed catalog, whatever the local
-/// Ollama has that can embed, and — flagged, because it is the only one that
-/// sends note text off the machine — each configured endpoint's models.
+/// Everything selectable; remote entries are flagged — only those send note
+/// text off-machine.
 #[tauri::command]
 pub async fn embed_catalog(state: State<'_, AppState>) -> Result<Vec<EmbedOption>, String> {
     let (ollama_url, providers) = {
@@ -162,9 +166,8 @@ pub async fn embed_catalog(state: State<'_, AppState>) -> Result<Vec<EmbedOption
     Ok(options)
 }
 
-/// Writes `[brain] model` and re-indexes on the spot, so the answer already
-/// reflects a brain that has been re-embedded rather than one about to be.
-/// Long by nature: it may download a model and embed the whole folder.
+/// Writes `[brain] model` and re-indexes on the spot, so the answer reflects a
+/// re-embedded brain. Long by nature: it may download a model.
 #[tauri::command]
 pub async fn brain_set_model(app: AppHandle, model: String) -> Result<BrainOverview, String> {
     let path = config_path().map_err(|err| err.to_string())?;
@@ -177,6 +180,49 @@ pub async fn brain_set_model(app: AppHandle, model: String) -> Result<BrainOverv
     })
     .await
     .map_err(|err| err.to_string())??;
+    brain_overview(app).await
+}
+
+/// Writes `[brain] save_temperature`. Validated here first: a bad value must
+/// not reach the file and brick the config until it is hand-edited.
+#[tauri::command]
+pub async fn brain_set_save_temperature(
+    app: AppHandle,
+    value: f32,
+) -> Result<BrainOverview, String> {
+    if !(0.0..=2.0).contains(&value) {
+        return Err("save_temperature must be between 0 and 2".to_string());
+    }
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "brain.save_temperature", &format!("{value:?}"))
+        .map_err(|err| err.to_string())?;
+    app.state::<AppState>().inner().reload()?;
+    brain_overview(app).await
+}
+
+/// Writes `[brain] top_k`, bounded like the field that sets it.
+#[tauri::command]
+pub async fn brain_set_top_k(app: AppHandle, value: u32) -> Result<BrainOverview, String> {
+    if !(TOP_K_MIN..=TOP_K_MAX).contains(&value) {
+        return Err(format!("top_k must be between {TOP_K_MIN} and {TOP_K_MAX}"));
+    }
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "brain.top_k", &value.to_string()).map_err(|err| err.to_string())?;
+    app.state::<AppState>().inner().reload()?;
+    brain_overview(app).await
+}
+
+/// Writes `[brain] min_relevance`. 0 keeps everything the walk ranked; 1 keeps
+/// only what ties the best match.
+#[tauri::command]
+pub async fn brain_set_min_relevance(app: AppHandle, value: f32) -> Result<BrainOverview, String> {
+    if !(0.0..=1.0).contains(&value) {
+        return Err("min_relevance must be between 0 and 1".to_string());
+    }
+    let path = config_path().map_err(|err| err.to_string())?;
+    config_edit::set(&path, "brain.min_relevance", &format!("{value:?}"))
+        .map_err(|err| err.to_string())?;
+    app.state::<AppState>().inner().reload()?;
     brain_overview(app).await
 }
 
@@ -199,8 +245,7 @@ pub async fn brain_memories(
     .map_err(|err| err.to_string())?
 }
 
-/// The same embedding pipeline as chat recall and `odyn mem search`, so all
-/// three return the same order for the same query.
+/// The same pipeline as chat recall and `odyn mem search`: same query, same order.
 #[tauri::command]
 pub async fn brain_search(app: AppHandle, query: String) -> Result<Vec<MemoryRow>, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -209,8 +254,8 @@ pub async fn brain_search(app: AppHandle, query: String) -> Result<Vec<MemoryRow
         if ready.storage().count_memories().map_err(say)? == 0 {
             return Ok(Vec::new());
         }
-        // The embed happens without the storage lock: it can take seconds on
-        // a cold model and a send must not queue behind it.
+        // The embed runs without the storage lock: a cold model takes seconds
+        // and a send must not queue behind it.
         let mut embedder = load_embedder(&ready.config, &ready.config.brain.model)
             .map_err(|err| err.to_string())?;
         let embedding = embedder
@@ -277,8 +322,7 @@ pub async fn brain_delete_note(app: AppHandle, slug: String) -> Result<(), Strin
     .map_err(|err| err.to_string())?
 }
 
-/// The cached graph, or a fresh compute — KNN sweeps and 300 layout
-/// iterations are CPU work, so they run off the async workers.
+/// KNN sweeps and 300 layout iterations are CPU work, so they run off-thread.
 #[tauri::command]
 pub async fn brain_graph(app: AppHandle) -> Result<odyn_core::graph::Graph, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -292,8 +336,7 @@ pub async fn brain_graph(app: AppHandle) -> Result<odyn_core::graph::Graph, Stri
     .map_err(|err| err.to_string())?
 }
 
-/// Reading views stay additive: a folder that cannot be synced is reported
-/// to the console, and the view renders what the index already has.
+/// Reading views stay additive: an unsyncable folder still renders the index.
 fn warn_on_sync_failure(ready: &Ready) {
     if let Err(err) = sync_index(ready) {
         eprintln!("odyn: brain folder not synced: {err}");

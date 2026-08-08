@@ -1,8 +1,7 @@
 //! OpenAI-compatible streaming chat provider: OpenCode Zen, DeepSeek, and any
 //! other endpoint speaking the `/chat/completions` SSE dialect.
 //!
-//! Must be driven on a tokio runtime with the IO and time drivers enabled —
-//! reqwest's requirement, not the `ChatProvider` trait's.
+//! Must be driven on a tokio runtime with the IO and time drivers enabled.
 
 use std::collections::VecDeque;
 use std::error::Error as _;
@@ -13,7 +12,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT
 use tokio::time::Instant;
 
 use super::sse::{SseEvent, SseParser};
-use crate::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Usage};
+use crate::chat::{
+    ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, ToolCall, ToolDef, Usage,
+};
 
 /// Error bodies reach the user, so a stray HTML page must not flood the screen.
 const MAX_ERROR_BODY_CHARS: usize = 512;
@@ -24,9 +25,8 @@ const PING_TIMEOUT: Duration = Duration::from_secs(2);
 /// Long enough for a cold gateway, short enough that a model menu still opens.
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Reachability for a status line: any HTTP answer means the endpoint is
-/// there, so an unauthorized `GET /models` still counts as up. Never an error
-/// — "unknown" and "down" look the same to the user.
+/// Reachability for a status line: any HTTP answer counts as up, so an
+/// unauthorized `GET /models` is still reachable. Never errors.
 pub async fn ping(base_url: &str) -> bool {
     let Ok(client) = reqwest::Client::builder().timeout(PING_TIMEOUT).build() else {
         return false;
@@ -35,8 +35,8 @@ pub async fn ping(base_url: &str) -> bool {
     client.get(url).send().await.is_ok()
 }
 
-/// Configuration mistakes, which is why these are separate from [`ChatError`]:
-/// none of them can happen mid-conversation.
+/// Configuration mistakes; separate from [`ChatError`] because none of them can
+/// happen mid-conversation.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderInitError {
     #[error("base_url must not be empty")]
@@ -79,15 +79,14 @@ pub struct OpenAiCompatProvider {
     client: reqwest::Client,
     /// Trailing slashes stripped, so `{base_url}/chat/completions` is well formed.
     base_url: String,
-    /// Kept because reqwest's connect timeout is a client-level setting, so
-    /// `with_timeouts` has to rebuild the client from them.
+    /// Kept because `with_timeouts` must rebuild the client from them.
     headers: HeaderMap,
     timeouts: Timeouts,
 }
 
 impl OpenAiCompatProvider {
     /// `api_key` is sent as `Authorization: Bearer …`; `None` sends no auth
-    /// header at all, which is what local endpoints expect.
+    /// header at all.
     pub fn new(
         base_url: impl Into<String>,
         api_key: Option<String>,
@@ -104,15 +103,14 @@ impl OpenAiCompatProvider {
                 .map_err(|_| ProviderInitError::HeaderName { name: name.clone() })?;
             let mut header_value = HeaderValue::from_str(&value)
                 .map_err(|_| ProviderInitError::HeaderValue { name })?;
-            // Gateways take keys in arbitrary headers (`api-key`, `x-api-key`),
-            // so every configured value is treated as a secret.
+            // Gateways take keys in arbitrary headers, so every configured
+            // value is treated as a secret.
             header_value.set_sensitive(true);
             headers.insert(header_name, header_value);
         }
         if let Some(key) = api_key {
             let mut value = HeaderValue::from_str(&format!("Bearer {key}"))
                 .map_err(|_| ProviderInitError::ApiKey)?;
-            // Keeps the key out of reqwest's debug output.
             value.set_sensitive(true);
             headers.insert(AUTHORIZATION, value);
         }
@@ -137,10 +135,8 @@ impl OpenAiCompatProvider {
         &self.base_url
     }
 
-    /// The model names the endpoint serves, sorted and deduplicated. Bounded
-    /// as a whole: a listing is small and instant, so a wedged endpoint must
-    /// not hang a model menu the way the streaming timeouts allow a long
-    /// answer to.
+    /// The model names the endpoint serves, sorted and deduplicated. Bounded by
+    /// an overall timeout: unlike a chat stream, a listing is never slow.
     pub async fn list_models(&self) -> Result<Vec<String>, ChatError> {
         let url = format!("{}/models", self.base_url);
         let fetch = async {
@@ -175,8 +171,7 @@ impl OpenAiCompatProvider {
             .into_ids()
             .into_iter()
             // Some endpoints namespace what they list (`models/<name>`) but
-            // take the bare name at `/chat/completions`. No model name starts
-            // with that segment, so stripping it only ever makes a name usable.
+            // take the bare name at `/chat/completions`.
             .map(|id| id.strip_prefix("models/").unwrap_or(&id).to_string())
             .filter(|id| !id.trim().is_empty())
             .collect();
@@ -192,16 +187,14 @@ pub fn order_models(names: &mut [String]) {
     names.sort_by(|a, b| is_free(b).cmp(&is_free(a)).then_with(|| a.cmp(b)));
 }
 
-/// What an endpoint says about its own pricing, in the id: OpenRouter suffixes
-/// `:free`, OpenCode Zen `-free`. Nothing else is inferred — a name that merely
-/// contains the word is a name.
+/// Reads pricing off the id suffix only: OpenRouter's `:free`, OpenCode Zen's
+/// `-free`. A name that merely contains the word is not free.
 pub fn is_free(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model.ends_with(":free") || model.ends_with("-free")
 }
 
-/// Both shapes seen in the wild: OpenAI's envelope, and the bare array some
-/// gateways answer with.
+/// Both shapes seen in the wild: OpenAI's envelope and a bare array.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum ModelListing {
@@ -244,7 +237,8 @@ impl ChatProvider for OpenAiCompatProvider {
         // Serialized eagerly so the stream state borrows nothing from `req`.
         let body = match serde_json::to_vec(&ChatCompletionRequest {
             model: req.model,
-            messages: req.messages,
+            messages: wire_messages(req.messages),
+            tools: req.tools.iter().map(WireTool::from).collect(),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -265,8 +259,7 @@ impl ChatProvider for OpenAiCompatProvider {
             .header(CONTENT_TYPE, "application/json")
             .body(body);
 
-        // Models that write their thinking into `content` are stripped here, so
-        // no surface has to know they do it.
+        // Models that write their thinking into `content` are stripped here.
         crate::reasoning::strip_reasoning(
             futures::stream::unfold(
                 State::Start {
@@ -283,7 +276,9 @@ impl ChatProvider for OpenAiCompatProvider {
 #[derive(serde::Serialize)]
 struct ChatCompletionRequest<'a> {
     model: &'a str,
-    messages: &'a [Message],
+    messages: Vec<WireMessage<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool<'a>>,
     stream: bool,
     stream_options: StreamOptions,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -292,13 +287,75 @@ struct ChatCompletionRequest<'a> {
     max_tokens: Option<u32>,
 }
 
+/// The OpenAI dialect: string-encoded arguments, tool results id-matched.
+#[derive(serde::Serialize)]
+struct WireMessage<'a> {
+    role: Role,
+    content: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<WireCall<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+#[derive(serde::Serialize)]
+struct WireCall<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireFunction<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct WireFunction<'a> {
+    name: &'a str,
+    arguments: String,
+}
+
+#[derive(serde::Serialize)]
+struct WireTool<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: &'a ToolDef,
+}
+
+impl<'a> From<&'a ToolDef> for WireTool<'a> {
+    fn from(tool: &'a ToolDef) -> Self {
+        Self {
+            kind: "function",
+            function: tool,
+        }
+    }
+}
+
+fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
+    messages
+        .iter()
+        .map(|message| WireMessage {
+            role: message.role,
+            content: &message.content,
+            tool_calls: message
+                .tool_calls
+                .iter()
+                .map(|call| WireCall {
+                    id: &call.id,
+                    kind: "function",
+                    function: WireFunction {
+                        name: &call.name,
+                        arguments: call.arguments.to_string(),
+                    },
+                })
+                .collect(),
+            tool_call_id: message.answers.as_ref().map(|call| call.id.as_str()),
+        })
+        .collect()
+}
+
 #[derive(serde::Serialize)]
 struct StreamOptions {
     include_usage: bool,
 }
 
-/// Unknown fields are ignored, so provider extras (`reasoning_content`,
-/// `logprobs`, …) stay non-breaking.
 #[derive(serde::Deserialize)]
 struct StreamChunk {
     #[serde(default)]
@@ -317,6 +374,28 @@ struct StreamChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<DeltaCall>,
+}
+
+/// One fragment of a streamed call: id and name arrive once, arguments in
+/// pieces, all keyed by `index`.
+#[derive(serde::Deserialize)]
+struct DeltaCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: DeltaFunction,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct DeltaFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -349,19 +428,25 @@ enum State {
 struct Streaming {
     body: BoxStream<'static, Result<Vec<u8>, reqwest::Error>>,
     parser: SseParser,
-    /// One chunk can decode into several events.
     pending: VecDeque<ChatEvent>,
+    /// Calls under assembly, keyed by stream index; flushed before `Done`.
+    calls: std::collections::BTreeMap<usize, PartialCall>,
     usage: Option<Usage>,
     /// `None` once the stream has produced something: the first-token budget no
     /// longer applies.
     deadline: Option<Instant>,
     first_token: Duration,
-    /// `[DONE]` seen or body exhausted: drain `pending`, then end the stream.
     terminated: bool,
-    /// A decode error, held back until every event decoded before it has been
-    /// delivered: how much text survives a bad chunk must not depend on how
-    /// TCP framed it.
+    /// Held back until every event decoded before it has been delivered: how
+    /// much text survives a bad chunk must not depend on how TCP framed it.
     failure: Option<ChatError>,
+}
+
+#[derive(Default)]
+struct PartialCall {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 impl Streaming {
@@ -372,13 +457,13 @@ impl Streaming {
             }
             match event {
                 SseEvent::Done => {
+                    self.finish_calls();
                     self.pending
                         .push_back(ChatEvent::Done { usage: self.usage });
                     self.terminated = true;
                 }
                 SseEvent::Data(payload) => {
-                    // A blank `data:` line is a keep-alive in the wild, not an
-                    // event.
+                    // A blank `data:` line is a keep-alive, not an event.
                     if payload.trim().is_empty() {
                         continue;
                     }
@@ -397,20 +482,51 @@ impl Streaming {
                         });
                     }
                     // Only the first choice matters: n > 1 is not part of v1.
-                    if let Some(content) = chunk
-                        .choices
-                        .into_iter()
-                        .next()
-                        .and_then(|c| c.delta.content)
+                    let Some(choice) = chunk.choices.into_iter().next() else {
+                        continue;
+                    };
+                    // The opening `{"role":"assistant","content":""}` chunk is
+                    // not a delta.
+                    if let Some(content) =
+                        choice.delta.content.filter(|content| !content.is_empty())
                     {
-                        // The opening `{"role":"assistant","content":""}` chunk
-                        // is not a delta.
-                        if !content.is_empty() {
-                            self.pending.push_back(ChatEvent::TextDelta(content));
+                        self.pending.push_back(ChatEvent::TextDelta(content));
+                    }
+                    for call in choice.delta.tool_calls {
+                        let slot = self.calls.entry(call.index).or_default();
+                        if let Some(id) = call.id.filter(|id| !id.is_empty()) {
+                            slot.id = id;
+                        }
+                        if let Some(name) = call.function.name.filter(|name| !name.is_empty()) {
+                            slot.name = name;
+                        }
+                        if let Some(arguments) = call.function.arguments {
+                            slot.arguments.push_str(&arguments);
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Broken argument JSON rides along as a string; the tool answers it rather
+    /// than the stream failing over it.
+    fn finish_calls(&mut self) {
+        for (_, call) in std::mem::take(&mut self.calls) {
+            if call.name.is_empty() {
+                continue;
+            }
+            let arguments = if call.arguments.trim().is_empty() {
+                serde_json::Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&call.arguments)
+                    .unwrap_or(serde_json::Value::String(call.arguments))
+            };
+            self.pending.push_back(ChatEvent::ToolCall(ToolCall {
+                id: call.id,
+                name: call.name,
+                arguments,
+            }));
         }
     }
 }
@@ -445,10 +561,8 @@ async fn step(mut state: State) -> Option<(Result<ChatEvent, ChatError>, State)>
                     };
                     return Some((Err(err), State::Finished));
                 }
-                // A 2xx that declares a non-SSE content type is a failure
-                // report, not an answer; parsing it as SSE would end as a
-                // silent empty reply. A missing content type gets the benefit
-                // of the doubt.
+                // A 2xx declaring a non-SSE content type is a failure report;
+                // parsing it as SSE would end as a silent empty reply.
                 let declared = response
                     .headers()
                     .get(CONTENT_TYPE)
@@ -468,8 +582,8 @@ async fn step(mut state: State) -> Option<(Result<ChatEvent, ChatError>, State)>
                     }
                 }
 
-                // `to_vec` copies, but it avoids taking a `bytes` dependency
-                // just to name the item type, and SSE chunks are tiny.
+                // `to_vec` copies, but avoids a `bytes` dependency just to name
+                // the item type, and SSE chunks are tiny.
                 let body = response
                     .bytes_stream()
                     .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
@@ -478,6 +592,7 @@ async fn step(mut state: State) -> Option<(Result<ChatEvent, ChatError>, State)>
                     body,
                     parser: SseParser::default(),
                     pending: VecDeque::new(),
+                    calls: std::collections::BTreeMap::new(),
                     usage: None,
                     deadline: Some(deadline),
                     first_token,
@@ -524,6 +639,7 @@ async fn step(mut state: State) -> Option<(Result<ChatEvent, ChatError>, State)>
                 }
                 // Servers that just close the connection never send `[DONE]`.
                 if ended && !streaming.terminated && streaming.failure.is_none() {
+                    streaming.finish_calls();
                     streaming.pending.push_back(ChatEvent::Done {
                         usage: streaming.usage,
                     });
@@ -541,8 +657,8 @@ fn first_token_timeout(budget: Duration) -> ChatError {
     ))
 }
 
-/// reqwest's own message is generic; the actionable cause (connection refused,
-/// dns failure, tls handshake) sits at the end of the source chain.
+/// reqwest's own message is generic; the actionable cause sits at the end of
+/// the source chain.
 fn transport_error(err: &reqwest::Error) -> ChatError {
     let mut message = if err.is_connect() {
         match err.url() {
@@ -569,8 +685,8 @@ fn transport_error(err: &reqwest::Error) -> ChatError {
     ChatError::Network(message)
 }
 
-/// Bounded in bytes and time: an error body must never hang or bloat the
-/// client the way `Response::text` on a stalled or endless body would.
+/// Bounded in bytes and time: unlike `Response::text`, a stalled or endless
+/// error body can neither hang nor bloat the client.
 async fn read_error_body(response: reqwest::Response, budget: Duration) -> Result<String, String> {
     const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
     let read = async {
@@ -620,7 +736,6 @@ mod tests {
     use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::sync::mpsc;
 
-    /// A recorded DeepSeek-shaped stream, split the way a server flushes it.
     /// Frames 3 and 4 split one event in half on purpose.
     fn openai_frames() -> Vec<String> {
         vec![
@@ -671,8 +786,7 @@ mod tests {
         .into_bytes()]
     }
 
-    /// Serves one connection with a canned response, returning the raw request
-    /// so tests can assert on headers and body.
+    /// Serves one connection with a canned response, returning the raw request.
     fn spawn_server(pieces: Vec<Vec<u8>>) -> (SocketAddr, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("mock server address");
@@ -695,7 +809,6 @@ mod tests {
         (addr, rx)
     }
 
-    /// Accepts, then says nothing, so the first-token deadline is what fires.
     fn spawn_silent_server() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("mock server address");
@@ -1075,8 +1188,6 @@ mod tests {
 
         let models = provider.list_models().await.expect("list models");
 
-        // Sorted and deduplicated, with the namespace some endpoints put on
-        // their ids stripped back to the name the chat endpoint takes.
         assert_eq!(models, vec!["gpt-oss-120b", "qwen3-32b"]);
         let request = rx
             .recv_timeout(Duration::from_secs(5))
@@ -1106,7 +1217,6 @@ mod tests {
         let (addr, _rx) = spawn_server(error_response("200 OK", "application/json", body));
         let provider = provider_for(addr, "/v1", None);
 
-        // Both suffixes count; a name that merely contains the word does not.
         assert_eq!(
             provider.list_models().await.expect("list models"),
             vec![
@@ -1120,8 +1230,6 @@ mod tests {
         );
     }
 
-    /// Gateways that answer with the bare array are common enough that the
-    /// envelope cannot be assumed.
     #[tokio::test]
     async fn list_models_reads_a_bare_array_too() {
         let (addr, _rx) = spawn_server(error_response(
@@ -1135,8 +1243,6 @@ mod tests {
         assert_eq!(models, vec!["deepseek-chat", "kimi-k3"]);
     }
 
-    /// A rejected key is the connect flow's one refusal, so it has to arrive as
-    /// a status and not as a network failure.
     #[tokio::test]
     async fn list_models_surfaces_a_rejected_key_as_its_status() {
         let (addr, _rx) = spawn_server(error_response(
@@ -1178,7 +1284,7 @@ mod tests {
         assert_eq!(error_message("   "), "no response body");
     }
 
-    /// Live smoke test. Never run in CI or by an agent: run it by hand with
+    /// Never run in CI or by an agent: run by hand with
     /// `DEEPSEEK_API_KEY=… cargo test -p odyn-core -- --ignored live_deepseek`.
     #[tokio::test]
     #[ignore = "hits the live DeepSeek API; run manually with DEEPSEEK_API_KEY set"]
@@ -1199,8 +1305,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_delta_survives_a_malformed_event_in_the_same_chunk() {
-        // One HTTP chunk holds a good event and then a bad one: the good delta
-        // must be delivered before the error, whatever the framing.
+        // One HTTP chunk holds a good event and then a bad one.
         let frames = vec![concat!(
             r#"data: {"id":"x","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}"#,
             "\n\n",
@@ -1222,8 +1327,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_success_that_is_not_an_event_stream_is_an_api_error() {
-        // Gateways report failures as 200 + JSON; treating that as an empty
-        // answer hid the whole class.
+        // Gateways report failures as 200 + JSON.
         let (addr, _rx) = spawn_server(error_response(
             "200 OK",
             "application/json",
@@ -1267,8 +1371,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stream_that_goes_silent_mid_answer_times_out() {
-        // Headers and one delta arrive, then the server holds the socket open
-        // silently; the idle timeout must end the stream with an error.
+        // Headers and one delta arrive, then the server holds the socket open.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("mock server address");
         std::thread::spawn(move || {
@@ -1306,8 +1409,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stalled_error_body_times_out_instead_of_hanging() {
-        // Error headers arrive, the body never does; reading it must give up
-        // within the first-token budget rather than hang forever.
+        // Error headers arrive, the body never does.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("mock server address");
         std::thread::spawn(move || {
@@ -1341,5 +1443,85 @@ mod tests {
             }
             other => panic!("expected an api error, got {other:?}"),
         }
+    }
+
+    /// The id and name arrive in the first fragment, the argument JSON split
+    /// across the next two.
+    #[tokio::test]
+    async fn tool_calls_assemble_across_deltas_and_the_wire_speaks_openai() {
+        let frames = vec![
+            concat!(
+                r#"data: {"id":"c","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"save_memory","arguments":""}}]},"finish_reason":null}]}"#,
+                "\n\n"
+            )
+            .to_string(),
+            concat!(
+                r#"data: {"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"content\":"}}]},"finish_reason":null}]}"#,
+                "\n\n"
+            )
+            .to_string(),
+            concat!(
+                r#"data: {"id":"c","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"likes espresso\"}"}}]},"finish_reason":null}]}"#,
+                "\n\n",
+                r#"data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+                "\n\n",
+                "data: [DONE]\n\n"
+            )
+            .to_string(),
+        ];
+        let (addr, rx) = spawn_server(chunked_sse_response(&frames));
+        let provider = provider_for(addr, "", None);
+        let call = ToolCall {
+            id: "call_0".to_string(),
+            name: "save_memory".to_string(),
+            arguments: serde_json::json!({"content": "prior"}),
+        };
+        let messages = vec![
+            Message::new(Role::User, "remember I like espresso"),
+            Message::tool_request("", vec![call.clone()]),
+            Message::tool_result(call, "saved as espresso"),
+        ];
+        let tools = [ToolDef {
+            name: "save_memory".to_string(),
+            description: "Save one memory".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let mut req = ChatRequest::new(&messages, "deepseek-chat");
+        req.tools = &tools;
+
+        let events: Vec<ChatEvent> = provider
+            .chat_stream(req)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("stream must not error");
+        assert_eq!(
+            events,
+            vec![
+                ChatEvent::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "save_memory".to_string(),
+                    arguments: serde_json::json!({"content": "likes espresso"}),
+                }),
+                ChatEvent::Done { usage: None },
+            ]
+        );
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured request");
+        let body = request.split("\r\n\r\n").nth(1).expect("request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("body is json");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "save_memory");
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_0");
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["arguments"],
+            r#"{"content":"prior"}"#
+        );
+        assert_eq!(body["messages"][2]["role"], "tool");
+        assert_eq!(body["messages"][2]["tool_call_id"], "call_0");
+        assert!(body["messages"][0].get("tool_calls").is_none(), "{body}");
     }
 }

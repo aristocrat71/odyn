@@ -1,16 +1,13 @@
 import { el } from "./dom";
 
-// Inline completion: the rest of what is being typed, drawn where the caret is,
-// ⇥ to take it. The layer floats over the field with everything already typed
-// repeated in transparent text, so the remainder starts exactly where the real
-// text ends — the field itself only ever holds what was actually typed, which
-// keeps the filtering and the `/brain` rule honest.
+// Inline completion, ⇥ to take it. A layer repeats the typed text transparently
+// so the remainder starts where the real text ends; the field holds only what
+// was actually typed.
 export type Field = HTMLInputElement | HTMLTextAreaElement;
 
 export type Ghost = {
   wrap: HTMLElement;
-  /// `true` while a completion is on screen, which is also when ⇥ has work to
-  /// do — a list marks its highlighted row with the key only then.
+  /// `true` while a completion is on screen, which is when ⇥ has work to do.
   draw: (full: string | undefined) => boolean;
 };
 
@@ -31,16 +28,14 @@ export function ghost(field: Field, className: string): Ghost {
       const tail = suffix(field, full);
       typed.textContent = tail === "" ? "" : field.value;
       rest.textContent = tail;
-      // A field tall enough to scroll has scrolled its text; the mirror has to
-      // follow or the ghost lands a line or two off.
+      // A scrolled field has scrolled its text, so the mirror must follow.
       layer.scrollTop = field.scrollTop;
       return tail !== "";
     },
   };
 }
 
-/// Writes the completion into the field. `false` when there was none, so the
-/// caller can leave ⇥ to the browser and let focus move on.
+/// Writes the completion in. `false` when there was none, so ⇥ falls through.
 export function accept(field: Field, full: string | undefined): boolean {
   const tail = suffix(field, full);
   if (tail === "") return false;
@@ -50,10 +45,8 @@ export function accept(field: Field, full: string | undefined): boolean {
   return true;
 }
 
-// What is left of the completion, measured against the word under the caret —
-// which is the whole field for a `/` command, and the last word for a mention
-// typed at the end of a message. Nothing is offered unless the caret sits at
-// the very end, so an edit in the middle is never guessed at.
+// What is left of the completion, measured against the word under the caret.
+// Nothing is offered unless the caret sits at the very end.
 function suffix(field: Field, full: string | undefined): string {
   const value = field.value;
   if (full === undefined) return "";

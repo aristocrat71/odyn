@@ -1,12 +1,9 @@
 //! Ollama's native `/api/chat` streaming provider: NDJSON lines rather than
-//! SSE, plus `/api/tags` for the models installed locally.
-//!
-//! Must be driven on a tokio runtime with the IO driver enabled — reqwest's
-//! requirement, not the `ChatProvider` trait's.
+//! SSE, plus `/api/tags` for the models installed locally. Must be driven on a
+//! tokio runtime with the IO driver enabled.
 //!
 //! No read/idle timeout on purpose: a cold model load is legitimately silent
-//! for minutes before the first token. Connect failures still surface
-//! immediately, and TCP keepalive catches a peer that died.
+//! for minutes before the first token.
 
 use std::collections::VecDeque;
 use std::error::Error as _;
@@ -16,15 +13,17 @@ use futures::stream::{BoxStream, StreamExt};
 use reqwest::header::CONTENT_TYPE;
 
 use super::openai_compat::ProviderInitError;
-use crate::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Usage};
+use crate::chat::{
+    ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, ToolCall, ToolDef, Usage,
+};
 
 const DEFAULT_KEEP_ALIVE: &str = "5m";
 
 /// Short enough that a status line never waits on a dead endpoint.
 const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Reachability for a status line: an answer from `/api/tags` means Ollama is
-/// serving. Never an error — "unknown" and "down" look the same to the user.
+/// Reachability for a status line: any answer from `/api/tags` counts as up.
+/// Never errors.
 pub async fn ping(base_url: &str) -> bool {
     let Ok(client) = reqwest::Client::builder().timeout(PING_TIMEOUT).build() else {
         return false;
@@ -46,14 +45,11 @@ pub struct OllamaProvider {
 pub struct ModelInfo {
     pub name: String,
     pub size_bytes: u64,
-    /// What Ollama says the model does — `embedding` for an embedder,
-    /// `completion` for a chat model. Empty on daemons too old to report it.
+    /// `embedding`, `completion`, … Empty on daemons too old to report it.
     pub capabilities: Vec<String>,
 }
 
 impl ModelInfo {
-    /// Whether this model can embed, so the brain's picker offers only what
-    /// would actually work rather than every model installed.
     pub fn embeds(&self) -> bool {
         self.capabilities
             .iter()
@@ -62,7 +58,7 @@ impl ModelInfo {
 }
 
 /// The installed models that can embed. An unreachable daemon is an empty
-/// list, not an error: the picker still has its bundled models to offer.
+/// list, not an error: the picker still has its bundled models.
 pub async fn embedding_models(base_url: &str) -> Vec<ModelInfo> {
     let Ok(provider) = OllamaProvider::new(base_url, None) else {
         return Vec::new();
@@ -74,8 +70,8 @@ pub async fn embedding_models(base_url: &str) -> Vec<ModelInfo> {
 }
 
 impl OllamaProvider {
-    /// `keep_alive` is how long Ollama holds the model in RAM after a reply;
-    /// `None` means `5m`, `"0"` unloads it immediately (RAM-frugal mode).
+    /// `keep_alive` is how long Ollama holds the model in RAM after a reply:
+    /// `None` means `5m`, `"0"` unloads immediately (RAM-frugal mode).
     pub fn new(
         base_url: impl Into<String>,
         keep_alive: Option<String>,
@@ -100,8 +96,7 @@ impl OllamaProvider {
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, ChatError> {
-        // Bounded as a whole: a tags listing is small and instant, so a wedged
-        // server must not hang the model picker.
+        // Bounded overall: unlike a chat stream, a tags listing is never slow.
         let fetch = async {
             let response = self
                 .client
@@ -154,9 +149,10 @@ impl ChatProvider for OllamaProvider {
         // Serialized eagerly so the stream state borrows nothing from `req`.
         let body = match serde_json::to_vec(&ChatBody {
             model: req.model,
-            messages: req.messages,
+            messages: wire_messages(req.messages),
             stream: true,
             keep_alive: &self.keep_alive,
+            tools: req.tools.iter().map(WireTool::from).collect(),
             options: Options {
                 temperature: req.temperature,
                 num_predict: req.max_tokens,
@@ -175,8 +171,7 @@ impl ChatProvider for OllamaProvider {
             .header(CONTENT_TYPE, "application/json")
             .body(body);
 
-        // Local reasoning models put `<think>` blocks in `content` too; the
-        // filter is the same one the OpenAI-compatible path uses.
+        // Local reasoning models put `<think>` blocks in `content` too.
         crate::reasoning::strip_reasoning(
             futures::stream::unfold(
                 State::Start {
@@ -193,10 +188,71 @@ impl ChatProvider for OllamaProvider {
 #[derive(serde::Serialize)]
 struct ChatBody<'a> {
     model: &'a str,
-    messages: &'a [Message],
+    messages: Vec<WireMessage<'a>>,
     stream: bool,
     keep_alive: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool<'a>>,
     options: Options,
+}
+
+/// Ollama's message dialect: object arguments, tool results named by tool.
+#[derive(serde::Serialize)]
+struct WireMessage<'a> {
+    role: Role,
+    content: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<WireCall<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_name: Option<&'a str>,
+}
+
+#[derive(serde::Serialize)]
+struct WireCall<'a> {
+    function: WireFunction<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct WireFunction<'a> {
+    name: &'a str,
+    arguments: &'a serde_json::Value,
+}
+
+#[derive(serde::Serialize)]
+struct WireTool<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: &'a ToolDef,
+}
+
+impl<'a> From<&'a ToolDef> for WireTool<'a> {
+    fn from(tool: &'a ToolDef) -> Self {
+        Self {
+            kind: "function",
+            function: tool,
+        }
+    }
+}
+
+fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
+    messages
+        .iter()
+        .map(|message| WireMessage {
+            role: message.role,
+            content: &message.content,
+            tool_calls: message
+                .tool_calls
+                .iter()
+                .map(|call| WireCall {
+                    function: WireFunction {
+                        name: &call.name,
+                        arguments: &call.arguments,
+                    },
+                })
+                .collect(),
+            tool_name: message.answers.as_ref().map(|call| call.name.as_str()),
+        })
+        .collect()
 }
 
 #[derive(serde::Serialize)]
@@ -207,7 +263,6 @@ struct Options {
     num_predict: Option<u32>,
 }
 
-/// Unknown fields are ignored, so Ollama's timing counters stay non-breaking.
 #[derive(serde::Deserialize)]
 struct StreamLine {
     #[serde(default)]
@@ -227,6 +282,20 @@ struct StreamLine {
 struct LineMessage {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<LineCall>,
+}
+
+#[derive(serde::Deserialize)]
+struct LineCall {
+    function: LineFunction,
+}
+
+#[derive(serde::Deserialize)]
+struct LineFunction {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
 }
 
 #[derive(serde::Deserialize)]
@@ -240,8 +309,7 @@ struct TagsModel {
     name: String,
     #[serde(default)]
     size: u64,
-    /// Ollama tags each model with what it can do. Absent on older daemons,
-    /// which is why nothing keys off it being present.
+    /// Absent on older daemons, so nothing may key off it being present.
     #[serde(default)]
     capabilities: Vec<String>,
 }
@@ -266,17 +334,16 @@ struct Streaming {
     /// An unterminated line, kept as bytes because a chunk boundary can fall
     /// inside a multi-byte character.
     line: Vec<u8>,
-    /// One chunk can decode into several events.
     pending: VecDeque<ChatEvent>,
     /// `done: true` seen or body exhausted: drain `pending`, then end.
     terminated: bool,
-    /// A decode error, held back until every delta decoded before it has been
-    /// delivered: how much text survives must not depend on TCP framing.
+    /// Held back until every delta decoded before it has been delivered: how
+    /// much text survives a bad line must not depend on TCP framing.
     failure: Option<ChatError>,
 }
 
-/// No legitimate NDJSON line approaches this; growth past it means the
-/// endpoint is not Ollama, and buffering it whole would betray the RAM rules.
+/// Growth past this means the endpoint is not Ollama, and buffering it whole
+/// would betray the RAM rules.
 const MAX_LINE_BYTES: usize = 1 << 20;
 
 impl Streaming {
@@ -299,8 +366,8 @@ impl Streaming {
         }
     }
 
-    /// Flushes a line left unterminated by a server that just closed the
-    /// connection, then guarantees the stream ends with `Done`.
+    /// Flushes a line left unterminated by a closed connection, then guarantees
+    /// the stream ends with `Done`.
     fn finish(&mut self) {
         if !self.line.is_empty() {
             let raw = std::mem::take(&mut self.line);
@@ -338,10 +405,17 @@ impl Streaming {
             });
             return;
         }
-        if let Some(content) = parsed.message.and_then(|message| message.content) {
+        if let Some(message) = parsed.message {
             // The final line carries an empty content field, not a delta.
-            if !content.is_empty() {
+            if let Some(content) = message.content.filter(|content| !content.is_empty()) {
                 self.pending.push_back(ChatEvent::TextDelta(content));
+            }
+            for call in message.tool_calls {
+                self.pending.push_back(ChatEvent::ToolCall(ToolCall {
+                    id: String::new(),
+                    name: call.function.name,
+                    arguments: call.function.arguments,
+                }));
             }
         }
         if parsed.done {
@@ -384,8 +458,8 @@ async fn step(mut state: State) -> Option<(Result<ChatEvent, ChatError>, State)>
                     return Some((Err(err), State::Finished));
                 }
 
-                // `to_vec` copies, but it avoids taking a `bytes` dependency
-                // just to name the item type, and the lines are tiny.
+                // `to_vec` copies, but avoids a `bytes` dependency just to name
+                // the item type, and the lines are tiny.
                 let body = response
                     .bytes_stream()
                     .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
@@ -425,8 +499,8 @@ async fn step(mut state: State) -> Option<(Result<ChatEvent, ChatError>, State)>
     }
 }
 
-/// A refused connection is the everyday case here — Ollama simply isn't
-/// running — so it gets a message that says exactly that.
+/// A refused connection is the everyday case here (Ollama isn't running), so it
+/// gets a message that says exactly that.
 fn transport_error(err: &reqwest::Error, base_url: &str) -> ChatError {
     let mut message = if err.is_connect() {
         format!("ollama not reachable at {base_url}")
@@ -480,8 +554,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// A recorded `/api/chat` stream: three content deltas, then the final line
-    /// with its token counts.
+    /// Three content deltas, then the final line with its token counts.
     fn ndjson_body() -> String {
         concat!(
             r#"{"model":"llama3.2:3b","created_at":"2024-10-01T12:00:00.1Z","message":{"role":"assistant","content":"Hel"},"done":false}"#,
@@ -540,8 +613,7 @@ mod tests {
         .into_bytes()]
     }
 
-    /// Serves one connection with a canned response, returning the raw request
-    /// so tests can assert on the body.
+    /// Serves one connection with a canned response, returning the raw request.
     fn spawn_server(pieces: Vec<Vec<u8>>) -> (SocketAddr, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().expect("mock server address");
@@ -864,8 +936,6 @@ mod tests {
                 },
             ]
         );
-        // A daemon too old to report capabilities offers no embedders, and
-        // that is a quiet empty list rather than a failure.
         assert!(!models[0].embeds());
         let request = rx
             .recv_timeout(Duration::from_secs(5))
@@ -937,8 +1007,7 @@ mod tests {
         assert!(!ping(&format!("http://{free}")).await);
     }
 
-    /// Live smoke test. Never run in CI or by an agent: run it by hand with a
-    /// local Ollama serving `llama3.2:3b`.
+    /// Never run in CI or by an agent: run by hand against a local Ollama.
     #[tokio::test]
     #[ignore = "hits a local Ollama; run manually with `ollama serve` running"]
     async fn live_ollama_smoke() {
@@ -955,8 +1024,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_delta_survives_an_error_line_in_the_same_chunk() {
-        // Content line and error line in ONE http chunk: the delta must be
-        // delivered before the error, whatever the framing.
+        // Content line and error line in ONE http chunk.
         let body = concat!(
             r#"{"model":"m","message":{"role":"assistant","content":"partial"},"done":false}"#,
             "\n",
@@ -996,5 +1064,78 @@ mod tests {
         assert_eq!(events.len(), 2, "{events:?}");
         assert!(matches!(&events[0], Ok(ChatEvent::TextDelta(text)) if text == "kept"));
         assert!(matches!(&events[1], Err(ChatError::Parse(_))), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn tool_calls_stream_as_events_and_the_wire_speaks_ollama() {
+        let body = concat!(
+            r#"{"message":{"role":"assistant","content":"on it"},"done":false}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"save_memory","arguments":{"content":"likes espresso"}}}]},"done":false}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":9,"eval_count":3}"#,
+            "\n"
+        );
+        let (addr, rx) = spawn_server(ndjson_response(body));
+        let provider = provider_for(addr, None);
+        let call = ToolCall {
+            id: String::new(),
+            name: "save_memory".to_string(),
+            arguments: serde_json::json!({"content": "likes espresso"}),
+        };
+        let messages = vec![
+            Message::new(Role::User, "remember I like espresso"),
+            Message::tool_request("", vec![call.clone()]),
+            Message::tool_result(call, "saved as espresso"),
+        ];
+        let tools = [ToolDef {
+            name: "save_memory".to_string(),
+            description: "Save one memory".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let mut req = ChatRequest::new(&messages, "llama3.2:3b");
+        req.tools = &tools;
+
+        let events: Vec<ChatEvent> = provider
+            .chat_stream(req)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("stream must not error");
+        assert_eq!(
+            events,
+            vec![
+                ChatEvent::TextDelta("on it".to_string()),
+                ChatEvent::ToolCall(ToolCall {
+                    id: String::new(),
+                    name: "save_memory".to_string(),
+                    arguments: serde_json::json!({"content": "likes espresso"}),
+                }),
+                ChatEvent::Done {
+                    usage: Some(Usage {
+                        input_tokens: 9,
+                        output_tokens: 3,
+                    }),
+                },
+            ]
+        );
+
+        let request = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured request");
+        let body = request.split("\r\n\r\n").nth(1).expect("request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("body is json");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "save_memory");
+        assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["arguments"]["content"],
+            "likes espresso"
+        );
+        assert_eq!(body["messages"][2]["role"], "tool");
+        assert_eq!(body["messages"][2]["tool_name"], "save_memory");
+        assert!(body["messages"][0].get("tool_calls").is_none(), "{body}");
+        assert!(body["messages"][2].get("answers").is_none(), "{body}");
     }
 }

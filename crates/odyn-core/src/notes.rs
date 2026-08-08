@@ -1,16 +1,18 @@
 //! The brain's source of truth: a folder of markdown files.
 //!
-//! One memory is one `.md` note. The file's stem is its identity (its slug),
-//! the text is the memory, `[[wikilinks]]` are deliberate edges in the brain
-//! graph, and YAML frontmatter is tolerated but never embedded or injected.
-//! SQLite holds only an index derived from these files — anything that
-//! disagrees with the folder is the index's bug, never the folder's.
+//! One memory is one `.md` note, its file stem the slug, `[[wikilinks]]` its
+//! edges; YAML frontmatter is tolerated but never embedded. The folder is the
+//! truth — anything in the SQLite index that disagrees is the index's bug.
 
 use std::path::{Path, PathBuf};
 
 const BRAIN_DIR_NAME: &str = "brain";
+/// Model-trashed notes live here; a subfolder is invisible to `is_note`.
+const TRASH_DIR_NAME: &str = ".trash";
 /// A derived slug stays short enough to read as an id in the ledger.
 const SLUG_MAX_CHARS: usize = 48;
+/// The line `link_note` keeps a note's added links on.
+const SEE_ALSO: &str = "See also ";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NotesError {
@@ -35,15 +37,15 @@ pub enum NotesError {
     Exists(String),
     #[error("no note named `{0}`")]
     NotFound(String),
+    #[error("`{0}` cannot link to itself")]
+    SelfLink(String),
     #[error("the note has no content")]
     EmptyNote,
 }
 
-/// One memory as its file holds it, ready for the index: frontmatter already
-/// stripped, links already parsed, hash and token count already computed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteFile {
-    /// The file stem, case preserved — what every surface shows.
+    /// The file stem, case preserved.
     pub slug: String,
     /// The note without frontmatter, edge-trimmed. Never empty.
     pub content: String,
@@ -56,8 +58,7 @@ pub struct NoteFile {
     pub tokens: i64,
 }
 
-/// The brain folder: the configured path (`~` expanded), or `brain/` in the
-/// platform data dir, next to the database.
+/// The configured path (`~` expanded), or `brain/` in the platform data dir.
 pub fn brain_dir(configured: Option<&Path>) -> Result<PathBuf, NotesError> {
     if let Some(path) = configured {
         return Ok(expand_home(path));
@@ -66,9 +67,8 @@ pub fn brain_dir(configured: Option<&Path>) -> Result<PathBuf, NotesError> {
     Ok(dirs.data_dir().join(BRAIN_DIR_NAME))
 }
 
-/// Every note in the folder, sorted by slug so callers see a stable order.
-/// A folder that does not exist yet is an empty brain, not an error. Files
-/// whose content is empty once frontmatter is stripped are not memories.
+/// Every note in the folder, sorted by slug. A missing folder is an empty brain,
+/// not an error; a file empty once frontmatter is stripped is not a memory.
 pub fn read_notes(dir: &Path) -> Result<Vec<NoteFile>, NotesError> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -106,9 +106,40 @@ pub fn read_notes(dir: &Path) -> Result<Vec<NoteFile>, NotesError> {
     Ok(notes)
 }
 
-/// Writes a new note, deriving a slug from the content unless one is given.
-/// A derived slug dodges collisions with a numeric suffix; an explicit name
-/// that already exists is an error — overwriting is `update_note`'s job.
+/// The slugs in the folder, sorted. A missing folder is an empty brain.
+pub fn list_slugs(dir: &Path) -> Result<Vec<String>, NotesError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(NotesError::Read {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let mut slugs = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|source| NotesError::Read {
+                path: dir.to_path_buf(),
+                source,
+            })?
+            .path();
+        if !is_note(&path) {
+            continue;
+        }
+        if let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) {
+            slugs.push(slug.to_string());
+        }
+    }
+    slugs.sort();
+    Ok(slugs)
+}
+
+/// Writes a new note, deriving a slug from the content unless one is given. A
+/// derived slug dodges collisions with a numeric suffix; an explicit name that
+/// already exists is an error — overwriting is `update_note`'s job.
 pub fn write_note(dir: &Path, name: Option<&str>, content: &str) -> Result<String, NotesError> {
     let content = content.trim();
     if content.is_empty() {
@@ -135,8 +166,8 @@ pub fn write_note(dir: &Path, name: Option<&str>, content: &str) -> Result<Strin
     Ok(slug)
 }
 
-/// Replaces a note's content, keeping its slug — and with it, its index id,
-/// its hit history and its edges by name.
+/// Replaces a note's content, keeping its slug and so its index id, hit history
+/// and edges by name.
 pub fn update_note(dir: &Path, slug: &str, content: &str) -> Result<(), NotesError> {
     let content = content.trim();
     if content.is_empty() {
@@ -148,6 +179,125 @@ pub fn update_note(dir: &Path, slug: &str, content: &str) -> Result<(), NotesErr
     write(dir, slug, content)
 }
 
+/// Writes a `[[to]]` wikilink into `from`, leaving the rest of the note — and
+/// its frontmatter — byte for byte. Idempotent: `Ok(false)` means the link was
+/// already there. Both notes must exist, so a slug a small model invented comes
+/// back as an error it can read rather than a dangling edge.
+pub fn link_note(dir: &Path, from: &str, to: &str) -> Result<bool, NotesError> {
+    if from.eq_ignore_ascii_case(to) {
+        return Err(NotesError::SelfLink(from.to_string()));
+    }
+    let path = note_path(dir, from);
+    if !path.exists() {
+        return Err(NotesError::NotFound(from.to_string()));
+    }
+    if !note_path(dir, to).exists() {
+        return Err(NotesError::NotFound(to.to_string()));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|source| NotesError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    if parse_links(strip_frontmatter(&raw)).contains(&to.to_lowercase()) {
+        return Ok(false);
+    }
+    let body = raw.trim_end();
+    let link = format!("[[{to}]]");
+    // A note collects its links on one trailing line instead of growing a
+    // paragraph per link — these files are read by hand, not only by Odyn.
+    let text = match body.rsplit_once('\n') {
+        Some((head, last)) if last.starts_with(SEE_ALSO) => {
+            format!("{head}\n{}, {link}.\n", last.trim_end_matches('.'))
+        }
+        _ if body.starts_with(SEE_ALSO) => format!("{}, {link}.\n", body.trim_end_matches('.')),
+        _ => format!("{body}\n\n{SEE_ALSO}{link}.\n"),
+    };
+    std::fs::write(&path, text).map_err(|source| NotesError::Write { path, source })?;
+    Ok(true)
+}
+
+/// Removes the `[[to]]` edge from `from`, keeping the note readable. On the
+/// `See also` line the entry goes, and the line with it once nothing is left;
+/// anywhere else the brackets are unwrapped so the sentence still reads.
+/// Idempotent: `Ok(false)` means there was no such link. `to` need not exist —
+/// a link left dangling by a delete is exactly the kind worth clearing.
+pub fn unlink_note(dir: &Path, from: &str, to: &str) -> Result<bool, NotesError> {
+    let path = note_path(dir, from);
+    if !path.exists() {
+        return Err(NotesError::NotFound(from.to_string()));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|source| NotesError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let target = link_target(to);
+    if !parse_links(strip_frontmatter(&raw)).contains(&target) {
+        return Ok(false);
+    }
+    // Frontmatter belongs to other tools; only the memory below it is edited.
+    let (head, body) = raw.split_at(raw.len() - strip_frontmatter(&raw).len());
+    let kept: Vec<String> = body
+        .lines()
+        .filter_map(|line| unlinked_line(line, &target))
+        .collect();
+    let body = kept.join("\n");
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(NotesError::EmptyNote);
+    }
+    std::fs::write(&path, format!("{head}{body}\n"))
+        .map_err(|source| NotesError::Write { path, source })?;
+    Ok(true)
+}
+
+/// `None` drops the line: it was Odyn's `See also` line and held nothing else.
+fn unlinked_line(line: &str, target: &str) -> Option<String> {
+    let Some(links) = see_also_links(line) else {
+        return Some(unwrap_links(line, target));
+    };
+    let kept: Vec<&str> = links
+        .into_iter()
+        .filter(|inner| link_target(inner) != target)
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = kept.iter().map(|inner| format!("[[{inner}]]")).collect();
+    Some(format!("{SEE_ALSO}{}.", names.join(", ")))
+}
+
+/// The insides of `See also [[a]], [[b]].` and nothing else — a line a human
+/// wrote around its links is prose, and is never rebuilt.
+fn see_also_links(line: &str) -> Option<Vec<&str>> {
+    let inner = line.strip_prefix(SEE_ALSO)?.strip_suffix('.')?;
+    inner
+        .split(", ")
+        .map(|part| part.strip_prefix("[[")?.strip_suffix("]]"))
+        .collect()
+}
+
+/// `[[anna]]` becomes `anna` and `[[anna|Anna]]` becomes `Anna`: the edge goes,
+/// the sentence stays.
+fn unwrap_links(line: &str, target: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("[[") {
+        let Some(end) = rest[start + 2..].find("]]") else {
+            break;
+        };
+        let inner = &rest[start + 2..start + 2 + end];
+        out.push_str(&rest[..start]);
+        if link_target(inner) == target {
+            out.push_str(display_text(inner));
+        } else {
+            out.push_str(&rest[start..start + 2 + end + 2]);
+        }
+        rest = &rest[start + 2 + end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn delete_note(dir: &Path, slug: &str) -> Result<(), NotesError> {
     let path = note_path(dir, slug);
     std::fs::remove_file(&path).map_err(|source| match source.kind() {
@@ -156,13 +306,30 @@ pub fn delete_note(dir: &Path, slug: &str) -> Result<(), NotesError> {
     })
 }
 
+/// Model-driven deletion: the note moves to `.trash/` in the brain folder
+/// rather than vanishing, so a wrong slug from a small model stays
+/// recoverable. Human paths (`mem rm`, the brain view) delete outright.
+pub fn trash_note(dir: &Path, slug: &str) -> Result<(), NotesError> {
+    let path = note_path(dir, slug);
+    if !path.exists() {
+        return Err(NotesError::NotFound(slug.to_string()));
+    }
+    let trash = dir.join(TRASH_DIR_NAME);
+    std::fs::create_dir_all(&trash).map_err(|source| NotesError::Create {
+        path: trash.clone(),
+        source,
+    })?;
+    // A re-trashed slug replaces the older copy: the latest deletion wins.
+    std::fs::rename(&path, trash.join(format!("{slug}.md")))
+        .map_err(|source| NotesError::Write { path, source })
+}
+
 pub fn note_path(dir: &Path, slug: &str) -> PathBuf {
     dir.join(format!("{slug}.md"))
 }
 
 fn write(dir: &Path, slug: &str, content: &str) -> Result<(), NotesError> {
     let path = note_path(dir, slug);
-    // A trailing newline, as every well-behaved text tool leaves one.
     std::fs::write(&path, format!("{content}\n"))
         .map_err(|source| NotesError::Write { path, source })
 }
@@ -189,8 +356,8 @@ fn parse_note(slug: &str, raw: &str) -> Option<NoteFile> {
     })
 }
 
-/// YAML frontmatter — a leading `---` line closed by another — is metadata
-/// for other tools; the memory is what follows.
+/// YAML frontmatter (a leading `---` line closed by another) is metadata for
+/// other tools; the memory is what follows.
 fn strip_frontmatter(raw: &str) -> &str {
     let mut lines = raw.split_inclusive('\n');
     let Some(first) = lines.next() else {
@@ -222,15 +389,7 @@ fn parse_links(content: &str) -> Vec<String> {
         };
         let inner = &rest[..end];
         rest = &rest[end + 2..];
-        let target = inner
-            .split('|')
-            .next()
-            .unwrap_or_default()
-            .split('#')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_lowercase();
+        let target = link_target(inner);
         if !target.is_empty() && !links.contains(&target) {
             links.push(target);
         }
@@ -238,8 +397,29 @@ fn parse_links(content: &str) -> Vec<String> {
     links
 }
 
-/// FNV-1a, 64-bit: deterministic across runs and toolchains forever, which is
-/// exactly what a stored change-detection hash must be.
+/// What a `[[wikilink]]`'s insides resolve to: the file stem, lowercased.
+fn link_target(inner: &str) -> String {
+    inner
+        .split('|')
+        .next()
+        .unwrap_or_default()
+        .split('#')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
+}
+
+/// What a `[[wikilink]]` reads as on the page: its alias, or its target.
+fn display_text(inner: &str) -> &str {
+    match inner.split_once('|') {
+        Some((_, alias)) => alias.trim(),
+        None => inner.split('#').next().unwrap_or_default().trim(),
+    }
+}
+
+/// FNV-1a, 64-bit: deterministic across runs and toolchains, as a stored
+/// change-detection hash must be.
 fn fnv1a(content: &str) -> i64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in content.bytes() {
@@ -253,7 +433,7 @@ pub(crate) fn approx_tokens(content: &str) -> i64 {
     content.chars().count().div_ceil(4) as i64
 }
 
-/// The first line's words, kebab-cased and capped — a readable id, not a title.
+/// The first line's words, kebab-cased and capped: a readable id, not a title.
 fn slugify_content(content: &str) -> String {
     let first_line = content.lines().next().unwrap_or_default();
     let slug = slugify(first_line);
@@ -436,6 +616,153 @@ mod tests {
             Err(NotesError::NotFound(_))
         ));
         assert!(read_notes(&dir.0).expect("read").is_empty());
+    }
+
+    #[test]
+    fn linking_appends_one_see_also_line_and_repeats_collect_on_it() {
+        let dir = TempDir::new("link");
+        write_note(&dir.0, Some("mitul"), "---\ntype: person\n---\nThe user.").expect("write");
+        write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("write");
+        write_note(&dir.0, Some("anna"), "His sister.").expect("write");
+
+        assert!(link_note(&dir.0, "football", "mitul").expect("link"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n\nSee also [[mitul]].\n"
+        );
+        assert!(link_note(&dir.0, "football", "anna").expect("second link"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n\nSee also [[mitul]], [[anna]].\n"
+        );
+        assert_eq!(
+            read_notes(&dir.0).expect("read")[1].links,
+            vec!["mitul".to_string(), "anna".to_string()]
+        );
+
+        // Idempotent, whatever the case the model names the target in.
+        assert!(!link_note(&dir.0, "football", "Mitul").expect("again"));
+
+        // Frontmatter survives a link written into the note below it.
+        assert!(link_note(&dir.0, "mitul", "football").expect("link back"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "mitul")).expect("read"),
+            "---\ntype: person\n---\nThe user.\n\nSee also [[football]].\n"
+        );
+
+        assert!(matches!(
+            link_note(&dir.0, "football", "ghost"),
+            Err(NotesError::NotFound(slug)) if slug == "ghost"
+        ));
+        assert!(matches!(
+            link_note(&dir.0, "ghost", "mitul"),
+            Err(NotesError::NotFound(slug)) if slug == "ghost"
+        ));
+        assert!(matches!(
+            link_note(&dir.0, "mitul", "mitul"),
+            Err(NotesError::SelfLink(_))
+        ));
+    }
+
+    #[test]
+    fn unlinking_clears_the_see_also_entry_and_unwraps_links_in_prose() {
+        let dir = TempDir::new("unlink");
+        write_note(&dir.0, Some("mitul"), "The user.").expect("write");
+        write_note(&dir.0, Some("anna"), "His sister.").expect("write");
+        write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("write");
+        link_note(&dir.0, "football", "mitul").expect("link");
+        link_note(&dir.0, "football", "anna").expect("link");
+
+        assert!(unlink_note(&dir.0, "football", "mitul").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n\nSee also [[anna]].\n"
+        );
+        // The last entry takes the line with it, blank separator included.
+        assert!(unlink_note(&dir.0, "football", "ANNA").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n"
+        );
+        assert!(!unlink_note(&dir.0, "football", "anna").expect("again"));
+        assert!(matches!(
+            unlink_note(&dir.0, "ghost", "anna"),
+            Err(NotesError::NotFound(slug)) if slug == "ghost"
+        ));
+    }
+
+    #[test]
+    fn unlinking_in_prose_keeps_the_sentence_and_the_other_links() {
+        let dir = TempDir::new("unwrap");
+        std::fs::write(
+            dir.0.join("keys.md"),
+            "---\ntype: note\n---\n[[Anna|Anna]] left the [[car-keys#spare]] with [[mitul]].\n\
+             \nShe told [[anna]] twice.\n",
+        )
+        .expect("write");
+
+        assert!(unlink_note(&dir.0, "keys", "anna").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "keys")).expect("read"),
+            "---\ntype: note\n---\nAnna left the [[car-keys#spare]] with [[mitul]].\n\
+             \nShe told anna twice.\n"
+        );
+        assert_eq!(
+            read_notes(&dir.0).expect("read")[0].links,
+            vec!["car-keys".to_string(), "mitul".to_string()]
+        );
+
+        // A hand-written `See also` line is prose, so it is unwrapped, not rebuilt.
+        std::fs::write(
+            dir.0.join("spare.md"),
+            "See also [[anna]] — she has the spare.\n",
+        )
+        .expect("write");
+        assert!(unlink_note(&dir.0, "spare", "anna").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "spare")).expect("read"),
+            "See also anna — she has the spare.\n"
+        );
+    }
+
+    /// Unlinking the whole of a note would leave a file that is no longer a
+    /// memory; it errors instead, and the model reads why.
+    #[test]
+    fn unlinking_cannot_empty_a_note() {
+        let dir = TempDir::new("unlink-empty");
+        std::fs::write(dir.0.join("stub.md"), "See also [[anna]].\n").expect("write");
+        assert!(matches!(
+            unlink_note(&dir.0, "stub", "anna"),
+            Err(NotesError::EmptyNote)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "stub")).expect("read"),
+            "See also [[anna]].\n"
+        );
+    }
+
+    #[test]
+    fn trash_moves_the_note_out_of_the_brain_but_keeps_the_file() {
+        let dir = TempDir::new("trash");
+        let slug = write_note(&dir.0, Some("car-keys"), "on the desk").expect("write");
+        trash_note(&dir.0, &slug).expect("trash");
+        assert!(read_notes(&dir.0).expect("read").is_empty());
+        let kept = dir.0.join(TRASH_DIR_NAME).join("car-keys.md");
+        assert_eq!(
+            std::fs::read_to_string(&kept).expect("kept"),
+            "on the desk\n"
+        );
+        // A recreated then re-trashed slug replaces the older copy.
+        write_note(&dir.0, Some("car-keys"), "on the fridge").expect("rewrite");
+        trash_note(&dir.0, "car-keys").expect("retrash");
+        assert_eq!(
+            std::fs::read_to_string(&kept).expect("kept"),
+            "on the fridge\n"
+        );
+        assert!(matches!(
+            trash_note(&dir.0, "ghost"),
+            Err(NotesError::NotFound(_))
+        ));
     }
 
     #[test]

@@ -27,8 +27,7 @@ pub struct Ready {
 
 impl AppState {
     /// A broken config or an unopenable database is a state, not a crash: the
-    /// window still opens, and every command answers with the reason so the
-    /// frontend can print it where the data would have been.
+    /// window still opens and every command answers with the reason.
     pub fn load() -> Self {
         Self {
             ready: RwLock::new(Self::open()),
@@ -56,8 +55,7 @@ impl AppState {
     }
 
     /// Rereads the config and reopens the database. A failed reload keeps the
-    /// failure as the new state — the file on disk is the truth, even when it
-    /// is broken — and returns the reason.
+    /// failure as the new state: the file on disk is the truth, broken or not.
     pub fn reload(&self) -> Result<(), String> {
         let fresh = Self::open();
         let outcome = fresh.as_ref().map(|_| ()).map_err(Clone::clone);
@@ -69,8 +67,7 @@ impl AppState {
     }
 }
 
-/// Proof that the state was `Ok` when the lock was taken, carried as a guard
-/// so everything a command reads comes from one consistent state.
+/// Proof the state was `Ok` when the lock was taken: one consistent read.
 pub struct ReadyGuard<'a>(RwLockReadGuard<'a, Result<Ready, String>>);
 
 impl Deref for ReadyGuard<'_> {
@@ -93,8 +90,7 @@ impl Ready {
     }
 }
 
-/// The replies in flight, so a cancel can reach the task that produces one and
-/// the text it had already produced.
+/// The replies in flight, so a cancel can reach the task and its partial text.
 #[derive(Default)]
 pub struct Streams {
     next: AtomicU64,

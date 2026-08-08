@@ -1,8 +1,7 @@
 //! Reading and rewriting `odyn.toml`: single keys, and whole provider tables.
 //!
-//! A config file is something a person edits by hand, so every write goes
-//! through `toml_edit`: every comment, every blank line and every quirk of
-//! spacing the user left behind survives an edit to some other key.
+//! Every write goes through `toml_edit`, so comments, blank lines and spacing
+//! the user left behind survive an edit to some other key.
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +9,7 @@ use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
 
 use crate::config::{invalid, read_or_create, Config, ConfigError, ProviderConfig};
 
-/// The value at a dotted key, ready to print: strings raw, everything else as
-/// TOML.
+/// The value at a dotted key: strings raw, everything else as TOML.
 pub fn get(path: &Path, key: &str) -> Result<String, ConfigError> {
     let doc = parse(&read_or_create(path)?)?;
     let mut item = doc.as_item();
@@ -24,8 +22,8 @@ pub fn get(path: &Path, key: &str) -> Result<String, ConfigError> {
     Ok(render(key, item))
 }
 
-/// The edited document is validated as a whole before it reaches the disk, so a
-/// rejected value leaves the file exactly as it was.
+/// The edited document is validated whole before it reaches disk, so a rejected
+/// value leaves the file exactly as it was.
 pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let mut doc = parse(&read_or_create(path)?)?;
     assign(&mut doc, key, value)?;
@@ -34,8 +32,8 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     write_atomically(path, &edited)
 }
 
-/// Writes `[providers.{name}]` wholesale — new or replacing — from `provider`.
-/// The table becomes machine-shaped; the rest of the file keeps its hand.
+/// Writes `[providers.{name}]` wholesale, new or replacing. That table becomes
+/// machine-shaped; the rest of the file keeps its hand.
 pub fn upsert_provider(
     path: &Path,
     name: &str,
@@ -159,9 +157,8 @@ fn descend<'a>(
     descend(next, rest, key)
 }
 
-/// A value that is already a TOML scalar is taken as written, so `set … 6` stores
-/// a number and `set … '"0"'` stores the string. Everything else is a string,
-/// which is what `set default_provider ollama` means.
+/// A value that is already a TOML scalar is taken as written, so `set … 6`
+/// stores a number and `set … '"0"'` a string. Everything else is a string.
 fn scalar(raw: &str) -> Value {
     match raw.parse::<Value>() {
         Ok(
@@ -175,8 +172,8 @@ fn render(key: &str, item: &Item) -> String {
     match item {
         Item::Value(Value::String(text)) => text.value().clone(),
         Item::Value(value) => value.clone().decorated("", "").to_string(),
-        // A table is reprinted under its full header, so the output can be
-        // pasted straight back into the file.
+        // A table is reprinted under its full header, so it can be pasted
+        // straight back into the file.
         _ => {
             let mut segments: Vec<&str> = key.split('.').collect();
             let mut nested = item.clone();
@@ -218,14 +215,13 @@ fn write_atomically(path: &Path, text: &str) -> Result<(), ConfigError> {
 }
 
 /// The file a path really names, links followed: renaming onto a symlink would
-/// replace the link with a regular file, and a config kept in a dotfiles
-/// directory would quietly stop being the one Odyn reads.
+/// replace the link with a regular file, and a config in a dotfiles directory
+/// would quietly stop being the one Odyn reads.
 fn resolve(path: &Path) -> PathBuf {
     if let Ok(target) = std::fs::canonicalize(path) {
         return target;
     }
-    // Nothing to canonicalize yet: a link with no file behind it still says
-    // where that file belongs, relative to the link's own directory.
+    // A dangling link still says where its file belongs, relative to the link.
     let target = match std::fs::read_link(path) {
         Ok(link) => path.parent().unwrap_or(Path::new("")).join(link),
         Err(_) => path.to_path_buf(),
@@ -245,8 +241,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Hand-written on purpose: a header comment, an inline comment on a table
-    /// header and on a value, and spacing nobody would generate.
+    /// Hand-written on purpose: comments on a header and a value, and spacing
+    /// nobody would generate.
     const FIXTURE: &str = r#"# odyn, hand-edited.
 
 default_provider   =    "ollama"
@@ -321,8 +317,6 @@ similarity_edge_threshold = 0.5
         }
     }
 
-    /// A dotfiles setup reaches its config through a link, and a rename onto
-    /// that link would replace it with a regular file.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_config_is_written_through_to_its_target() {
@@ -336,8 +330,6 @@ similarity_edge_threshold = 0.5
         assert!(real.text().contains("top_k = 4"), "{}", real.text());
     }
 
-    /// The link is there, the file behind it is not yet: the write still
-    /// belongs where the link points.
     #[cfg(unix)]
     #[test]
     fn a_dangling_symlink_is_written_through_to_where_it_points() {

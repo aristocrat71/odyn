@@ -1,6 +1,5 @@
-//! Config commands: the file as it is on disk, the way out to an editor, and
-//! the providers view's writes — which go through `config_edit`, so the file
-//! stays hand-editable and the two never disagree.
+//! Config commands. The providers view's writes go through `config_edit`, so
+//! the file stays hand-editable and the two never disagree.
 
 use odyn_core::catalog;
 use odyn_core::chat::ChatError;
@@ -27,8 +26,7 @@ pub fn config_file() -> Result<ConfigFile, String> {
     })
 }
 
-/// Opened from Rust: the path is the one the backend resolved, so it never has
-/// to be handed to the frontend's opener scope to be trusted.
+/// Opened from Rust with the backend's own resolved path, never the frontend's.
 #[tauri::command]
 pub fn open_config(app: AppHandle) -> Result<(), String> {
     let path = config_path().map_err(|err| err.to_string())?;
@@ -37,8 +35,7 @@ pub fn open_config(app: AppHandle) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-/// One provider as the providers view shows it. The key itself never crosses
-/// to the frontend — only whether one is there.
+/// The key itself never crosses to the frontend — only whether one is there.
 #[derive(serde::Serialize)]
 pub struct ProviderEntry {
     name: String,
@@ -54,9 +51,8 @@ pub struct ProviderEntry {
     key_env_set: bool,
 }
 
-/// What the form submits. Blank strings mean absence — except `api_key`,
-/// whose blank means "unchanged": the form never shows the stored key, so
-/// blank is all an untouched field can send.
+/// What the form submits. Blank means absence — except `api_key`, whose blank
+/// means "unchanged": the form never shows the stored key.
 #[derive(serde::Deserialize)]
 pub struct ProviderDraft {
     name: String,
@@ -89,7 +85,6 @@ pub async fn provider_save(
     reloaded(&state)
 }
 
-/// One catalog entry as the connect panel offers it.
 #[derive(serde::Serialize)]
 pub struct CatalogItem {
     id: &'static str,
@@ -100,13 +95,11 @@ pub struct CatalogItem {
     keys_url: &'static str,
     /// So a pasted key can name its own provider without a round trip.
     key_prefixes: &'static [&'static str],
-    /// Already in `odyn.toml` under this name: the tile says so rather than
-    /// offering to add it twice.
+    /// Already in `odyn.toml`: the tile says so instead of offering it twice.
     configured: bool,
 }
 
-/// What a connection came to: the name it took, the model it starts on, and —
-/// when the endpoint would not list its models — why that list is empty.
+/// What a connection came to; `note` says why the model list is empty.
 #[derive(serde::Serialize)]
 pub struct Connected {
     name: String,
@@ -137,13 +130,8 @@ pub async fn provider_catalog(state: State<'_, AppState>) -> Result<Vec<CatalogI
         .collect())
 }
 
-/// A catalog entry plus a key is a whole provider: the endpoint is asked what
-/// it serves, the answer picks the starting model, and the table is written.
-///
-/// A key the endpoint rejects is the one refusal — nothing is written, so a
-/// typo cannot quietly become a provider that fails at the first question.
-/// Every other failure still connects: an endpoint that is merely unreachable
-/// now says nothing about whether the key is good.
+/// A catalog entry plus a key is a whole provider. A key the endpoint rejects is
+/// the one refusal — nothing is written; every other failure still connects.
 #[tauri::command]
 pub async fn provider_connect(
     state: State<'_, AppState>,
@@ -162,8 +150,7 @@ pub async fn provider_connect(
     } else {
         (Vec::new(), None)
     };
-    // Read fresh: what the entry already says is what a second connection
-    // carries across, and the file may have been edited since load.
+    // Read fresh: the file may have been edited since load.
     let existing = Config::load()
         .ok()
         .and_then(|mut config| config.providers.remove(entry.id));
@@ -184,9 +171,8 @@ pub async fn provider_connect(
     })
 }
 
-/// Asks the endpoint what it serves. `Ok` carries the model names and, when
-/// the listing failed in a way that is not the key's fault, the reason the
-/// list is empty. `Err` is a key the endpoint refused.
+/// Asks the endpoint what it serves. `Ok` carries the model names and, when the
+/// listing failed for reasons other than the key, why. `Err` is a refused key.
 async fn probe(
     entry: &catalog::Provider,
     key: &str,
@@ -194,8 +180,7 @@ async fn probe(
     let built = OpenAiCompatProvider::new(entry.base_url, Some(key.to_string()), Vec::new());
     let provider = match built {
         Ok(provider) => provider,
-        // A key with a newline or a stray byte in it: the header will not carry
-        // it, and no request was ever made.
+        // A stray byte in the key: the header cannot carry it, so no request ran.
         Err(err) => return Err(format!("{}: {err}", entry.label)),
     };
     match provider.list_models().await {
@@ -220,8 +205,7 @@ async fn probe(
     }
 }
 
-/// The catalog entry's key page, opened from Rust: the url is a constant of
-/// this build, so nothing the frontend says decides where the browser goes.
+/// The url is a build constant, so the frontend cannot redirect the browser.
 #[tauri::command]
 pub fn open_keys_page(app: AppHandle, id: String) -> Result<(), String> {
     let entry = catalog::find(&id).ok_or_else(|| format!("no provider named `{id}` is known"))?;
@@ -289,8 +273,7 @@ fn clean(value: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The key already in the file for `name`, read fresh: an edit that leaves
-/// the key field blank keeps the key the file has.
+/// The key already in the file for `name`: a blank key field keeps it.
 fn stored_key(name: &str) -> Option<String> {
     let mut config = Config::load().ok()?;
     match config.providers.remove(name)? {
@@ -340,8 +323,7 @@ fn entries(config: &Config) -> Vec<ProviderEntry> {
         .collect()
 }
 
-/// Every write answers with the list as the reloaded state sees it, so the
-/// view never renders a file the running app has not adopted.
+/// Every write answers from the reloaded state the app has actually adopted.
 fn reloaded(state: &AppState) -> Result<Vec<ProviderEntry>, String> {
     state.reload()?;
     let ready = state.ready()?;

@@ -1,8 +1,7 @@
 //! Reasoning that models write into the answer itself: Qwen on Groq and the R1
-//! distills stream a literal `<think>…</think>` block inside `content`. Odyn
-//! shows answers, not thinking, so it is removed as the stream flows. A
-//! `reasoning_content`/`thinking` field never reaches here — neither provider
-//! deserializes one.
+//! distills stream a literal `<think>…</think>` block inside `content`, removed
+//! here as the stream flows. A `reasoning_content` field never reaches here —
+//! neither provider deserializes one.
 
 use futures::stream::{BoxStream, StreamExt};
 
@@ -26,7 +25,6 @@ pub struct ReasoningFilter {
     inside: bool,
     /// A trailing `<…` fragment awaiting the rest of its tag.
     held: String,
-    /// Any visible text emitted yet.
     seen: bool,
 }
 
@@ -62,14 +60,13 @@ impl ReasoningFilter {
         while let Some(next) = text[at..].find('<') {
             let start = at + next;
             let Some((closing, len)) = tag_at(&text[start..]) else {
-                // Opens nothing: ordinary text, copied with the run around it.
                 at = start + 1;
                 continue;
             };
             if !self.inside {
                 if closing && !self.seen {
-                    // No open tag: the provider stripped it, so what came
-                    // before was the thinking.
+                    // No open tag: the provider stripped it, so what came before
+                    // was the thinking.
                     out.clear();
                 } else {
                     out.push_str(&text[copied..start]);
@@ -82,8 +79,8 @@ impl ReasoningFilter {
         if !self.inside {
             out.push_str(&text[copied..]);
         }
-        // Models leave a blank line after the block; the answer must not
-        // open with it.
+        // Models leave a blank line after the block; the answer must not open
+        // with it.
         let visible = if self.seen {
             out
         } else {
@@ -191,7 +188,6 @@ pub fn strip_reasoning<'a>(
                     state.pending = Some(done);
                     return Some((Ok(ChatEvent::TextDelta(rest)), state));
                 }
-                // Errors pass through; describing them is the edge's job.
                 other => return Some((other, state)),
             }
         }
@@ -225,7 +221,6 @@ mod tests {
     use crate::chat::Usage;
     use futures::executor::block_on;
 
-    /// Feeds the deltas one at a time, the way a stream would.
     fn filter(deltas: &[&str]) -> String {
         let mut filter = ReasoningFilter::default();
         let mut out = String::new();
@@ -264,7 +259,6 @@ mod tests {
 
     #[test]
     fn a_close_tag_after_visible_text_does_not_eat_the_answer() {
-        // Once an answer has started, a stray tag is just a tag.
         assert_eq!(filter(&["answer ", "</think>", " more"]), "answer  more");
     }
 
@@ -296,7 +290,6 @@ mod tests {
 
     #[test]
     fn an_unterminated_block_hides_the_rest_of_the_stream() {
-        // A block that never closes means the model said nothing.
         assert_eq!(filter(&["<think>on and on"]), "");
     }
 

@@ -1,9 +1,8 @@
 //! `odyn.toml`: which providers exist, how much of the brain to inject, and how
 //! Spotlight behaves.
 //!
-//! API keys come from `api_key` in the file, or — for a file that must never
-//! contain one — from the environment variable `api_key_env` names. Either is
-//! read only when that provider is actually built.
+//! API keys come from `api_key`, or from the environment variable `api_key_env`
+//! names. Either is read only when that provider is actually built.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -50,15 +49,17 @@ keep_alive = "5m"  # how long a model stays in RAM; "0" unloads it immediately
 [brain]
 # path = "~/odyn-brain"  # the folder of .md notes; default: the platform data dir
 model = "bge-small"      # embedding model; changing it re-embeds every note
-top_k = 6                # recall walk seeds per /brain mention
+top_k = 6                # walk seeds per /brain mention, and the most notes injected
 cap_tokens = 1200        # token budget for one recall
 similarity_edge_threshold = 0.78
+min_relevance = 0.3      # inject only notes scoring this share of the best match
+save_temperature = 0.3   # sampling on /memory save turns; lower = more literal
 
 [style]
 brevity = "off"        # off | lite | full | ultra — default for new conversations
 
 [spotlight]
-hotkey = "Alt+Space"   # Option+Space on macOS, Alt+Space elsewhere
+hotkey = "Ctrl+Space"  # Control+Space on every platform
 brevity = "full"       # spotlight answers should be terse
 # provider = "ollama"    # falls back to default_provider when unset
 # model = "llama3.3:8b"
@@ -83,7 +84,6 @@ pub enum ConfigError {
     },
     #[error("could not locate a config directory; set {CONFIG_PATH_ENV} to a config file path")]
     NoConfigDir,
-    /// toml's own message, which names the offending key and quotes its line.
     #[error("invalid config: {0}")]
     Parse(String),
     #[error("invalid config: {key}: {message}")]
@@ -94,8 +94,8 @@ pub enum ConfigError {
     UnknownProvider(String),
     #[error("providers.{name}.api_key_env: environment variable `{var}` is empty or not set")]
     MissingApiKey { name: String, var: String },
-    /// Deliberately silent about the value: what sits in a key field wrongly
-    /// is, more often than not, the key.
+    /// Deliberately silent about the value: what sits in this field wrongly is
+    /// usually the key itself.
     #[error("providers.{name}.api_key_env: must name an environment variable (letters, digits, underscores) — a literal key belongs in `api_key`")]
     BadKeyEnvName { name: String },
     #[error("providers.{name}: {source}")]
@@ -113,8 +113,8 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub brain: BrainConfig,
-    /// The brain v1 `[memory]` section, swallowed whole and ignored so an
-    /// old file still parses — a stale section must not brick the app.
+    /// The brain v1 `[memory]` section, swallowed and ignored: a stale section
+    /// must not brick the app.
     #[serde(default, rename = "memory")]
     legacy_memory: Option<toml::Value>,
     #[serde(default)]
@@ -129,7 +129,7 @@ pub enum ProviderConfig {
     #[serde(rename = "openai_compat")]
     OpenAiCompat {
         base_url: String,
-        /// The key itself. Set from the providers view; wins over `api_key_env`.
+        /// Wins over `api_key_env`.
         api_key: Option<String>,
         api_key_env: Option<String>,
         default_model: Option<String>,
@@ -147,18 +147,21 @@ pub enum ProviderConfig {
 pub struct BrainConfig {
     /// Where the note files live; `None` is the platform data dir.
     pub path: Option<PathBuf>,
-    /// Which model embeds notes and questions: a bare name is bundled
-    /// (fastembed), `ollama:<model>` is the local daemon, `<provider>:<model>`
-    /// an OpenAI-compatible endpoint. Changing it re-embeds the whole folder —
-    /// vectors from two models cannot be compared. Never rejected at parse
-    /// time: a name that resolves to nothing breaks the brain when it is used,
-    /// not the whole config on load.
+    /// A bare name is bundled (fastembed), `ollama:<model>` the local daemon,
+    /// `<provider>:<model>` an OpenAI-compatible endpoint. Changing it re-embeds
+    /// the folder. Never rejected at parse time: an unresolvable name breaks the
+    /// brain when used, not the whole config on load.
     pub model: EmbedModel,
-    /// How many walk seeds a recall starts from.
+    /// Walk seeds per recall, and the most notes one recall may inject.
     pub top_k: u32,
-    /// The token budget one recall may inject.
     pub cap_tokens: u32,
     pub similarity_edge_threshold: f32,
+    /// Inject only notes scoring this share of the best match; 0 keeps
+    /// everything the cap allows.
+    pub min_relevance: f32,
+    /// Sampling temperature for `/memory` save turns. Saving is transcription,
+    /// not creativity: lower is more literal.
+    pub save_temperature: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -185,6 +188,10 @@ impl Default for BrainConfig {
             top_k: 6,
             cap_tokens: 1200,
             similarity_edge_threshold: 0.78,
+            // Just under the walk share, so a strongly linked neighbor of the
+            // best match survives on its edges alone.
+            min_relevance: 0.3,
+            save_temperature: 0.3,
         }
     }
 }
@@ -192,9 +199,9 @@ impl Default for BrainConfig {
 impl Default for SpotlightConfig {
     fn default() -> Self {
         Self {
-            // `Alt` is Option on macOS and Alt everywhere else, so one
-            // accelerator is the same physical chord on every platform.
-            hotkey: "Alt+Space".to_string(),
+            // `Alt` is Option on macOS, so one accelerator is the same physical
+            // chord on every platform.
+            hotkey: "Ctrl+Space".to_string(),
             provider: None,
             model: None,
             brevity: Brevity::Full,
@@ -203,8 +210,6 @@ impl Default for SpotlightConfig {
 }
 
 impl ProviderConfig {
-    /// The `kind` value from the file, so callers can label a provider without
-    /// matching on this enum.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::OpenAiCompat { .. } => "openai_compat",
@@ -218,8 +223,8 @@ impl ProviderConfig {
         }
     }
 
-    /// The model a new conversation starts on. Only `openai_compat` entries
-    /// declare one; Ollama has no such notion.
+    /// The model a new conversation starts on; only `openai_compat` entries
+    /// declare one.
     pub fn default_model(&self) -> Option<&str> {
         match self {
             Self::OpenAiCompat { default_model, .. } => default_model.as_deref(),
@@ -227,10 +232,9 @@ impl ProviderConfig {
         }
     }
 
-    /// The key this entry resolves to. A literal `api_key` wins; `api_key_env`
-    /// is read otherwise. `None` means no auth header at all, which is what
-    /// keyless and local endpoints expect. `name` only names the provider in
-    /// the error, so a caller can say which entry is the broken one.
+    /// The key this entry resolves to: a literal `api_key` wins, `api_key_env`
+    /// is read otherwise. `None` means no auth header at all. `name` only
+    /// labels the error.
     pub fn api_key(&self, name: &str) -> Result<Option<String>, ConfigError> {
         let Self::OpenAiCompat {
             api_key,
@@ -268,9 +272,7 @@ impl Config {
         Ok(config)
     }
 
-    /// The model a new conversation starts on for `provider`. Only
-    /// `openai_compat` entries declare one; Ollama has no such notion, so the
-    /// answer there is `None` until a model is chosen.
+    /// The model a new conversation starts on for `provider`, if it declares one.
     pub fn default_model(&self, provider: &str) -> Option<&str> {
         self.providers.get(provider)?.default_model()
     }
@@ -285,8 +287,7 @@ impl Config {
             }
         }
         // One provider's mistakes stay that provider's: they surface from
-        // `ProviderRegistry::provider` when it is used, so a broken zen entry
-        // never stops Odyn from talking to a local Ollama.
+        // `ProviderRegistry::provider` when it is used, never here.
         if self.brain.top_k == 0 {
             return Err(invalid("brain.top_k", "must be at least 1"));
         }
@@ -296,6 +297,10 @@ impl Config {
                 "brain.similarity_edge_threshold",
                 "must be greater than 0 and at most 1",
             ));
+        }
+        let temperature = self.brain.save_temperature;
+        if !(0.0..=2.0).contains(&temperature) {
+            return Err(invalid("brain.save_temperature", "must be between 0 and 2"));
         }
         Ok(())
     }
@@ -414,9 +419,8 @@ pub fn config_path() -> Result<PathBuf, ConfigError> {
     Ok(dirs.config_dir().join(CONFIG_FILE_NAME))
 }
 
-/// The file's text and the path it came from. Read on demand rather than kept
-/// beside the parsed `Config`: the GUI shows the file as it is now, edits and
-/// all, not as it was when the app started.
+/// The file's text and the path it came from, read on demand so the GUI shows
+/// the file as it is now rather than as it was at startup.
 pub fn read_config_file() -> Result<(PathBuf, String), ConfigError> {
     let path = config_path()?;
     let text = read_or_create(&path)?;
@@ -451,7 +455,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// The sample from IMPLEMENTATION_PLAN.md, comments included.
+    /// The sample from IMPLEMENTATION_PLAN.md.
     const SAMPLE: &str = r#"
 default_provider = "deepseek"
 [providers.deepseek]        # any number of OpenAI-compatible entries
@@ -484,7 +488,6 @@ default_provider = "ollama"
 kind = "ollama"
 "#;
 
-    /// A unique directory under the system temp dir, removed on drop.
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -604,8 +607,7 @@ kind = "ollama"
             .expect("parse a provider model");
         assert!(remote.brain.model.is_remote());
 
-        // The issue-#8 lesson: a model name that resolves to nothing must not
-        // take the whole config — and with it chat — down on load.
+        // An unresolvable model name must not take the whole config down.
         let nonsense = Config::parse(&format!("{MINIMAL}[brain]\nmodel = \"gpt-9000\"\n"))
             .expect("an unresolvable model still parses");
         assert_eq!(nonsense.brain.model.known_dim(), None);
@@ -662,8 +664,6 @@ kind = "ollama"
         }
     }
 
-    /// The lesson of a bricked app: a provider whose entry is broken fails
-    /// when *it* is built, and no sooner — issue #8.
     #[test]
     fn provider_problems_break_only_that_provider() {
         let config = Config::parse(
@@ -686,7 +686,6 @@ kind = "ollama"
         let err = provider_error(&registry, "zen");
         assert!(err.contains("providers.zen.api_key_env"), "{err}");
         assert!(err.contains("`api_key`"), "{err}");
-        // The misplaced value is usually the key itself, so no echo.
         assert!(!err.contains("sk-a-key"), "{err}");
 
         assert!(provider_error(&registry, "hollow").contains("hollow"));
@@ -708,7 +707,6 @@ kind = "ollama"
         .expect("parse");
         let registry = ProviderRegistry::from_config(&config).expect("build registry");
 
-        // The literal wins, so the unset variable is never consulted.
         assert!(registry.provider("zen").is_ok());
 
         // Blank is absence, not an empty key: the env fallback applies.
@@ -777,8 +775,6 @@ kind = "ollama"
         assert_eq!(registry.kind("ollama"), Some("ollama"));
         assert_eq!(registry.kind("nope"), None);
 
-        // A registry built from a config whose keys are unset still serves the
-        // providers that need none.
         assert!(registry.provider("ollama").is_ok());
         let err = provider_error(&registry, "nope");
         assert!(err.contains("nope"), "{err}");
@@ -858,7 +854,6 @@ kind = "ollama"
         assert_eq!(config.style.brevity, crate::brevity::Brevity::Ultra);
         assert_eq!(config.spotlight.brevity, crate::brevity::Brevity::Lite);
 
-        // Absent sections fall back: off for chat, full for spotlight.
         let config = Config::parse("default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\n")
             .expect("parse defaults");
         assert_eq!(config.style.brevity, crate::brevity::Brevity::Off);

@@ -4,8 +4,8 @@ import { el } from "./dom";
 // bundle until the guide is opened.
 
 const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
-// `Alt+Space` in the config is one chord with two names: Option on macOS.
-const SUMMON = navigator.platform.startsWith("Mac") ? "⌥Space" : "Alt+Space";
+// `Ctrl+Space` in the config; macOS spells the same chord with a glyph.
+const SUMMON = navigator.platform.startsWith("Mac") ? "⌃Space" : "Ctrl+Space";
 
 type Section = { id: string; title: string; body: () => HTMLElement[] };
 
@@ -123,12 +123,14 @@ model = "bge-small"
 top_k = 6
 cap_tokens = 1200
 similarity_edge_threshold = 0.78
+min_relevance = 0.3
+save_temperature = 0.3
 
 [style]
 brevity = "off"
 
 [spotlight]
-hotkey = "Alt+Space"
+hotkey = "Ctrl+Space"
 brevity = "full"`,
       ),
       rows([
@@ -264,12 +266,12 @@ odyn chat`),
     body: () => [
       p(
         "One field, summoned anywhere, for a question that does not deserve a conversation. " +
-          "Asks are ephemeral: nothing is stored unless you promote the exchange.",
+          "Asks are ephemeral: the exchange is stored only if you promote it. Recalled notes do earn their hits either way, so the brain graph learns from spotlight use.",
       ),
       rows([
         [
           SUMMON,
-          "the global hotkey — the default value of `[spotlight] hotkey` (`Alt+Space`, which is Option+Space on macOS), in Tauri accelerator syntax. Pressing it again hides the window.",
+          "the global hotkey — the default value of `[spotlight] hotkey` (`Ctrl+Space`, Control+Space on every platform), in Tauri accelerator syntax. Pressing it again hides the window.",
         ],
         [`${MOD}K`, "the same toggle, from the main window."],
         [
@@ -335,21 +337,52 @@ odyn chat`),
           "walk over the brain graph — links strongest, then embedding similarity, " +
           "then co-use — and the final order blends how well a note matches the " +
           "question with how firmly it sits in the walked neighborhood of notes that " +
-          "do. Notes are kept in that order until the next would push past " +
-          "`cap_tokens` (default 1200). A bare `/brain` recalls on the conversation " +
-          "history alone.",
+          "do. Notes scoring under `min_relevance` of the best match are dropped, at " +
+          "most `top_k` are kept, and the rest fill in rank order until the next " +
+          "would push past `cap_tokens` (default 1200). A bare `/brain` recalls on " +
+          "the conversation history alone.",
+      ),
+      sub("saving, updating, deleting, linking — the memory mentions"),
+      p(
+        "Mention `/memory` and the model is handed one tool for that turn: " +
+          "`save_memory`, which writes a new `.md` note into the brain folder. " +
+          "`/update-memory` hands it `update_memory`, which rewrites the matching " +
+          "note in place — same slug, same graph edges, new fact. " +
+          "`/delete-memory` hands it `delete_memory`, which moves the note into " +
+          "`.trash` inside the brain folder — out of recall, but recoverable " +
+          "until you empty it. `/link-memory` hands it `link_memory`, which " +
+          "writes a `[[wikilink]]` into one note pointing at another — the " +
+          "strongest edge the recall walk knows, for connecting two notes that " +
+          "were saved apart, and `/unlink-memory` hands it `unlink_memory` to " +
+          "take that edge back out — on the `See also` line the name goes, in a " +
+          "sentence the brackets are unwrapped so the words survive. " +
+          "One tool per mention, on purpose: a small model " +
+          "asked to choose between them picks wrong, so the choice stays with " +
+          "you. Every such turn also recalls the notes nearest your message — " +
+          "that is how the model knows what `[[slug]]` links to write, or which " +
+          "note your change belongs to — and wider than `/brain` recalls, since " +
+          "the note to rewrite or forget is often not among the best few answers " +
+          "to what you said: no `min_relevance` floor, no `top_k` limit, only " +
+          "`cap_tokens`. Those turns are also handed every memory's name, so a " +
+          "note whose content did not fit can still be named to a tool. " +
+          "A `✎ saved`, `✎ updated`, `✕ deleted`, `⌇ linked` or `⌇ unlinked` trace " +
+          "names the note " +
+          "under the " +
+          "reply; each note is a plain file you can edit or delete like any " +
+          "other. A call that succeeds ends the turn on odyn's own one-line " +
+          "confirmation — the model does not get to talk over your notes after a " +
+          "write. It never touches the brain without these mentions, and all of " +
+          "them need a model that supports tool calls (llama3.2 does).",
       ),
       sub("the ledger"),
       p(
         "One mono line fused to the top of the composer, which is not a " +
           "readout of what was sent — it is built by the same call the send makes:",
       ),
-      pre("CONTEXT   ◈ cern-trip 61   ◈ espresso-order 48        109 / 1,200 tk"),
+      pre("CONTEXT   ◈ reading the brain                          109 / 1,200 tk"),
       list([
-        "Without `/brain` in the draft it reads `mention /brain to recall memory` — and that is the truth: the send injects nothing.",
-        "With `/brain`, one teal `◈ {slug} {tk}` chip per recalled note, token counts dim.",
-        "Past five chips the tail collapses to `◈ +3 more 122`; clicking expands it.",
-        "Hovering a chip shows that note's full text.",
+        "Without a trigger in the draft it reads `/brain recalls memory · /memory saves one` — and that is the truth: the send injects nothing.",
+        "With `/brain` it reads `◈ reading the brain` in teal. Which notes were recalled is named by the `◈ used` trace under the answer.",
         "The total on the right is against `cap_tokens`. It refreshes at least 400ms after the last keystroke. The line is exactly what the model sees.",
       ]),
       sub("trace lines"),
@@ -371,8 +404,10 @@ odyn chat`),
       ]),
       sub("brain view — list mode"),
       p(
-        "The header states the brain: `214 memories · bge-small · top-k 6 · cap 1200 tk`, " +
-          "with the folder's path under the column label. One row per note; hover " +
+        "The count sits beside the title; the line under it states the brain — " +
+          "`top-k 6 · min-relevance 0.3 · cap 1200 tk` — with top-k and min-relevance " +
+          "editable in place, and the folder's path under the column label. " +
+          "One row per note; hover " +
           "reveals `✎` and `✕`, and editing happens in place — the row becomes an " +
           "input, Enter commits, Esc cancels. `+ add a note` writes a new file the " +
           "same way. The semantic search runs the same embedding pipeline as recall " +
@@ -583,7 +618,7 @@ memories 13/1200 tk
         "Your notes are embedded on this machine by default, whether by the bundled model or by Ollama. The one exception is a `<provider>:` embedding model, which sends every note's full text to that endpoint — the brain view says so whenever one is active, and it is never the default.",
         "A key you paste is written to `odyn.toml` as `api_key`, and nowhere else — never to a log, and never over the wire except to the provider it belongs to. `api_key_env` keeps it out of the file entirely by naming an environment variable instead; either is read only when that provider is actually built.",
         "Memories are the files in the brain folder; `odyn.db` holds conversations, the recall records, and an index derived from those files. Deleting a note's file deletes the memory; deleting a conversation takes its messages with it.",
-        "Spotlight asks are never stored unless you promote them; dismissing drops the exchange.",
+        "Spotlight asks are stored only when promoted; dismissing drops the exchange. What does persist is the brain's hit ledger: which notes were recalled, never what was asked.",
         "`odyn ask` without `--save` will not create a database on a machine that never saved anything.",
       ]),
       p("Both locations can be moved:"),

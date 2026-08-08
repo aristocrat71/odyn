@@ -10,12 +10,39 @@ pub enum Role {
     System,
     User,
     Assistant,
+    /// A tool's answer to a call; lives inside one turn, never a transcript.
+    Tool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// One tool the model may call; `parameters` is a JSON Schema.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// A call the model made. `arguments` is whatever it produced: a bad shape is
+/// answered through the tool result, not rejected here.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCall {
+    /// Empty on providers that do not id their calls (Ollama).
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// The calls an assistant message asked for, replayed on the follow-up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// The call a `Role::Tool` message answers; each dialect reads the half it
+    /// understands, the id or the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<ToolCall>,
 }
 
 impl Message {
@@ -23,6 +50,26 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            tool_calls: Vec::new(),
+            answers: None,
+        }
+    }
+
+    pub fn tool_request(content: impl Into<String>, calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls: calls,
+            answers: None,
+        }
+    }
+
+    pub fn tool_result(call: ToolCall, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            answers: Some(call),
         }
     }
 }
@@ -33,10 +80,14 @@ pub struct Usage {
     pub output_tokens: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
     TextDelta(String),
-    Done { usage: Option<Usage> },
+    /// Arrives before `Done`; the caller runs the tool and follows up.
+    ToolCall(ToolCall),
+    Done {
+        usage: Option<Usage>,
+    },
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -55,6 +106,8 @@ pub enum ChatError {
 pub struct ChatRequest<'a> {
     pub messages: &'a [Message],
     pub model: &'a str,
+    /// Offered, not forced: an empty slice sends no tools field at all.
+    pub tools: &'a [ToolDef],
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
 }
@@ -64,6 +117,7 @@ impl<'a> ChatRequest<'a> {
         Self {
             messages,
             model,
+            tools: &[],
             temperature: None,
             max_tokens: None,
         }
@@ -76,7 +130,7 @@ pub trait ChatProvider: Send + Sync {
         req: ChatRequest<'a>,
     ) -> BoxStream<'a, Result<ChatEvent, ChatError>>;
 
-    /// Folds the stream into the full response text; the first error aborts the fold.
+    /// Folds the stream into the full response text; the first error aborts it.
     fn chat_collect<'a>(
         &'a self,
         req: ChatRequest<'a>,
@@ -87,6 +141,7 @@ pub trait ChatProvider: Send + Sync {
             while let Some(event) = stream.next().await {
                 match event? {
                     ChatEvent::TextDelta(delta) => out.push_str(&delta),
+                    ChatEvent::ToolCall(_) => {}
                     ChatEvent::Done { .. } => break,
                 }
             }

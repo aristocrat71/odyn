@@ -234,6 +234,14 @@ button {
   line-height: 1.4;
 }
 
+.title-note {
+  margin-left: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--faint);
+}
+
 .crumbs {
   margin-top: 2px;
   font-family: var(--mono);
@@ -669,6 +677,19 @@ button {
   color: var(--epi);
 }
 
+.trace-sep {
+  color: var(--faint);
+}
+
+.trace-more {
+  font: inherit;
+  color: var(--dim);
+}
+
+.trace-more:hover {
+  color: var(--epi);
+}
+
 /* DESIGN.md §5.1. The context ledger: a status line, not a boxed widget. */
 
 .ledger {
@@ -693,39 +714,8 @@ button {
   text-overflow: ellipsis;
 }
 
-.chip {
-  position: relative;
-}
-
-.chip-epi {
+.ledger-reading {
   color: var(--epi);
-}
-
-.chip-tokens {
-  color: var(--faint);
-}
-
-.chip-more {
-  font: inherit;
-  cursor: pointer;
-}
-
-.chip:hover::after {
-  content: attr(data-tip);
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  z-index: 30;
-  width: max-content;
-  max-width: 340px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--bg-soft);
-  box-shadow: var(--shadow-menu), var(--ring);
-  font-size: 10.5px;
-  line-height: 1.5;
-  color: var(--muted);
-  white-space: normal;
 }
 
 .ledger-total {
@@ -757,6 +747,30 @@ button {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--dim);
+}
+
+.brain-num {
+  width: 3.4em;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--faint);
+  outline: none;
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  caret-color: var(--epi);
+}
+
+.brain-num:focus {
+  border-bottom-color: var(--epi);
+}
+
+/* The steppers would be the only chrome on the stats line. */
+.brain-num::-webkit-inner-spin-button,
+.brain-num::-webkit-outer-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .brain-toggle {

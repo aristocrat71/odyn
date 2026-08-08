@@ -1,14 +1,9 @@
 //! The one gate every injected memory token passes through.
 //!
-//! Nothing is injected unless the user asks: a message mentioning `/brain`
-//! recalls, every other message reaches the model bare (style directives
-//! aside — brevity is not memory). Recall is a walk, not a lookup: the
-//! question's embedding seeds a personalized PageRank over the brain graph,
-//! so a note earns its way into context either by matching the question or
-//! by sitting close — by wikilink, similarity or shared use — to notes that
-//! match. `build_context` is the only producer of memory context in Odyn;
-//! the CLI, the GUI, `--show-context` and the composer ledger all render its
-//! output, which is what keeps the ledger equal to reality.
+//! Nothing is injected unless the user asks for it with `/brain`. Recall is a
+//! personalized PageRank over the brain graph seeded by the question's
+//! embedding. `build_context` is the only producer of memory context in Odyn,
+//! which is what keeps the ledger equal to reality.
 
 use std::collections::HashMap;
 
@@ -22,15 +17,27 @@ use crate::storage::{Memory, Storage, StorageError};
 
 /// The mention that turns recall on for one message.
 pub const TRIGGER: &str = "/brain";
+/// The mention that asks the model to save a memory this turn.
+pub const MEMORIZE: &str = "/memory";
+/// The mention that asks the model to rewrite a memory this turn.
+pub const UPDATE: &str = "/update-memory";
+/// The mention that asks the model to trash a memory this turn.
+pub const DELETE: &str = "/delete-memory";
+/// The mention that asks the model to connect two memories this turn.
+pub const LINK: &str = "/link-memory";
+/// The mention that asks the model to disconnect two memories this turn.
+pub const UNLINK: &str = "/unlink-memory";
 
 /// Two turns of history join the retrieval query.
 const QUERY_MESSAGES: usize = 4;
 /// Random-walk-with-restart: how much mass follows edges each step.
 const DAMPING: f64 = 0.85;
 const WALK_ITERATIONS: usize = 30;
-/// The final rank: this share answers the question directly, the rest is
-/// standing in the walked neighborhood of what does.
+/// Share of the final rank from question similarity; the rest is walk mass.
 const SIMILARITY_SHARE: f64 = 0.6;
+/// Names in the write-turn index before it is summarized; a folder larger than
+/// this would spend the whole recall cap on slugs.
+const NAMES_SHOWN: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrainError {
@@ -44,36 +51,91 @@ pub enum BrainError {
     Graph(#[from] GraphError),
 }
 
-/// A user message with its `/brain` mention, if any, understood and removed.
+/// A user message with its trigger mentions, if any, understood and removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
-    /// What the model sees and the transcript stores: the message without
-    /// the trigger token. A message that was only the trigger keeps it —
-    /// an empty user message would be worse.
+    /// The message without the trigger tokens. A message that was only
+    /// triggers keeps them — an empty user message would be worse.
     pub message: String,
-    /// What retrieval embeds: the cleaned text, possibly empty — a bare
-    /// `/brain` recalls on the conversation history alone.
+    /// What retrieval embeds; a bare `/brain` leaves it empty and recalls on
+    /// the conversation history alone.
     pub query: String,
-    /// Whether recall runs for this turn.
     pub recall: bool,
+    /// Whether the model is handed `save_memory` this turn.
+    pub memorize: bool,
+    /// Whether the model is handed `update_memory` this turn.
+    pub update: bool,
+    /// Whether the model is handed `delete_memory` this turn.
+    pub delete: bool,
+    /// Whether the model is handed `link_memory` this turn.
+    pub link: bool,
+    /// Whether the model is handed `unlink_memory` this turn.
+    pub unlink: bool,
 }
 
-/// Finds a whitespace-delimited `/brain` anywhere in the message, case
-/// insensitively, tolerating trailing punctuation. The token and the
-/// whitespace after it are removed; everything else stays byte-for-byte.
+impl Ask {
+    /// Whether any trigger fired. Every trigger recalls, so this is also what
+    /// decides whether a turn touches the brain at all.
+    pub fn any(&self) -> bool {
+        self.recall || self.writes()
+    }
+
+    /// Whether the turn is handed a tool that writes to the folder. Those
+    /// turns recall wider and see every memory's name, because their task is
+    /// picking the right note rather than answering from the best few.
+    pub fn writes(&self) -> bool {
+        self.memorize || self.update || self.delete || self.link || self.unlink
+    }
+}
+
+#[derive(Default)]
+struct Mentions {
+    recall: bool,
+    memorize: bool,
+    update: bool,
+    delete: bool,
+    link: bool,
+    unlink: bool,
+}
+
+impl Mentions {
+    fn any(&self) -> bool {
+        self.recall || self.memorize || self.update || self.delete || self.link || self.unlink
+    }
+}
+
+/// Finds a whitespace-delimited `/brain`, `/memory`, `/update-memory`,
+/// `/delete-memory`, `/link-memory` or `/unlink-memory` anywhere in the
+/// message, case insensitively, tolerating trailing punctuation. Each token
+/// and the whitespace after it are removed; everything else stays byte-for-byte.
 pub fn parse_ask(text: &str) -> Ask {
     let mut cleaned = String::with_capacity(text.len());
     let mut token = String::new();
-    let mut recall = false;
+    let mut found = Mentions::default();
     let mut swallow_gap = false;
-    let flush = |token: &mut String, cleaned: &mut String, recall: &mut bool| -> bool {
+    let flush = |token: &mut String, cleaned: &mut String, found: &mut Mentions| {
         if token.is_empty() {
             return false;
         }
         let trailer = token.trim_end_matches([',', '.', ';', ':', '!', '?']);
-        let dropped = trailer.eq_ignore_ascii_case(TRIGGER);
-        if dropped {
-            *recall = true;
+        let flag = if trailer.eq_ignore_ascii_case(TRIGGER) {
+            Some(&mut found.recall)
+        } else if trailer.eq_ignore_ascii_case(MEMORIZE) {
+            Some(&mut found.memorize)
+        } else if trailer.eq_ignore_ascii_case(UPDATE) {
+            Some(&mut found.update)
+        } else if trailer.eq_ignore_ascii_case(DELETE) {
+            Some(&mut found.delete)
+        } else if trailer.eq_ignore_ascii_case(LINK) {
+            Some(&mut found.link)
+        } else if trailer.eq_ignore_ascii_case(UNLINK) {
+            Some(&mut found.unlink)
+        } else {
+            None
+        };
+        let dropped = flag.is_some();
+        if let Some(flag) = flag {
+            *flag = true;
             // The sentence keeps its punctuation, not the token's letters.
             cleaned.push_str(&token[trailer.len()..]);
         } else {
@@ -84,7 +146,7 @@ pub fn parse_ask(text: &str) -> Ask {
     };
     for ch in text.chars() {
         if ch.is_whitespace() {
-            if flush(&mut token, &mut cleaned, &mut recall) {
+            if flush(&mut token, &mut cleaned, &mut found) {
                 swallow_gap = true;
             }
             if swallow_gap {
@@ -96,13 +158,18 @@ pub fn parse_ask(text: &str) -> Ask {
             token.push(ch);
         }
     }
-    flush(&mut token, &mut cleaned, &mut recall);
+    flush(&mut token, &mut cleaned, &mut found);
     let cleaned = cleaned.trim().to_string();
-    if !recall {
+    if !found.any() {
         return Ask {
             query: text.to_string(),
             message: text.to_string(),
-            recall,
+            recall: found.recall,
+            memorize: found.memorize,
+            update: found.update,
+            delete: found.delete,
+            link: found.link,
+            unlink: found.unlink,
         };
     }
     Ask {
@@ -112,7 +179,12 @@ pub fn parse_ask(text: &str) -> Ask {
             cleaned.clone()
         },
         query: cleaned,
-        recall,
+        recall: found.recall,
+        memorize: found.memorize,
+        update: found.update,
+        delete: found.delete,
+        link: found.link,
+        unlink: found.unlink,
     }
 }
 
@@ -131,30 +203,24 @@ impl InjectedContext {
         self.memories.is_empty()
     }
 
-    /// Injection order, for recording.
     pub fn memory_ids(&self) -> Vec<i64> {
         self.memories.iter().map(|memory| memory.id).collect()
     }
 }
 
-/// The context of a turn that does not recall — no memories, but the style
-/// directive still applies. Also the context when there is no database.
+/// Context for a turn with no triggers: no memories, style directive only.
+/// Also the fallback when the brain cannot run.
 pub fn empty_context(brevity: Brevity) -> InjectedContext {
     InjectedContext {
         memories: Vec::new(),
-        system_message: render(&[], brevity),
+        system_message: render(&[], &[], brevity, Tasks::default()),
         tokens: 0,
     }
 }
 
-/// Mirrors the brain folder into the index: new and edited notes are
-/// re-embedded, rows whose file is gone are dropped. The embedder is behind
-/// a loader so it is only ever loaded — and on first use, downloaded — when
-/// a note actually changed. Answers whether the index moved.
-///
-/// Pointing the index at the configured model comes first, so a `brain.model`
-/// change is noticed here: the vector table is rebuilt at the new width and
-/// every note comes back stale, which is what re-embeds the folder.
+/// Mirrors the brain folder into the index and answers whether it moved. The
+/// embedder loader only runs when a note actually changed. A `brain.model`
+/// change rebuilds the vector table at the new width, staling every note.
 pub fn sync<F>(
     storage: &Storage,
     config: &BrainConfig,
@@ -167,8 +233,7 @@ where
     let swapping = !storage.index_matches(&wanted)?;
     let dir = notes::brain_dir(config.path.as_deref())?;
     let notes = notes::read_notes(&dir)?;
-    // A swap invalidates every vector, so nothing the old index says about
-    // staleness is worth asking; everything is stale by definition.
+    // A swap invalidates every vector, so everything is stale by definition.
     let stale: Vec<String> = if swapping {
         notes.iter().map(|note| note.slug.clone()).collect()
     } else {
@@ -179,8 +244,8 @@ where
         plan.stale
     };
 
-    // One load serves both the width probe and the batch: the expensive part
-    // of an embedder is getting hold of it, not using it.
+    // One load serves the width probe and the batch: the expensive part of an
+    // embedder is getting hold of it.
     let mut embedder = if swapping || !stale.is_empty() {
         Some(load_embedder()?)
     } else {
@@ -189,8 +254,7 @@ where
     if swapping {
         let dim = match config.model.known_dim() {
             Some(dim) => dim,
-            // Only the model itself can say how wide an HTTP backend's
-            // vectors are, so ask it before sizing the table.
+            // Only the model can say how wide an HTTP backend's vectors are.
             None => embed::probe_dim(
                 embedder
                     .as_deref_mut()
@@ -223,8 +287,7 @@ where
     embed_notes(notes, stale, load_embedder()?.as_mut())
 }
 
-/// Embeds exactly the named notes with an embedder the caller already holds —
-/// what a surface uses when it must control when the model is loaded.
+/// Embeds exactly the named notes with an embedder the caller already holds.
 pub fn embed_notes(
     notes: &[notes::NoteFile],
     stale: &[String],
@@ -245,60 +308,113 @@ pub fn embed_notes(
     Ok(stale.iter().cloned().zip(vectors).collect())
 }
 
-/// Assembles the context for a recalling turn. `history` is the conversation
-/// so far, without `user_msg`; `user_msg` is the cleaned question. The
-/// embedder is behind a loader so an empty brain never loads it.
+/// Assembles the context for one turn: recalled notes for `/brain` — and for
+/// the memory triggers, which recall too so the model can see what it should
+/// link, rewrite or trash — the matching task section, and the style
+/// directive always. `history` excludes the ask. A turn with no triggers
+/// never loads the embedder. `None` storage means no database: saving still
+/// works, recall has nothing to read.
 pub fn build_context<F>(
-    storage: &Storage,
+    storage: Option<&Storage>,
     config: &BrainConfig,
     history: &[Message],
-    user_msg: &str,
+    ask: &Ask,
     brevity: Brevity,
     load_embedder: F,
 ) -> Result<InjectedContext, BrainError>
 where
     F: FnOnce() -> Result<Box<dyn Embedder>, EmbedError>,
 {
-    let count = storage.count_memories()?;
-    if count == 0 {
-        return Ok(empty_context(brevity));
-    }
-    let query = query_text(history, user_msg);
-    let mut embedder = load_embedder()?;
-    let embedding = embedder
-        .embed(&[query.as_str()])?
-        .into_iter()
-        .next()
-        .ok_or_else(|| EmbedError::Embed("the embedder returned no vector".to_string()))?;
-    let ranked = recall(storage, config, &embedding, count as usize)?;
-
-    let cap = i64::from(config.cap_tokens);
     let mut kept = Vec::new();
     let mut tokens = 0;
-    for memory in ranked {
-        if tokens + memory.tokens > cap {
-            break;
+    if let Some(storage) = storage.filter(|_| ask.any()) {
+        let count = storage.count_memories()?;
+        if count > 0 {
+            let query = query_text(history, &ask.query);
+            let mut embedder = load_embedder()?;
+            let embedding = embedder
+                .embed(&[query.as_str()])?
+                .into_iter()
+                .next()
+                .ok_or_else(|| EmbedError::Embed("the embedder returned no vector".to_string()))?;
+            let cap = i64::from(config.cap_tokens);
+            // A write turn keeps the whole ranked sweep and lets the token cap
+            // be the only limit: the note it must rewrite, trash or link is
+            // often not among the best few answers to what was said.
+            let width = if ask.writes() {
+                Width {
+                    keep: count as usize,
+                    floor: 0.0,
+                }
+            } else {
+                Width {
+                    keep: config.top_k as usize,
+                    floor: f64::from(config.min_relevance.clamp(0.0, 1.0)),
+                }
+            };
+            for memory in recall(storage, config, &embedding, count as usize, width)? {
+                if tokens + memory.tokens > cap {
+                    break;
+                }
+                tokens += memory.tokens;
+                kept.push(memory);
+            }
         }
-        tokens += memory.tokens;
-        kept.push(memory);
     }
+    // Content is what recall chose; names are what exists. Only a write turn
+    // gets the index — an answer must not read a folder listing back to you.
+    let names = if ask.writes() {
+        notes::list_slugs(&notes::brain_dir(config.path.as_deref())?)?
+    } else {
+        Vec::new()
+    };
     Ok(InjectedContext {
-        system_message: render(&kept, brevity),
+        system_message: render(&kept, &names, brevity, Tasks::from(ask)),
         memories: kept,
         tokens,
     })
 }
 
-/// The walk: every memory's distance to the question from one KNN sweep, a
-/// personalized PageRank seeded on the closest `top_k`, and a rank blending
-/// the two. Deterministic — same brain, same question, same order.
+/// Which task sections the turn earns. One field per trigger, so the next one
+/// is a field rather than another parameter.
+#[derive(Default, Clone, Copy)]
+struct Tasks {
+    saving: bool,
+    updating: bool,
+    deleting: bool,
+    linking: bool,
+    unlinking: bool,
+}
+
+impl From<&Ask> for Tasks {
+    fn from(ask: &Ask) -> Self {
+        Self {
+            saving: ask.memorize,
+            updating: ask.update,
+            deleting: ask.delete,
+            linking: ask.link,
+            unlinking: ask.unlink,
+        }
+    }
+}
+
+/// How much of the ranked sweep survives into the prompt.
+struct Width {
+    keep: usize,
+    floor: f64,
+}
+
+/// One KNN sweep, a personalized PageRank seeded on the closest `top_k`, and a
+/// rank blending the two. `width` then decides how much of that ranking
+/// survives; the seeding and so the order never change with it. Deterministic:
+/// same brain, same question, same order.
 fn recall(
     storage: &Storage,
     config: &BrainConfig,
     embedding: &[f32],
     count: usize,
+    width: Width,
 ) -> Result<Vec<Memory>, BrainError> {
-    // One sweep answers every node's distance: closest first.
     let swept = storage.knn(embedding, count)?;
     let similarity: Vec<f64> = swept
         .iter()
@@ -312,8 +428,7 @@ fn recall(
         .enumerate()
         .map(|(index, (memory, _))| (memory.id, index))
         .collect();
-    // Parallel edges (a link that is also similar) add up: the pair is that
-    // much harder to leave.
+    // Parallel edges (a link that is also similar) add up.
     let mut weighted: HashMap<(usize, usize), f64> = HashMap::new();
     for edge in &graph.edges {
         let (Some(&a), Some(&b)) = (index_of.get(&edge.a), index_of.get(&edge.b)) else {
@@ -330,8 +445,8 @@ fn recall(
         degree[b] += weight;
     }
 
-    // Restart mass sits on the seeds, proportional to how well each answers
-    // the question. A question near nothing restarts evenly across the seeds.
+    // Restart mass sits on the seeds, proportional to how well each answers the
+    // question; a question near nothing restarts evenly across them.
     let seeds = (config.top_k as usize).min(swept.len());
     let mut restart = vec![0.0f64; swept.len()];
     let seed_total: f64 = similarity[..seeds].iter().sum();
@@ -365,6 +480,10 @@ fn recall(
     }
 
     let walked_peak = mass.iter().copied().fold(0.0f64, f64::max);
+    // Scored on the query's own scale: raw cosine baselines differ per model.
+    let sim_min = similarity.iter().copied().fold(f64::INFINITY, f64::min);
+    let sim_max = similarity.iter().copied().fold(0.0f64, f64::max);
+    let spread = sim_max - sim_min;
     let mut order: Vec<usize> = (0..swept.len()).collect();
     let score = |index: usize| -> f64 {
         let walked = if walked_peak > 0.0 {
@@ -372,7 +491,12 @@ fn recall(
         } else {
             0.0
         };
-        SIMILARITY_SHARE * similarity[index] + (1.0 - SIMILARITY_SHARE) * walked
+        let close = if spread > 0.0 {
+            (similarity[index] - sim_min) / spread
+        } else {
+            1.0
+        };
+        SIMILARITY_SHARE * close + (1.0 - SIMILARITY_SHARE) * walked
     };
     order.sort_by(|&a, &b| {
         score(b)
@@ -380,6 +504,9 @@ fn recall(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(swept[a].0.id.cmp(&swept[b].0.id))
     });
+    let floor = score(order[0]) * width.floor;
+    order.retain(|&index| score(index) >= floor);
+    order.truncate(width.keep);
     let mut swept: Vec<Option<Memory>> =
         swept.into_iter().map(|(memory, _)| Some(memory)).collect();
     Ok(order
@@ -389,7 +516,7 @@ fn recall(
 }
 
 /// The last two turns and the new prompt, newline-joined. Injected system
-/// messages are not conversation content and never feed retrieval.
+/// messages never feed retrieval.
 fn query_text(history: &[Message], user_msg: &str) -> String {
     let spoken: Vec<&str> = history
         .iter()
@@ -404,20 +531,88 @@ fn query_text(history: &[Message], user_msg: &str) -> String {
     parts.join("\n")
 }
 
-/// The template, golden-tested byte for byte: one `### slug` section per
-/// recalled note under `## Memories`, walk order, empty section omitted
-/// entirely. The brevity directive is the final section; `Off` adds nothing,
-/// not even the heading.
-fn render(memories: &[Memory], brevity: Brevity) -> String {
+/// Without this framing a small model reads the notes as a pasted document
+/// rather than background about the user.
+const PREAMBLE: &str = "The user's saved memories, recalled because they may \
+relate to this message. Treat them as facts about the user and their world \
+that you were told earlier. [[name]] links one memory to another. Use what \
+is relevant and ignore the rest.";
+
+const SAVING: &str = "The user asked you to save a memory. Call save_memory \
+with the fact distilled to a short third-person note. Never save a second \
+note about a topic a memory above already covers — if that fact changed, \
+answer that /update-memory rewrites it instead. Name the user if a memory \
+gives their name, and write every mention of a person or topic that already \
+has a memory as a [[slug]] link — for example: \"[[anna]] left her car keys \
+on the desk.\" Then confirm in one line without repeating the other memories.";
+
+const UPDATING: &str = "The user asked you to update a memory. Pick the \
+memory above that is about this fact, rewrite that whole note with the \
+change applied, and call update_memory with its exact slug and the rewritten \
+note. Keep [[slug]] links that still hold. If none of the memories above is \
+about this fact, say so in one line and call nothing. Otherwise confirm in \
+one line without repeating the other memories.";
+
+const DELETING: &str = "The user asked you to delete a memory. Pick the \
+memory above that is about this fact and call delete_memory with its exact \
+slug. If none of the memories above is about this fact, say so in one line \
+and call nothing. Otherwise confirm in one line without repeating the other \
+memories.";
+
+const NAMING: &str = "Every memory that exists, by name. The ones written out \
+above were recalled for this message; the others exist but their content was \
+not. A name here is a slug you may pass to a tool.";
+
+const UNLINKING: &str = "The user asked you to disconnect two memories. \
+Call unlink_memory with their exact slugs: `from` is the memory the link is \
+written in, `to` is the memory it points at. If the two memories the user \
+means are not both above, say so in one line and call nothing. Otherwise \
+confirm in one line without repeating the other memories.";
+
+const LINKING: &str = "The user asked you to connect two memories. Call \
+link_memory with their exact slugs: `from` is the memory the link is written \
+into, `to` is the memory it points at — for a memory `football` about the \
+user playing and a memory `mitul` about the user, from is football and to is \
+mitul. If the two memories the user means are not both above, say so in one \
+line and call nothing. Otherwise confirm in one line without repeating the \
+other memories.";
+
+/// The injected system message, golden-tested byte for byte: `## Memories`
+/// (omitted when empty), `## Memory names` on a write turn, a task section per
+/// mentioned trigger, then `## Style`.
+fn render(memories: &[Memory], names: &[String], brevity: Brevity, tasks: Tasks) -> String {
     let mut sections = Vec::new();
     if !memories.is_empty() {
-        let mut lines = vec!["## Memories".to_string()];
+        let mut lines = vec![format!("## Memories\n{PREAMBLE}")];
         lines.extend(
             memories
                 .iter()
                 .map(|memory| format!("\n### {}\n{}", memory.slug, memory.content)),
         );
         sections.push(lines.join("\n"));
+    }
+    if !names.is_empty() {
+        let shown = names.len().min(NAMES_SHOWN);
+        let mut line = names[..shown].join(", ");
+        if names.len() > shown {
+            line.push_str(&format!(", and {} more", names.len() - shown));
+        }
+        sections.push(format!("## Memory names\n{NAMING}\n{line}"));
+    }
+    if tasks.saving {
+        sections.push(format!("## Saving\n{SAVING}"));
+    }
+    if tasks.updating {
+        sections.push(format!("## Updating\n{UPDATING}"));
+    }
+    if tasks.deleting {
+        sections.push(format!("## Deleting\n{DELETING}"));
+    }
+    if tasks.linking {
+        sections.push(format!("## Linking\n{LINKING}"));
+    }
+    if tasks.unlinking {
+        sections.push(format!("## Unlinking\n{UNLINKING}"));
     }
     if let Some(directive) = brevity.directive() {
         sections.push(format!("## Style\n{directive}"));
@@ -431,8 +626,8 @@ mod tests {
     use crate::storage::memory_tests::{note, note_with_links, vector};
     use crate::storage::tests::TempDir;
 
-    /// Always embeds to a unit vector on `axis`, so tests choose exactly what
-    /// the query lands near.
+    /// Always embeds to a unit vector on `axis`, so a test picks what the query
+    /// lands near.
     struct FixedEmbedder {
         axis: usize,
     }
@@ -443,7 +638,6 @@ mod tests {
         }
     }
 
-    /// Records what it was asked to embed.
     struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
 
     impl Embedder for Recorder {
@@ -455,10 +649,17 @@ mod tests {
         }
     }
 
+    /// The folder is pinned into the test temp area and never created: no test
+    /// may read the real data directory, not even for the name index.
     fn config(top_k: u32, cap: u32) -> BrainConfig {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         BrainConfig {
             top_k,
             cap_tokens: cap,
+            path: Some(
+                std::env::temp_dir().join(format!("odyn-nobrain-{}-{unique}", std::process::id())),
+            ),
             ..BrainConfig::default()
         }
     }
@@ -469,8 +670,8 @@ mod tests {
         (dir, storage)
     }
 
-    /// Three notes: `cern-trip` at the query's axis, `espresso-order` leaning
-    /// off it, `yaml-grudge` further still.
+    /// `cern-trip` sits at the query's axis, `espresso-order` leans off it,
+    /// `yaml-grudge` is further still.
     fn seeded(label: &str) -> (TempDir, Storage) {
         let (dir, storage) = open(label);
         let notes = vec![
@@ -502,6 +703,11 @@ mod tests {
             message: message.to_string(),
             query: message.to_string(),
             recall: true,
+            memorize: false,
+            update: false,
+            delete: false,
+            link: false,
+            unlink: false,
         }
     }
 
@@ -517,35 +723,454 @@ mod tests {
             recalled("multi\nline question")
         );
         assert_eq!(parse_ask("remind me, /brain."), recalled("remind me, ."));
-        // No trigger: the message passes through untouched.
         assert_eq!(
             parse_ask("my brainstorm about /brains"),
             Ask {
                 message: "my brainstorm about /brains".to_string(),
                 query: "my brainstorm about /brains".to_string(),
                 recall: false,
+                memorize: false,
+                update: false,
+                delete: false,
+                link: false,
+                unlink: false,
             }
         );
-        // Only the trigger: recall runs on history alone, and the message
-        // survives non-empty.
+        // Only the trigger: recall runs on history alone, message stays non-empty.
         assert_eq!(
             parse_ask("  /brain  "),
             Ask {
                 message: "/brain".to_string(),
                 query: String::new(),
                 recall: true,
+                memorize: false,
+                update: false,
+                delete: false,
+                link: false,
+                unlink: false,
             }
         );
+    }
+
+    #[test]
+    fn the_memorize_trigger_parses_alone_and_with_recall() {
+        assert_eq!(
+            parse_ask("/memory I take espresso, no sugar"),
+            Ask {
+                message: "I take espresso, no sugar".to_string(),
+                query: "I take espresso, no sugar".to_string(),
+                recall: false,
+                memorize: true,
+                update: false,
+                delete: false,
+                link: false,
+                unlink: false,
+            }
+        );
+        assert_eq!(
+            parse_ask("/brain /memory update what you know about coffee"),
+            Ask {
+                message: "update what you know about coffee".to_string(),
+                query: "update what you know about coffee".to_string(),
+                recall: true,
+                memorize: true,
+                update: false,
+                delete: false,
+                link: false,
+                unlink: false,
+            }
+        );
+        assert_eq!(
+            parse_ask("  /memory  "),
+            Ask {
+                message: "/memory".to_string(),
+                query: String::new(),
+                recall: false,
+                memorize: true,
+                update: false,
+                delete: false,
+                link: false,
+                unlink: false,
+            }
+        );
+    }
+
+    #[test]
+    fn the_delete_trigger_parses_alone() {
+        assert_eq!(
+            parse_ask("/delete-memory forget where my car keys are"),
+            Ask {
+                message: "forget where my car keys are".to_string(),
+                query: "forget where my car keys are".to_string(),
+                recall: false,
+                memorize: false,
+                update: false,
+                delete: true,
+                link: false,
+                unlink: false,
+            }
+        );
+    }
+
+    /// `/link-memory` is its own token, and every trigger recalls, so a link
+    /// turn sees the notes it is being asked to connect.
+    #[test]
+    fn the_link_trigger_parses_alone_and_asks_for_recall() {
+        let ask = parse_ask("/link-memory connect football to me");
+        assert_eq!(
+            ask,
+            Ask {
+                message: "connect football to me".to_string(),
+                query: "connect football to me".to_string(),
+                recall: false,
+                memorize: false,
+                update: false,
+                delete: false,
+                link: true,
+                unlink: false,
+            }
+        );
+        assert!(ask.any(), "a link turn touches the brain");
+        assert!(!parse_ask("/memory a fact").link);
+    }
+
+    /// `/unlink-memory` is its own token: it never trips the `/link-memory` flag.
+    #[test]
+    fn the_unlink_trigger_parses_and_never_reads_as_link() {
+        let ask = parse_ask("/unlink-memory football has nothing to do with anna");
+        assert!(ask.unlink);
+        assert!(!ask.link);
+        assert!(
+            ask.writes(),
+            "an unlink turn recalls wide and sees the names"
+        );
+        assert_eq!(ask.message, "football has nothing to do with anna");
+        assert!(!parse_ask("/link-memory a and b").unlink);
+    }
+
+    #[test]
+    fn a_link_turn_gets_the_linking_section_under_the_memories() {
+        let (_dir, storage) = seeded("linking");
+        let mut ask = recalled("cern?");
+        ask.recall = false;
+        ask.link = true;
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(!context.is_empty(), "a link must see what it can connect");
+        assert!(context.system_message.contains("### cern-trip"));
+        assert!(context
+            .system_message
+            .ends_with(&format!("\n\n## Linking\n{LINKING}")));
+    }
+
+    /// `/update-memory` is its own token: it never trips the `/memory` flag.
+    #[test]
+    fn the_update_trigger_parses_and_never_reads_as_memorize() {
+        assert_eq!(
+            parse_ask("/update-memory my car keys are on the fridge"),
+            Ask {
+                message: "my car keys are on the fridge".to_string(),
+                query: "my car keys are on the fridge".to_string(),
+                recall: false,
+                memorize: false,
+                update: true,
+                delete: false,
+                link: false,
+                unlink: false,
+            }
+        );
+        assert_eq!(
+            parse_ask("the keys moved, /UPDATE-MEMORY."),
+            Ask {
+                message: "the keys moved, .".to_string(),
+                query: "the keys moved, .".to_string(),
+                recall: false,
+                memorize: false,
+                update: true,
+                delete: false,
+                link: false,
+                unlink: false,
+            }
+        );
+    }
+
+    /// An empty index is what keeps the embedder cold here: `/memory` recalls
+    /// like `/brain` does, so the model can see what it should link against.
+    #[test]
+    fn a_memorize_turn_gets_the_saving_section_without_the_embedder() {
+        let brain = TempDir::new("saving-brain");
+        std::fs::create_dir_all(&brain.0).expect("create brain dir");
+        crate::notes::write_note(&brain.0, Some("espresso"), "espresso notes").expect("write");
+        crate::notes::write_note(&brain.0, Some("birthday"), "a date").expect("write");
+        let (_db, storage) = open("saving-db");
+        let config = BrainConfig {
+            path: Some(brain.0.clone()),
+            ..BrainConfig::default()
+        };
+        let ask = Ask {
+            message: "remember this".to_string(),
+            query: "remember this".to_string(),
+            recall: false,
+            memorize: true,
+            update: false,
+            delete: false,
+            link: false,
+            unlink: false,
+        };
+        let context =
+            build_context(Some(&storage), &config, &[], &ask, Brevity::Off, never).expect("build");
+        // Names come from the folder, so an unindexed note is still nameable —
+        // and reaching them cost no embedder and no injected content.
+        assert!(context.is_empty());
+        assert_eq!(context.tokens, 0);
+        assert_eq!(
+            context.system_message,
+            format!("## Memory names\n{NAMING}\nbirthday, espresso\n\n## Saving\n{SAVING}")
+        );
+
+        // An empty folder still explains the task.
+        let empty = BrainConfig {
+            path: Some(brain.0.join("missing")),
+            ..BrainConfig::default()
+        };
+        let context = build_context(None, &empty, &[], &ask, Brevity::Off, never).expect("build");
+        assert_eq!(context.system_message, format!("## Saving\n{SAVING}"));
+    }
+
+    /// The relevance floor and `top_k` decide what answers a question. A write
+    /// turn is not answering: it has to reach the note it must change, so it
+    /// keeps the whole ranking and lets the token cap be the only limit.
+    #[test]
+    fn a_write_turn_keeps_what_the_relevance_floor_would_prune() {
+        let (_dir, storage) = seeded("wide");
+        let narrow = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &recalled("cern?"),
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert_eq!(
+            narrow.memory_ids(),
+            vec![1, 2],
+            "yaml-grudge is not about cern"
+        );
+
+        let mut ask = recalled("cern?");
+        ask.recall = false;
+        ask.update = true;
+        let wide = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert_eq!(wide.memory_ids(), vec![1, 2, 3]);
+        assert!(wide.system_message.contains("### yaml-grudge"));
+
+        // `top_k` stops truncating too, so a tight answering budget does not
+        // hide notes from a rewrite.
+        let wide = build_context(
+            Some(&storage),
+            &config(1, 900),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert_eq!(wide.memories.len(), 3);
+
+        // The cap still binds: it is the one limit a write turn respects.
+        let capped = build_context(
+            Some(&storage),
+            &config(6, 9),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert_eq!(
+            capped.memory_ids(),
+            vec![1, 2],
+            "5 + 4 tokens fills a cap of 9"
+        );
+    }
+
+    /// A `/brain` answer never sees the name index — reciting the folder back
+    /// is exactly what it would do with one.
+    #[test]
+    fn a_recall_turn_gets_no_name_index() {
+        let (dir, storage) = seeded("names-recall");
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &recalled("cern?"),
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(!context.system_message.contains("## Memory names"));
+        drop(dir);
+    }
+
+    /// Past 50 the index is summarized rather than spending the recall cap on
+    /// slugs.
+    #[test]
+    fn a_long_folder_summarizes_the_tail_of_the_name_index() {
+        let brain = TempDir::new("many-names");
+        std::fs::create_dir_all(&brain.0).expect("create brain dir");
+        for index in 0..53 {
+            crate::notes::write_note(&brain.0, Some(&format!("note-{index:03}")), "a fact")
+                .expect("write");
+        }
+        let config = BrainConfig {
+            path: Some(brain.0.clone()),
+            ..BrainConfig::default()
+        };
+        let ask = Ask {
+            message: "forget one".to_string(),
+            query: "forget one".to_string(),
+            recall: false,
+            memorize: false,
+            update: false,
+            delete: true,
+            link: false,
+            unlink: false,
+        };
+        let context = build_context(None, &config, &[], &ask, Brevity::Off, never).expect("build");
+        assert!(context.system_message.contains("note-000, note-001"));
+        assert!(context.system_message.contains("note-049, and 3 more"));
+        assert!(!context.system_message.contains("note-050"));
+    }
+
+    /// An update turn recalls like a save turn and gets its own section — the
+    /// recalled notes are the only slugs it can rewrite.
+    #[test]
+    fn an_update_turn_recalls_and_gets_the_updating_section() {
+        let (_dir, storage) = seeded("updating");
+        let ask = Ask {
+            message: "the keys moved to the fridge".to_string(),
+            query: "the keys moved to the fridge".to_string(),
+            recall: false,
+            memorize: false,
+            update: true,
+            delete: false,
+            link: false,
+            unlink: false,
+        };
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(
+            !context.is_empty(),
+            "an update must see what it can rewrite"
+        );
+        assert!(context
+            .system_message
+            .contains("## Updating\nThe user asked you to update a memory."));
+        assert!(!context.system_message.contains("## Saving"));
+    }
+
+    /// A delete turn recalls too — the recalled notes are the only slugs it
+    /// can trash.
+    #[test]
+    fn a_delete_turn_recalls_and_gets_the_deleting_section() {
+        let (_dir, storage) = seeded("deleting");
+        let ask = Ask {
+            message: "forget about the cern trip".to_string(),
+            query: "forget about the cern trip".to_string(),
+            recall: false,
+            memorize: false,
+            update: false,
+            delete: true,
+            link: false,
+            unlink: false,
+        };
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(!context.is_empty(), "a delete must see what it can trash");
+        assert!(context
+            .system_message
+            .contains("## Deleting\nThe user asked you to delete a memory."));
+        assert!(!context.system_message.contains("## Saving"));
+        assert!(!context.system_message.contains("## Updating"));
+    }
+
+    /// The linking fix: a save is informed. `/memory` alone recalls the notes
+    /// nearest the message, so `[[slug]]` links have something to land on.
+    #[test]
+    fn a_memorize_turn_recalls_related_notes_to_link_against() {
+        let (_dir, storage) = seeded("informed");
+        let brain = TempDir::new("informed-brain");
+        std::fs::create_dir_all(&brain.0).expect("create brain dir");
+        crate::notes::write_note(&brain.0, Some("cern-trip"), "went to CERN in june")
+            .expect("write");
+        let config = BrainConfig {
+            path: Some(brain.0.clone()),
+            ..config(6, 900)
+        };
+        let ask = Ask {
+            message: "remember the cern talk".to_string(),
+            query: "remember the cern talk".to_string(),
+            recall: false,
+            memorize: true,
+            update: false,
+            delete: false,
+            link: false,
+            unlink: false,
+        };
+        let context = build_context(
+            Some(&storage),
+            &config,
+            &[],
+            &ask,
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert!(!context.is_empty(), "a save must see what it can link");
+        assert!(context.system_message.contains("### cern-trip"));
+        assert!(context
+            .system_message
+            .contains("## Saving\nThe user asked you to save a memory."));
     }
 
     #[test]
     fn the_template_is_byte_identical_to_the_plan() {
         let (_dir, storage) = seeded("golden");
         let context = build_context(
-            &storage,
+            Some(&storage),
             &config(6, 900),
             &[],
-            "cern?",
+            &recalled("cern?"),
             Brevity::Off,
             at_axis_zero,
         )
@@ -554,24 +1179,25 @@ mod tests {
         assert_eq!(
             context.system_message,
             "## Memories\n\
+             The user's saved memories, recalled because they may relate to \
+             this message. Treat them as facts about the user and their world \
+             that you were told earlier. [[name]] links one memory to another. \
+             Use what is relevant and ignore the rest.\n\
              \n\
              ### cern-trip\n\
              went to CERN in june\n\
              \n\
              ### espresso-order\n\
-             likes espresso\n\
-             \n\
-             ### yaml-grudge\n\
-             hates yaml"
+             likes espresso"
         );
-        assert_eq!(context.tokens, 5 + 4 + 3);
-        assert_eq!(context.memory_ids(), vec![1, 2, 3]);
+        assert_eq!(context.tokens, 5 + 4, "yaml-grudge is not about cern");
+        assert_eq!(context.memory_ids(), vec![1, 2]);
 
         let again = build_context(
-            &storage,
+            Some(&storage),
             &config(6, 900),
             &[],
-            "cern?",
+            &recalled("cern?"),
             Brevity::Off,
             at_axis_zero,
         )
@@ -579,8 +1205,6 @@ mod tests {
         assert_eq!(again, context, "same inputs must rebuild identically");
     }
 
-    /// The walk's whole point: a note far from the question but wikilinked to
-    /// the best answer outranks an equally far stranger.
     #[test]
     fn a_linked_neighbor_of_the_answer_beats_an_unlinked_stranger() {
         let (_dir, storage) = open("walk");
@@ -601,10 +1225,10 @@ mod tests {
         storage.sync_notes(&notes, &embeddings).expect("sync");
 
         let context = build_context(
-            &storage,
+            Some(&storage),
             &config(3, 900),
             &[],
-            "q",
+            &recalled("q"),
             Brevity::Off,
             at_axis_zero,
         )
@@ -614,7 +1238,41 @@ mod tests {
             .iter()
             .map(|memory| memory.slug.as_str())
             .collect();
-        assert_eq!(slugs, vec!["anchor", "sidekick", "stranger"]);
+        assert_eq!(slugs, vec!["anchor", "sidekick"]);
+    }
+
+    #[test]
+    fn the_floor_and_top_k_bound_what_recall_returns() {
+        let (_dir, storage) = seeded("bounds");
+        let everything = BrainConfig {
+            min_relevance: 0.0,
+            ..config(6, 900)
+        };
+        let context = build_context(
+            Some(&storage),
+            &everything,
+            &[],
+            &recalled("q"),
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert_eq!(context.memory_ids(), vec![1, 2, 3]);
+
+        let two = BrainConfig {
+            min_relevance: 0.0,
+            ..config(2, 900)
+        };
+        let context = build_context(
+            Some(&storage),
+            &two,
+            &[],
+            &recalled("q"),
+            Brevity::Off,
+            at_axis_zero,
+        )
+        .expect("build");
+        assert_eq!(context.memory_ids(), vec![1, 2]);
     }
 
     #[test]
@@ -622,22 +1280,21 @@ mod tests {
         let (_dir, storage) = seeded("cap");
         // cern-trip (5) + espresso-order (4) fit a cap of 9 exactly.
         let context = build_context(
-            &storage,
+            Some(&storage),
             &config(6, 9),
             &[],
-            "q",
+            &recalled("q"),
             Brevity::Off,
             at_axis_zero,
         )
         .expect("build");
         assert_eq!(context.memories.len(), 2);
         assert_eq!(context.tokens, 9);
-        // A cap of 8 cuts at the first memory that no longer fits.
         let context = build_context(
-            &storage,
+            Some(&storage),
             &config(6, 8),
             &[],
-            "q",
+            &recalled("q"),
             Brevity::Off,
             at_axis_zero,
         )
@@ -649,8 +1306,15 @@ mod tests {
     #[test]
     fn an_empty_brain_never_loads_the_embedder() {
         let (_dir, storage) = open("empty");
-        let context =
-            build_context(&storage, &config(6, 900), &[], "q", Brevity::Off, never).expect("build");
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &recalled("q"),
+            Brevity::Off,
+            never,
+        )
+        .expect("build");
         assert!(context.is_empty());
         assert_eq!(context.system_message, "");
     }
@@ -675,10 +1339,10 @@ mod tests {
         ];
         let recorder = Recorder(asked.clone());
         build_context(
-            &storage,
+            Some(&storage),
             &config(6, 900),
             &history,
-            "now",
+            &recalled("now"),
             Brevity::Off,
             move || Ok(Box::new(recorder)),
         )
@@ -690,10 +1354,10 @@ mod tests {
     fn a_saved_turn_records_exactly_the_injections_that_built_its_context() {
         let (_dir, storage) = seeded("record");
         let context = build_context(
-            &storage,
+            Some(&storage),
             &config(6, 900),
             &[],
-            "cern?",
+            &recalled("cern?"),
             Brevity::Off,
             at_axis_zero,
         )
@@ -728,31 +1392,34 @@ mod tests {
         );
     }
 
-    /// C.1 golden: the directive is the final section under `## Style`, and
-    /// `Off` output carries no style section at all.
     #[test]
     fn each_brevity_level_appends_exactly_its_style_section() {
         let (_dir, storage) = seeded("brevity");
         let base = build_context(
-            &storage,
+            Some(&storage),
             &config(6, 900),
             &[],
-            "cern?",
+            &recalled("cern?"),
             Brevity::Off,
             at_axis_zero,
         )
         .expect("off")
         .system_message;
         for level in [Brevity::Lite, Brevity::Full, Brevity::Ultra] {
-            let message =
-                build_context(&storage, &config(6, 900), &[], "cern?", level, at_axis_zero)
-                    .expect("build")
-                    .system_message;
+            let message = build_context(
+                Some(&storage),
+                &config(6, 900),
+                &[],
+                &recalled("cern?"),
+                level,
+                at_axis_zero,
+            )
+            .expect("build")
+            .system_message;
             let directive = level.directive().expect("directive");
             assert_eq!(message, format!("{base}\n\n## Style\n{directive}"));
         }
 
-        // No recall still gets its style section, with nothing above it.
         let message = empty_context(Brevity::Ultra).system_message;
         assert_eq!(
             message,
@@ -761,8 +1428,6 @@ mod tests {
         assert_eq!(empty_context(Brevity::Off).system_message, "");
     }
 
-    /// The folder-to-index pipeline end to end: files in, sync embeds only
-    /// what changed, and an unchanged folder never touches the model.
     #[test]
     fn sync_mirrors_the_folder_and_reloads_nothing_when_unchanged() {
         let brain = TempDir::new("sync-brain");
@@ -792,7 +1457,7 @@ mod tests {
         // Unchanged: the loader must not run.
         assert!(!sync(&storage, &config, never).expect("resync"));
 
-        // A deleted file prunes without the model: nothing needs embedding.
+        // A deleted file prunes without loading the model.
         crate::notes::delete_note(&brain.0, "second-note").expect("delete");
         assert!(sync(&storage, &config, never).expect("prune"));
         assert_eq!(storage.count_memories().expect("count"), 1);

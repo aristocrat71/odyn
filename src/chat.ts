@@ -1,12 +1,12 @@
 import type { Conversation, Message } from "./api";
 import { renderBrevity } from "./brevctl";
 import { accept, ghost } from "./complete";
-import { el, waiting } from "./dom";
+import { el, forgetTraces, trace, waiting } from "./dom";
 import { renderMarkdown } from "./markdown";
+import { MENTIONS } from "./mentions";
 import { renderPickers } from "./picker";
 import {
   cancelStream,
-  expandLedger,
   onStream,
   refreshPreview,
   resend,
@@ -21,31 +21,29 @@ const INTERRUPTED = " (interrupted)";
 const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 // How far from the end still counts as reading the end of the stream.
 const SLACK = 24;
-// Chips shown before the tail collapses to `◈ +N more`.
-const CHIP_LIMIT = 5;
-// The only thing a message completes to. It is a mention, not a command: it
-// can sit anywhere in the line, so the word under the caret is what is matched.
-const MENTION = "/brain";
+// Mentions can sit anywhere in a line, so the word under the caret is matched.
 
-// The composer outlives every redraw: a draft being typed, its height and the
-// caret in it survive a render that has nothing to do with the chat.
+// The composer outlives every redraw: draft, height and caret all survive.
 const input = el("textarea", "composer-input");
 input.rows = 1;
 input.placeholder = "Message Odyn…";
 const hint = ghost(input, "composer-ask");
+const drawMention = (): void => {
+  for (const mention of MENTIONS) if (hint.draw(mention)) return;
+};
 input.addEventListener("input", () => {
   grow();
-  hint.draw(MENTION);
+  drawMention();
   schedulePreview(input.value);
 });
 input.addEventListener("keydown", (event) => {
-  // ⇥ takes the completion, → takes it only from the end of the draft. Neither
-  // is swallowed when there is nothing to complete: ⇥ still moves focus on.
+  // → takes the completion only from the end of the draft. Neither key is
+  // swallowed with nothing to complete: ⇥ still moves focus on.
   const end = input.selectionStart === input.value.length;
   if (event.key === "Tab" || (event.key === "ArrowRight" && end)) {
-    if (!accept(input, MENTION)) return;
+    if (MENTIONS.find((mention) => accept(input, mention)) === undefined) return;
     event.preventDefault();
-    hint.draw(MENTION);
+    drawMention();
     // The mention is what turns recall on, so the CONTEXT line answers for it.
     schedulePreview(input.value);
     return;
@@ -69,12 +67,14 @@ export function renderChat(): HTMLElement {
   const opened = shown !== state.selected;
   const follow = opened || transcript === null || atBottom(transcript);
   const offset = transcript === null ? 0 : transcript.scrollTop;
+  // Trace keys are message indices, which mean nothing in the next conversation.
+  if (opened) forgetTraces();
   shown = state.selected;
 
   const rolled = el("div", "transcript");
   answer = null;
   if (state.messages.length === 0) rolled.append(empty());
-  for (const message of state.messages) rolled.append(said(message));
+  state.messages.forEach((message, index) => rolled.append(said(message, index)));
   const stream = state.stream;
   if (stream !== null && stream.conversation === state.selected) {
     rolled.append(streamed(stream));
@@ -96,22 +96,19 @@ export function renderChat(): HTMLElement {
   return column;
 }
 
-// The ledger refreshes when the window regains focus, so a memory added from
-// the CLI shows up without a restart.
+// Refreshed on window focus: a memory added from the CLI needs no restart.
 export function refreshLedger(): void {
   if (state.selected !== null) void refreshPreview(input.value);
 }
 
-// The home input hands its non-command text over as the draft: nothing is
-// sent on someone's behalf, but nothing has to be typed twice either.
+// The home input hands its non-command text over as a draft.
 export function prefillComposer(text: string): void {
   input.value = text;
-  hint.draw(MENTION);
+  drawMention();
   schedulePreview(text);
 }
 
-// One message is redrawn per delta; the transcript follows only if it was
-// already showing the end.
+// One message per delta; the transcript follows only if already at the end.
 function patch(): void {
   const stream = state.stream;
   if (answer === null || transcript === null || stream === null) return;
@@ -120,12 +117,14 @@ function patch(): void {
   if (follow) transcript.scrollTop = transcript.scrollHeight;
 }
 
-function said(message: Message): HTMLElement {
+function said(message: Message, index: number): HTMLElement {
   const block = el("div", `message ${message.role}`);
   const text = el("div", "text");
   fill(text, message.content, false);
   block.append(speaker(message.role), text);
-  if (message.used.length > 0) block.append(trace(message.used));
+  if (message.used.length > 0) {
+    block.append(trace("◈", "used", message.used, `m${index}`));
+  }
   return block;
 }
 
@@ -136,27 +135,32 @@ function streamed(stream: Stream): HTMLElement {
   block.append(speaker("assistant"), text);
   if (stream.error === "") answer = text;
   else block.append(failed(stream.error));
-  if (stream.used.length > 0) block.append(trace(stream.used));
+  if (stream.used.length > 0) block.append(trace("◈", "used", stream.used, "stream"));
+  if (stream.saved.length > 0) {
+    block.append(trace("✎", "saved", stream.saved, "stream-saved"));
+  }
+  if (stream.updated.length > 0) {
+    block.append(trace("✎", "updated", stream.updated, "stream-updated"));
+  }
+  if (stream.deleted.length > 0) {
+    block.append(trace("✕", "deleted", stream.deleted, "stream-deleted"));
+  }
+  if (stream.linked.length > 0) {
+    block.append(trace("⌇", "linked", stream.linked, "stream-linked"));
+  }
+  if (stream.unlinked.length > 0) {
+    block.append(trace("⌇", "unlinked", stream.unlinked, "stream-unlinked"));
+  }
   return block;
 }
 
-// DESIGN.md §5: `◈ used e-0142 e-0087` — mark and ids teal, the rest dim.
-function trace(used: string[]): HTMLElement {
-  const line = el("div", "trace");
-  line.append(el("span", "trace-mark", "◈"), " used");
-  for (const id of used) {
-    line.append(" ", el("span", "trace-id", id));
-  }
-  return line;
-}
 
 function speaker(role: Message["role"]): HTMLElement {
   return el("div", "speaker", role === "user" ? "MITUL" : "ᛟ ODYN");
 }
 
 function fill(node: HTMLElement, content: string, cursor: boolean): void {
-  // Nothing has streamed yet: a lone cursor under the speaker reads as idle,
-  // so the wait line stands in until the first token replaces it.
+  // A lone cursor under the speaker reads as idle; the wait line stands in.
   if (cursor && content === "") {
     node.replaceChildren(waiting());
     return;
@@ -182,8 +186,6 @@ function failed(message: string): HTMLElement {
 }
 
 // DESIGN.md §5.1: one mono status line fused to the top of the composer.
-// Nothing is injected without a /brain mention, and the line says so instead
-// of sitting empty.
 function ledger(): HTMLElement {
   const line = el("div", "ledger");
   line.append(el("span", "ledger-label", "CONTEXT"));
@@ -194,31 +196,21 @@ function ledger(): HTMLElement {
   const preview = state.ledger.preview;
   if (preview === null) return line;
   if (!preview.active) {
-    line.append(el("span", "ledger-note", "mention /brain to recall memory"));
+    line.append(
+      el(
+        "span",
+        "ledger-note",
+        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects · /unlink-memory disconnects",
+      ),
+    );
     return line;
   }
   if (preview.memories.length === 0) {
-    line.append(el("span", "ledger-note", "/brain · nothing to recall yet"));
+    line.append(el("span", "ledger-note", "nothing to recall yet"));
     return line;
   }
 
-  const visible = state.ledger.expanded
-    ? preview.memories
-    : preview.memories.slice(0, CHIP_LIMIT);
-  for (const item of visible) {
-    const chip = el("span", "chip chip-epi");
-    chip.append("◈ ", item.id, " ", el("span", "chip-tokens", String(item.tokens)));
-    chip.dataset.tip = item.content;
-    line.append(chip);
-  }
-  const rest = preview.memories.slice(CHIP_LIMIT);
-  if (!state.ledger.expanded && rest.length > 0) {
-    const total = rest.reduce((sum, item) => sum + item.tokens, 0);
-    const more = el("button", "chip chip-epi chip-more");
-    more.append(`◈ +${rest.length} more `, el("span", "chip-tokens", String(total)));
-    more.addEventListener("click", expandLedger);
-    line.append(more);
-  }
+  line.append(el("span", "ledger-reading", "◈ reading the brain"));
   line.append(
     el("span", "ledger-total", `${count(preview.tokens)} / ${count(preview.cap_tokens)} tk`),
   );
@@ -227,8 +219,6 @@ function ledger(): HTMLElement {
 
 const count = (tokens: number): string => tokens.toLocaleString("en-US");
 
-// Spotlight's shape: one surface holding the ledger, the field, and a footer
-// of everything the next message is sent with.
 function composer(): HTMLElement {
   const box = el("div", "composer");
   const field = el("div", "composer-field");
@@ -262,7 +252,7 @@ function submit(): void {
   if (text === "" || streaming()) return;
   input.value = "";
   grow();
-  hint.draw(MENTION);
+  drawMention();
   void send(text);
 }
 

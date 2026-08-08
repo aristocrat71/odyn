@@ -3,13 +3,14 @@
 
 use std::io::Write;
 
-use futures::StreamExt;
 use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
-use odyn_core::chat::{ChatError, ChatEvent, ChatProvider, ChatRequest, Message, Role, Usage};
+use odyn_core::chat::{ChatError, ChatProvider, Message, Role, Usage};
 use odyn_core::config::{BrainConfig, Config, ConfigError, ProviderConfig, ProviderRegistry};
 use odyn_core::embed::load_embedder;
+use odyn_core::notes;
 use odyn_core::storage::{Storage, StorageError};
+use odyn_core::tools::{self, TurnError, TurnEvent};
 
 const TITLE_CHARS: usize = 40;
 
@@ -41,6 +42,11 @@ pub fn warn(message: &str) {
     let _ = writeln!(anstream::stderr(), "\u{1b}[31modyn:\u{1b}[0m {message}");
 }
 
+/// Dim, on stderr: piped answers stay clean.
+pub fn trace(message: &str) {
+    let _ = writeln!(anstream::stderr(), "\u{1b}[2m◈ {message}\u{1b}[0m");
+}
+
 pub fn write_failure(err: std::io::Error) -> Failure {
     Failure::run(format!("could not write to stdout: {err}"))
 }
@@ -50,16 +56,14 @@ pub struct Session {
     pub provider: String,
     pub model: String,
     pub handle: Box<dyn ChatProvider>,
-    /// The whole file: the brain settings need it, and so does building an
-    /// embedder that lives behind a provider entry.
     pub config: Config,
     /// The `[style]` default; a `--brevity` flag overrides it per invocation.
     pub brevity: Brevity,
 }
 
 impl Session {
-    /// Flag first, then the provider's `default_model`; anything unresolved is
-    /// an error that says what to pass.
+    /// Flag first, then the provider's `default_model`; unresolved is an error
+    /// that says what to pass.
     pub fn start(provider: Option<String>, model: Option<String>) -> Result<Self, Failure> {
         let config = Config::load().map_err(config_failure)?;
         let registry = ProviderRegistry::from_config(&config).map_err(config_failure)?;
@@ -101,30 +105,29 @@ pub struct Reply {
     pub usage: Option<Usage>,
 }
 
-/// Drives one reply, handing every delta to `emit` as it arrives so the caller
-/// decides what reaches the terminal.
+/// Drives one reply — several provider requests when the turn touches memory.
 pub async fn stream_reply(
     provider: &dyn ChatProvider,
     model: &str,
-    messages: &[Message],
-    mut emit: impl FnMut(&str) -> std::io::Result<()>,
+    messages: Vec<Message>,
+    config: &Config,
+    ask: &Ask,
+    emit: impl FnMut(TurnEvent<'_>) -> std::io::Result<()>,
 ) -> Result<Reply, Failure> {
-    let mut stream = provider.chat_stream(ChatRequest::new(messages, model));
-    let mut text = String::new();
-    let mut usage = None;
-    while let Some(event) = stream.next().await {
-        match event.map_err(|err| Failure::run(format!("stream failed: {}", describe(&err))))? {
-            ChatEvent::TextDelta(delta) => {
-                emit(&delta).map_err(write_failure)?;
-                text.push_str(&delta);
-            }
-            ChatEvent::Done { usage: reported } => {
-                usage = reported;
-                break;
-            }
-        }
-    }
-    Ok(Reply { text, usage })
+    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link, ask.unlink);
+    let dir = notes::brain_dir(config.brain.path.as_deref())
+        .map_err(|err| Failure::run(err.to_string()))?;
+    let temperature = config.brain.save_temperature;
+    let reply = tools::run_turn(provider, model, messages, &tools, &dir, temperature, emit)
+        .await
+        .map_err(|err| match err {
+            TurnError::Chat(err) => Failure::run(format!("stream failed: {}", describe(&err))),
+            TurnError::Write(err) => write_failure(err),
+        })?;
+    Ok(Reply {
+        text: reply.text,
+        usage: reply.usage,
+    })
 }
 
 pub fn save_turn(
@@ -137,10 +140,8 @@ pub fn save_turn(
     storage.append_turn(conversation, prompt, &reply.text, reply.usage, injected)
 }
 
-/// Memory is opt-in and additive: a turn that never mentioned `/brain` gets
-/// the style directive alone, and when the brain cannot run, the turn still
-/// goes out — uninjected, loudly, with nothing recorded. `None` means exactly
-/// that. No database is not a failure either: style still applies.
+/// Memory is opt-in and additive: when the brain cannot run the turn still goes
+/// out, uninjected and with nothing recorded. `None` means exactly that.
 pub fn memory_context(
     storage: Option<&Storage>,
     config: &Config,
@@ -148,20 +149,18 @@ pub fn memory_context(
     ask: &Ask,
     brevity: Brevity,
 ) -> Option<InjectedContext> {
-    if !ask.recall {
-        return Some(brain::empty_context(brevity));
-    }
-    let Some(storage) = storage else {
-        return Some(brain::empty_context(brevity));
-    };
     let brain_config = &config.brain;
-    // The folder is the truth: recall reads the files as they are now.
-    if let Err(err) = brain::sync(storage, brain_config, || {
-        load_embedder(config, &brain_config.model)
-    }) {
-        warn(&format!("brain folder not synced: {err}"));
+    if ask.any() {
+        if let Some(storage) = storage {
+            // The folder is the truth: recall reads the files as they are now.
+            if let Err(err) = brain::sync(storage, brain_config, || {
+                load_embedder(config, &brain_config.model)
+            }) {
+                warn(&format!("brain folder not synced: {err}"));
+            }
+        }
     }
-    let context = brain::build_context(storage, brain_config, history, &ask.query, brevity, || {
+    let context = brain::build_context(storage, brain_config, history, ask, brevity, || {
         load_embedder(config, &brain_config.model)
     });
     match context {
@@ -173,9 +172,8 @@ pub fn memory_context(
     }
 }
 
-/// The messages a turn actually sends: the injected context, when there is
-/// any, ahead of the conversation. The system message can be non-empty with
-/// zero memories — a brevity directive alone still has to reach the model.
+/// The system message can be non-empty with zero memories: a brevity directive
+/// alone still has to reach the model.
 pub fn with_context(context: Option<&InjectedContext>, history: &[Message]) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len() + 1);
     if let Some(context) = context.filter(|context| !context.system_message.is_empty()) {
@@ -185,9 +183,8 @@ pub fn with_context(context: Option<&InjectedContext>, history: &[Message]) -> V
     messages
 }
 
-/// `--show-context`: the system message verbatim, then per-item token counts.
-/// Text mode goes to stderr so piped answers stay clean; in `--json` mode it
-/// is one more event on the stream.
+/// `--show-context`. Text mode goes to stderr so piped answers stay clean; in
+/// `--json` mode it is one more event on the stream.
 pub fn print_context(
     context: Option<&InjectedContext>,
     brain_config: &BrainConfig,

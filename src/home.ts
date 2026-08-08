@@ -1,6 +1,7 @@
 import { prefillComposer } from "./chat";
 import { accept, ghost } from "./complete";
 import { el } from "./dom";
+import { mentionAsk } from "./mentions";
 import { setView, state, type View } from "./state";
 
 type Command = {
@@ -22,7 +23,6 @@ const input = el("input", "home-input");
 input.placeholder = "type a command, or just start talking…";
 input.setAttribute("aria-label", "command");
 
-// The field completes itself while a `/` command is being typed.
 const hint = ghost(input, "home-field");
 
 // Which suggestion the arrows are on; reset when the text changes.
@@ -36,8 +36,8 @@ input.addEventListener("input", () => {
 
 input.addEventListener("keydown", (event) => {
   const shown = matches();
-  // ⇥ takes the completion, → takes it only from the end of the line. Neither
-  // is swallowed when there is nothing to complete: ⇥ still moves focus on.
+  // → takes the completion only from the end of the line. Neither key is
+  // swallowed with nothing to complete: ⇥ still moves focus on.
   const end = input.selectionStart === input.value.length;
   if (event.key === "Tab" || (event.key === "ArrowRight" && end)) {
     if (!accept(input, shown[active]?.cmd)) return;
@@ -67,20 +67,14 @@ input.addEventListener("keydown", (event) => {
     run(chosen);
     return;
   }
-  // Not a command: it was the first message all along. `/brain <question>`
-  // counts — that is a chat message with recall on, not a navigation.
-  if (text !== "" && (!text.startsWith("/") || brainAsk(text))) {
+  // Not a command: the memory mentions with text after them are messages.
+  if (text !== "" && (!text.startsWith("/") || mentionAsk(text))) {
     prefillComposer(text);
     input.value = "";
     refill();
     setView("chat");
   }
 });
-
-// The bare `/brain` opens the brain view above; with anything after it, the
-// mention belongs to the chat composer.
-const brainAsk = (text: string): boolean =>
-  /(^|\s)\/brain([\s.,;:!?]|$)/i.test(text);
 
 export function renderHome(): HTMLElement {
   const view = el("div", "home");
@@ -98,7 +92,6 @@ export function renderHome(): HTMLElement {
   return view;
 }
 
-// An empty or "/"-leading draft offers commands; more letters narrow them.
 function matches(): Command[] {
   const text = input.value.trim().toLowerCase();
   if (!text.startsWith("/")) return text === "" ? COMMANDS : [];
@@ -109,8 +102,7 @@ function refill(): void {
   if (list === null) return;
   const shown = matches();
   if (active >= shown.length) active = 0;
-  // The highlighted row is what the field completes to, so the arrows move the
-  // ghost as well as the highlight.
+  // The highlighted row is what the field completes to, ghost included.
   const completing = hint.draw(shown[active]?.cmd);
   list.replaceChildren(
     ...shown.map((command, index) => {

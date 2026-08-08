@@ -1,14 +1,13 @@
 import { el } from "./dom";
 
-// The whole markdown Odyn renders: paragraphs, fenced code blocks, inline code
-// spans. Nothing is ever set as HTML, so a model cannot write into the DOM.
+// The whole markdown Odyn renders. Nothing is ever set as HTML, so a model
+// cannot write into the DOM.
 
 const FENCE = "```";
 
 export function renderMarkdown(text: string): HTMLElement[] {
   const blocks: HTMLElement[] = [];
-  // Odd sections sit between fences; a fence left open while streaming is a
-  // code block that has not ended yet.
+  // Odd sections sit between fences; one left open is a block still streaming.
   text.split(FENCE).forEach((section, index) => {
     if (index % 2 === 1) {
       blocks.push(fenced(section));

@@ -5,6 +5,9 @@ import { renderGraph } from "./graph";
 import {
   cancelMemoryEdit,
   chooseEmbedModel,
+  chooseMinRelevance,
+  chooseSaveTemperature,
+  chooseTopK,
   commitMemoryEdit,
   loadMoreMemories,
   removeMemory,
@@ -19,9 +22,12 @@ import {
 const NEAR = 160;
 const INJECTED_TAG_S = 5 * 60;
 const SORTS = ["recent", "hits", "created"] as const;
+// Matches the bound brain_set_top_k enforces before anything is written.
+const TOP_K_MIN = 5;
+const TOP_K_MAX = 100;
 
 // Persistent inputs: a search being typed and an edit in progress survive the
-// redraws that background refreshes cause.
+// redraws background refreshes cause.
 const search = el("input", "brain-search");
 search.placeholder = "search memories…";
 search.addEventListener("input", () => scheduleBrainSearch(search.value));
@@ -32,6 +38,63 @@ editor.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void commitMemoryEdit(editor.value);
   if (event.key === "Escape") cancelMemoryEdit();
 });
+
+// One editable number on the stats line. Committed on leaving the field, so a
+// half-typed value never reaches the config; out of range snaps back in.
+function numberField(
+  label: string,
+  bounds: { min: number; max: number; step: number },
+  round: (value: number) => number,
+  read: () => number | undefined,
+  write: (value: number) => Promise<void>,
+): HTMLInputElement {
+  const field = el("input", "brain-num");
+  field.type = "number";
+  field.min = String(bounds.min);
+  field.max = String(bounds.max);
+  field.step = String(bounds.step);
+  field.setAttribute("aria-label", label);
+  field.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") field.blur();
+    if (event.key === "Escape") {
+      field.value = String(read() ?? "");
+      field.blur();
+    }
+  });
+  field.addEventListener("blur", () => {
+    const current = read();
+    if (current === undefined) return;
+    const typed = Number(field.value);
+    const value = Number.isFinite(typed)
+      ? round(Math.min(bounds.max, Math.max(bounds.min, typed)))
+      : current;
+    field.value = String(value);
+    void write(value);
+  });
+  return field;
+}
+
+const topK = numberField(
+  "top-k",
+  { min: TOP_K_MIN, max: TOP_K_MAX, step: 1 },
+  Math.round,
+  () => state.brain.overview?.top_k,
+  chooseTopK,
+);
+
+const minRelevance = numberField(
+  "min-relevance",
+  { min: 0, max: 1, step: 0.05 },
+  (value) => Math.round(value * 100) / 100,
+  () => state.brain.overview?.min_relevance,
+  chooseMinRelevance,
+);
+
+// A redraw mid-entry must not overwrite what is being typed.
+function sync(field: HTMLInputElement, value: number): HTMLInputElement {
+  if (document.activeElement !== field) field.value = String(value);
+  return field;
+}
 
 export function renderBrain(): HTMLElement {
   const root = el("div", "brain");
@@ -49,24 +112,61 @@ export function renderBrain(): HTMLElement {
   return root;
 }
 
-// The model picker outlives redraws, like every other persistent control.
 const models = dropdown({
   label: "model",
   empty: "…",
   onPick: (value) => void chooseEmbedModel(value),
 });
 
+// /memory save turns sample at this temperature: lower = more literal.
+const TEMPS: [number, string][] = [
+  [0, "deterministic"],
+  [0.1, "near-literal"],
+  [0.2, ""],
+  [0.3, "default"],
+  [0.5, ""],
+  [0.7, ""],
+  [1, "loose"],
+];
+const temps = dropdown({
+  label: "save temp",
+  empty: "…",
+  onPick: (value) => void chooseSaveTemperature(Number(value)),
+});
+
+function tempPicker(): HTMLElement {
+  const wrap = el("span", "brain-model");
+  const current = state.brain.overview?.save_temperature;
+  const items = TEMPS.map(([value, hint]) => ({
+    value: String(value),
+    label: `save ${value}`,
+    hint,
+  }));
+  // A value tuned by hand in odyn.toml still shows as the selection.
+  if (current !== undefined && !TEMPS.some(([value]) => value === current)) {
+    items.push({ value: String(current), label: `save ${current}`, hint: "" });
+  }
+  temps.set(items, current === undefined ? "" : String(current));
+  temps.setDisabled(state.brain.overview === null);
+  wrap.append(temps.root);
+  return wrap;
+}
+
 function header(): HTMLElement {
   const row = el("div", "brain-header");
   const overview = state.brain.overview;
-  const stats =
-    overview === null
-      ? ""
-      : `${overview.count} memories · top-k ${overview.top_k} · ` +
-        `cap ${overview.cap_tokens} tk`;
-  const left = el("div", "brain-stats", stats);
-  if (overview !== null) left.title = overview.path;
-  left.append(" ", modelPicker());
+  const left = el("div", "brain-stats");
+  if (overview !== null) {
+    left.title = overview.path;
+    left.append(
+      "top-k ",
+      sync(topK, overview.top_k),
+      " · min-relevance ",
+      sync(minRelevance, overview.min_relevance),
+      ` · cap ${overview.cap_tokens} tk`,
+    );
+  }
+  left.append(" ", modelPicker(), " ", tempPicker());
   row.append(left);
   const toggle = el("div", "brain-toggle");
   for (const mode of ["list", "graph"] as const) {
@@ -80,9 +180,8 @@ function header(): HTMLElement {
   return row;
 }
 
-// Which model embeds this brain. Changing it re-embeds every note, so the
-// control says so while that runs, and a remote model is marked as one —
-// it is the only kind that sends note text off the machine.
+// Changing the model re-embeds every note, so the control says so while that
+// runs. A remote model is marked: only that kind sends note text off-machine.
 function modelPicker(): HTMLElement {
   const wrap = el("span", "brain-model");
   const overview = state.brain.overview;
@@ -114,8 +213,6 @@ function modelPicker(): HTMLElement {
   return wrap;
 }
 
-// One flat pool: every memory is a markdown note in the brain folder,
-// recalled only when a message mentions /brain.
 function listColumn(): HTMLElement {
   const column = el("div", "brain-col brain-list");
   const overview = state.brain.overview;
@@ -175,8 +272,7 @@ function memRow(row: MemoryRow): HTMLElement {
   return line;
 }
 
-// The row becomes an input in place; `null` is the add-new row. The inline
-// editor is for quick one-line notes — the folder is where long ones live.
+// The row becomes an input in place; `null` is the add-new one.
 function editRow(row: MemoryRow | null): HTMLElement {
   const line = el("div", "mem-row editing");
   if (row !== null) line.append(el("span", "mem-id epi", row.slug));
@@ -189,7 +285,7 @@ function editRow(row: MemoryRow | null): HTMLElement {
   return line;
 }
 
-// A multi-line note flattens to one row line; the graph tip shows it whole.
+// A multi-line note flattens to one row; the graph tip shows it whole.
 const flat = (content: string): string => content.split("\n").join(" ⏎ ");
 
 const date = (seconds: number): string =>

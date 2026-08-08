@@ -7,9 +7,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { accept, ghost } from "./complete";
-import { el, waiting } from "./dom";
+import { el, forgetTraces, trace, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
 import { renderMarkdown } from "./markdown";
+import { mentionAsk } from "./mentions";
 
 type SpotEvent =
   | {
@@ -19,6 +20,11 @@ type SpotEvent =
       tokens: number;
     }
   | { request_id: number; kind: "delta"; text: string }
+  | { request_id: number; kind: "saved"; slug: string }
+  | { request_id: number; kind: "updated"; slug: string }
+  | { request_id: number; kind: "deleted"; slug: string }
+  | { request_id: number; kind: "linked"; from: string; to: string }
+  | { request_id: number; kind: "unlinked"; from: string; to: string }
   | { request_id: number; kind: "done" }
   // `detail` present means `message` stands in for the provider's own words.
   | { request_id: number; kind: "error"; message: string; detail?: string };
@@ -36,11 +42,9 @@ const ledger = document.getElementById("spot-ledger") as HTMLDivElement;
 const results = document.getElementById("spot-results") as HTMLDivElement;
 const picks = document.getElementById("spot-picks") as HTMLSpanElement;
 
-// The field completes itself while a `/` command is being typed.
 const hint = ghost(input, "spot-ask");
 
-// Menus drop below the footer, into the window's empty lower half — above
-// the footer sits the whole surface, and the window's top edge would clip.
+// Menus drop into the window's empty lower half; higher up, the top edge clips.
 const providerDrop = dropdown({
   label: "provider",
   onPick: (value) => void pick(value, ""),
@@ -52,9 +56,7 @@ const modelDrop = dropdown({
 });
 picks.append(providerDrop.root, modelDrop.root);
 
-/// `view: null` is the `/brain` mention: not somewhere to go, a prefix to
-/// finish typing. Taking it leaves the text in the field — the question is what
-/// comes next.
+/// `view: null` is a mention, not a destination: the text stays in the field.
 type Command = { cmd: string; view: string | null; hint: string };
 
 const COMMANDS: Command[] = [
@@ -62,14 +64,26 @@ const COMMANDS: Command[] = [
   { cmd: "/chat", view: "chat", hint: "the conversation" },
   { cmd: "/convos", view: "conversations", hint: "every conversation, searchable" },
   { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
+  { cmd: "/config", view: "config", hint: "the file behind it all" },
   { cmd: "/guide", view: "guide", hint: "how everything works" },
+  { cmd: "/view-brain", view: "brain", hint: "what odyn remembers" },
   { cmd: "/brain", view: null, hint: "ask with what odyn remembers" },
+  { cmd: "/memory", view: null, hint: "tell odyn something to remember" },
+  { cmd: "/update-memory", view: null, hint: "tell odyn something changed" },
+  { cmd: "/delete-memory", view: null, hint: "tell odyn to forget something" },
+  { cmd: "/link-memory", view: null, hint: "connect two memories" },
+  { cmd: "/unlink-memory", view: null, hint: "disconnect two memories" },
 ];
 
 let current: number | null = null;
 let answer = "";
 let streaming = false;
 let used: string[] = [];
+let saved: string[] = [];
+let updated: string[] = [];
+let deleted: string[] = [];
+let linked: string[] = [];
+let unlinked: string[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
 let keyMode = false;
@@ -106,8 +120,7 @@ function drawTarget(): void {
   modelDrop.set(items, target.model !== "" ? target.model : (models[0] ?? ""));
   modelDrop.setDisabled(items.length === 0);
 
-  // asklight's one-time setup: the field itself takes the key, masked so it
-  // can't be shoulder-surfed or screen-shared.
+  // The field itself takes the key, masked against shoulders and screen shares.
   keyMode = target.needs_key;
   input.type = keyMode ? "password" : "text";
   input.placeholder = keyMode ? `paste the ${target.provider} api key…` : "ask odyn…";
@@ -129,14 +142,12 @@ function keyCard(): void {
   results.replaceChildren(card);
 }
 
-// DESIGN.md §7: a minimal one-line ledger between the field and the answer.
-// It only ever fills on a /brain ask — everything else injects nothing.
+// DESIGN.md §7: one line between field and answer, filled only on a /brain ask.
 function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.replaceChildren();
   if (event.tokens === 0) return;
-  for (const id of event.used) {
-    ledger.append(el("span", "chip-epi", `◈ ${id}`));
-  }
+  // Which notes came back is named by the `◈ used` trace under the answer.
+  ledger.append(el("span", "ledger-reading", "◈ reading the brain"));
   ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
   ledger.hidden = commandMode;
 }
@@ -156,19 +167,30 @@ function draw(): void {
   }
   results.replaceChildren(...body);
   if (!streaming && used.length > 0) {
-    const trace = el("div", "trace");
-    trace.append(el("span", "trace-mark", "◈"), " used");
-    for (const id of used) trace.append(" ", el("span", "trace-id", id));
-    results.append(trace);
+    results.append(trace("◈", "used", used, "used"));
+  }
+  if (!streaming && saved.length > 0) {
+    results.append(trace("✎", "saved", saved, "saved"));
+  }
+  if (!streaming && updated.length > 0) {
+    results.append(trace("✎", "updated", updated, "updated"));
+  }
+  if (!streaming && deleted.length > 0) {
+    results.append(trace("✕", "deleted", deleted, "deleted"));
+  }
+  if (!streaming && linked.length > 0) {
+    results.append(trace("⌇", "linked", linked, "linked"));
+  }
+  if (!streaming && unlinked.length > 0) {
+    results.append(trace("⌇", "unlinked", unlinked, "unlinked"));
   }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
 
 function fail(message: string, detail?: string): void {
   streaming = false;
-  // Nothing is being waited on any more, whatever else is on screen stays.
   results.querySelector(".waiting")?.remove();
-  // Whatever streamed before the failure is kept, minus the streaming cursor.
+  // Whatever streamed before the failure is kept, minus the cursor.
   if (answer !== "") draw();
   results.hidden = false;
   results.append(el("div", "spot-error", message));
@@ -183,6 +205,12 @@ function clearScreen(): void {
   answer = "";
   streaming = false;
   used = [];
+  saved = [];
+  updated = [];
+  deleted = [];
+  linked = [];
+  unlinked = [];
+  forgetTraces();
   commandMode = false;
   cursor = 0;
   input.value = "";
@@ -204,8 +232,7 @@ function drawCommands(): void {
   if (cursor >= shown.length) cursor = 0;
   ledger.hidden = true;
   results.hidden = false;
-  // The highlighted row is what the field completes to, so the arrows move the
-  // ghost as well as the highlight.
+  // The highlighted row is what the field completes to, ghost included.
   const completing = hint.draw(shown[cursor]?.cmd);
   if (shown.length === 0) {
     results.replaceChildren(el("div", "spot-cmd-none", "no such command"));
@@ -235,8 +262,7 @@ function drawCommands(): void {
 function drawAsk(): void {
   ledger.hidden = ledger.childElementCount === 0;
   hint.draw(undefined);
-  // An ask typed over mid-flight comes back to whatever it left: the answer so
-  // far, or the wait line if the first token is still out.
+  // An ask typed over mid-flight comes back to the answer so far.
   if (answer !== "" || streaming) {
     draw();
     return;
@@ -246,8 +272,7 @@ function drawAsk(): void {
 }
 
 async function run(command: Command): Promise<void> {
-  // The mention is finished in place, not run: `/brain` alone goes nowhere,
-  // and the field is now an ask with recall on.
+  // A mention is finished in place, not run: the field is now an ask.
   if (command.view === null) {
     take(command);
     return;
@@ -261,12 +286,11 @@ async function run(command: Command): Promise<void> {
   clearScreen();
 }
 
-// ⇥ on any row, ⏎ or a click on a mention: the completion lands in the field.
 // A field that has become a `/brain` ask leaves the command list behind.
 function take(command: Command | undefined): boolean {
   if (!accept(input, command?.cmd)) return false;
   input.focus();
-  if (brainAsk(input.value)) {
+  if (mentionAsk(input.value)) {
     commandMode = false;
     drawAsk();
   } else {
@@ -285,6 +309,12 @@ async function ask(): Promise<void> {
   answer = "";
   streaming = true;
   used = [];
+  saved = [];
+  updated = [];
+  deleted = [];
+  linked = [];
+  unlinked = [];
+  forgetTraces();
   ledger.hidden = true;
   ledger.replaceChildren();
   draw();
@@ -318,8 +348,7 @@ async function promote(): Promise<void> {
   }
 }
 
-// The pick is written to `[spotlight]` in odyn.toml, so it survives restarts
-// and stays in force for the CLI too.
+// Written to `[spotlight]` in odyn.toml: it survives restarts, and the CLI too.
 async function pick(provider: string, model: string): Promise<void> {
   if (model === "") {
     const models = target?.providers.find((p) => p.name === provider)?.models ?? [];
@@ -351,13 +380,8 @@ function cycleModel(): void {
   if (next !== undefined) void pick(target.provider, next);
 }
 
-// A `/brain` mention is a question with recall on, never a command — the
-// same rule as chat and the CLI.
-const brainAsk = (text: string): boolean =>
-  /(^|\s)\/brain([\s.,;:!?]|$)/i.test(text);
-
 input.addEventListener("input", () => {
-  if (!keyMode && input.value.startsWith("/") && !brainAsk(input.value)) {
+  if (!keyMode && input.value.startsWith("/") && !mentionAsk(input.value)) {
     cursor = 0;
     commandMode = true;
     drawCommands();
@@ -399,8 +423,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (commandMode) {
     const shown = commands();
-    // ⇥ takes the completion, → takes it only from the end of the line, where
-    // there is no caret left to move.
+    // → takes the completion only from the end of the line.
     const end = input.selectionStart === input.value.length;
     if (e.key === "Tab" || (e.key === "ArrowRight" && end)) {
       if (take(shown[cursor])) e.preventDefault();
@@ -435,6 +458,16 @@ void listen<SpotEvent>("spotlight-event", (event) => {
   } else if (data.kind === "delta") {
     answer += data.text;
     draw();
+  } else if (data.kind === "saved") {
+    saved.push(data.slug);
+  } else if (data.kind === "updated") {
+    updated.push(data.slug);
+  } else if (data.kind === "deleted") {
+    deleted.push(data.slug);
+  } else if (data.kind === "linked") {
+    linked.push(`${data.from} → ${data.to}`);
+  } else if (data.kind === "unlinked") {
+    unlinked.push(`${data.from} ⇢ ${data.to}`);
   } else if (data.kind === "done") {
     streaming = false;
     draw();

@@ -1,7 +1,5 @@
-//! `odyn chat`: a REPL over the same streaming path as `odyn ask`.
-//!
-//! Nothing inside the loop is fatal — a provider or database failure is
-//! reported and the prompt comes back.
+//! `odyn chat`: a REPL over the same streaming path as `odyn ask`. Nothing
+//! inside the loop is fatal — a failure is reported and the prompt comes back.
 
 use std::io::Write;
 
@@ -11,8 +9,10 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use tokio::runtime::Runtime;
 
+use odyn_core::tools::TurnEvent;
+
 use crate::session::{
-    memory_context, print_context, save_turn, stream_reply, title_from, warn, with_context,
+    memory_context, print_context, save_turn, stream_reply, title_from, trace, warn, with_context,
     write_failure, Failure, Reply, Session,
 };
 
@@ -49,10 +49,10 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
         }
         let _ = editor.add_history_entry(line);
 
-        // `/brain` looks like a command but is a chat message with recall on,
-        // so it must never fall into the command parser.
+        // The memory mentions look like commands but are chat messages, so
+        // they must never fall into the command parser.
         let ask = odyn_core::brain::parse_ask(line);
-        if let Some(command) = line.strip_prefix('/').filter(|_| !ask.recall) {
+        if let Some(command) = line.strip_prefix('/').filter(|_| !ask.any()) {
             let (name, arg) = match command.split_once(char::is_whitespace) {
                 Some((name, arg)) => (name, arg.trim()),
                 None => (command, ""),
@@ -60,8 +60,7 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
             match name {
                 "quit" => break,
                 "new" => {
-                    // Anything still unwritten belongs to the conversation
-                    // being left, not to the one starting here.
+                    // Unwritten turns belong to the conversation being left.
                     if let Err(err) = record(
                         &storage,
                         &mut conversation,
@@ -107,7 +106,8 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
                 },
                 _ => warn(&format!(
                     "unknown command: /{name}; try /model, /brevity, /new, /quit — \
-                     or mention /brain in a message to recall memory"
+                     or mention /brain to recall memory, /memory to save one, \
+                     /update-memory to rewrite one, /delete-memory to forget one"
                 )),
             }
             continue;
@@ -123,10 +123,23 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
         let reply = runtime.block_on(stream_reply(
             session.handle.as_ref(),
             &session.model,
-            &outgoing,
-            |delta| {
-                streamed = true;
-                write!(out, "{delta}")?;
+            outgoing,
+            &session.config,
+            &ask,
+            |event| {
+                match event {
+                    TurnEvent::Delta(delta) => {
+                        streamed = true;
+                        write!(out, "{delta}")?;
+                    }
+                    TurnEvent::Saved(slug) => trace(&format!("saved {slug}")),
+                    TurnEvent::Updated(slug) => trace(&format!("updated {slug}")),
+                    TurnEvent::Deleted(slug) => trace(&format!("deleted {slug}")),
+                    TurnEvent::Linked { from, to } => trace(&format!("linked {from} to {to}")),
+                    TurnEvent::Unlinked { from, to } => {
+                        trace(&format!("unlinked {from} from {to}"))
+                    }
+                }
                 out.flush()
             },
         ));
@@ -141,7 +154,6 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
                 continue;
             }
         };
-        // Ends the answer's line, then a blank line before the next prompt.
         writeln!(out, "\n").map_err(write_failure)?;
 
         history.push(Message::new(Role::Assistant, reply.text.as_str()));
@@ -162,9 +174,8 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
     Ok(())
 }
 
-/// The conversation exists from the first real message on, and is named after
-/// the oldest turn still waiting to be written: a save that failed once must
-/// not leave its turns behind and start a second conversation without them.
+/// Named after the oldest turn still waiting to be written: a save that failed
+/// once must not leave its turns behind in a second conversation.
 fn record(
     storage: &Storage,
     conversation: &mut Option<i64>,
@@ -207,8 +218,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// A unique directory under the system temp dir, removed on drop — the
-    /// `-wal` and `-shm` sidecars go with it.
+    /// A unique temp directory, removed on drop — `-wal` and `-shm` go with it.
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -240,8 +250,7 @@ mod tests {
         )
     }
 
-    /// SQLite opens a file it cannot write as a read-only connection, which is
-    /// this test's stand-in for a database that is briefly unavailable.
+    /// SQLite opens an unwritable file read-only: a briefly unavailable database.
     fn set_writable(path: &Path, writable: bool) {
         let mut permissions = std::fs::metadata(path)
             .expect("stat the database")
@@ -250,9 +259,7 @@ mod tests {
         std::fs::set_permissions(path, permissions).expect("set the database's permissions");
     }
 
-    /// The failure the fix is about: a turn that could not be written must not
-    /// be dropped, and the turn after it must not become a conversation of its
-    /// own named after the later prompt.
+    /// The turn after a failed save must not become a conversation of its own.
     #[test]
     fn turns_that_could_not_be_saved_are_written_by_the_next_save() {
         let dir = TempDir::new("pending");
