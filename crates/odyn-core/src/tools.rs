@@ -2,9 +2,10 @@
 //!
 //! Tools are offered only when the message asked for them: `/memory` earns
 //! `save_memory`, `/update-memory` earns `update_memory`, `/delete-memory`
-//! earns `delete_memory`. One tool per trigger — small models misroute a
-//! choice between tools, so the user makes it. The index is not touched here
-//! — the folder is the truth, and the next recall or preview syncs it.
+//! earns `delete_memory`, `/link-memory` earns `link_memory`. One tool per
+//! trigger — small models misroute a choice between tools, so the user makes
+//! it. The index is not touched here — the folder is the truth, and the next
+//! recall or preview syncs it.
 
 use std::path::Path;
 
@@ -18,6 +19,7 @@ use crate::notes::{self, NotesError};
 pub const SAVE_MEMORY: &str = "save_memory";
 pub const UPDATE_MEMORY: &str = "update_memory";
 pub const DELETE_MEMORY: &str = "delete_memory";
+pub const LINK_MEMORY: &str = "link_memory";
 
 /// A model that keeps asking for tools is looping, not working.
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -36,6 +38,7 @@ pub enum TurnEvent<'a> {
     Saved(&'a str),
     Updated(&'a str),
     Deleted(&'a str),
+    Linked { from: &'a str, to: &'a str },
 }
 
 pub struct TurnReply {
@@ -47,6 +50,8 @@ pub struct TurnReply {
     pub updated: Vec<String>,
     /// Slugs of the notes trashed this turn, in call order.
     pub deleted: Vec<String>,
+    /// `(from, to)` pairs connected this turn, in call order.
+    pub linked: Vec<(String, String)>,
 }
 
 pub fn save_memory_tool() -> ToolDef {
@@ -78,7 +83,7 @@ pub fn save_memory_tool() -> ToolDef {
 
 /// The tools a turn's mentions earn. Update leads when several are offered: a
 /// misrouted update errors and self-corrects, a misrouted save duplicates.
-pub fn offered(memorize: bool, update: bool, delete: bool) -> Vec<ToolDef> {
+pub fn offered(memorize: bool, update: bool, delete: bool, link: bool) -> Vec<ToolDef> {
     let mut tools = Vec::new();
     if update {
         tools.push(update_memory_tool());
@@ -89,7 +94,33 @@ pub fn offered(memorize: bool, update: bool, delete: bool) -> Vec<ToolDef> {
     if delete {
         tools.push(delete_memory_tool());
     }
+    if link {
+        tools.push(link_memory_tool());
+    }
     tools
+}
+
+pub fn link_memory_tool() -> ToolDef {
+    ToolDef {
+        name: LINK_MEMORY.to_string(),
+        description: "Connect two existing memories so the brain relates them.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "from": {
+                    "type": "string",
+                    "description": "The memory the link is written into — its \
+                                    exact slug from the ### heading above."
+                },
+                "to": {
+                    "type": "string",
+                    "description": "The memory it points at — its exact slug \
+                                    from the ### heading above."
+                }
+            },
+            "required": ["from", "to"]
+        }),
+    }
 }
 
 pub fn delete_memory_tool() -> ToolDef {
@@ -154,6 +185,7 @@ pub async fn run_turn(
     let mut saved = Vec::new();
     let mut updated = Vec::new();
     let mut deleted = Vec::new();
+    let mut linked = Vec::new();
     for _ in 0..=MAX_TOOL_ROUNDS {
         let mut round_text = String::new();
         let mut calls = Vec::new();
@@ -203,6 +235,15 @@ pub async fn run_turn(
                     deleted.push(slug);
                     clean.push(result.clone());
                 }
+                Some(Written::Linked(from, to)) => {
+                    emit(TurnEvent::Linked {
+                        from: &from,
+                        to: &to,
+                    })
+                    .map_err(TurnError::Write)?;
+                    linked.push((from, to));
+                    clean.push(result.clone());
+                }
                 None => failed = true,
             }
             messages.push(Message::tool_result(call, result));
@@ -229,6 +270,7 @@ pub async fn run_turn(
         saved,
         updated,
         deleted,
+        linked,
     })
 }
 
@@ -237,6 +279,7 @@ enum Written {
     Saved(String),
     Updated(String),
     Deleted(String),
+    Linked(String, String),
 }
 
 /// Answers the call with a result the model can read; a bad call gets its error
@@ -246,6 +289,7 @@ fn run_tool(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
         SAVE_MEMORY => save(brain_dir, call),
         UPDATE_MEMORY => update(brain_dir, call),
         DELETE_MEMORY => delete(brain_dir, call),
+        LINK_MEMORY => link(brain_dir, call),
         other => (format!("error: no tool named `{other}`"), None),
     }
 }
@@ -297,6 +341,28 @@ fn delete(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
         Ok(()) => (
             format!("deleted {slug}"),
             Some(Written::Deleted(slug.to_string())),
+        ),
+        Err(err) => (format!("error: {err}"), None),
+    }
+}
+
+/// An already-linked pair is a success, not an error: the turn ends on a
+/// confirmation rather than sending the model back to try again.
+fn link(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
+    let (Some(from), Some(to)) = (text_arg(call, "from"), text_arg(call, "to")) else {
+        return (
+            "error: link_memory needs non-empty strings `from` and `to`".to_string(),
+            None,
+        );
+    };
+    match notes::link_note(brain_dir, from, to) {
+        Ok(added) => (
+            if added {
+                format!("linked {from} to {to}")
+            } else {
+                format!("{from} already links to {to}")
+            },
+            Some(Written::Linked(from.to_string(), to.to_string())),
         ),
         Err(err) => (format!("error: {err}"), None),
     }
@@ -410,7 +476,18 @@ mod tests {
     fn slug_of(written: Option<Written>) -> Option<String> {
         written.map(|written| match written {
             Written::Saved(slug) | Written::Updated(slug) | Written::Deleted(slug) => slug,
+            Written::Linked(from, to) => format!("{from}->{to}"),
         })
+    }
+
+    fn label(event: TurnEvent<'_>) -> String {
+        match event {
+            TurnEvent::Delta(delta) => format!("delta:{delta}"),
+            TurnEvent::Saved(slug) => format!("saved:{slug}"),
+            TurnEvent::Updated(slug) => format!("updated:{slug}"),
+            TurnEvent::Deleted(slug) => format!("deleted:{slug}"),
+            TurnEvent::Linked { from, to } => format!("linked:{from}->{to}"),
+        }
     }
 
     /// A clean write ends the turn on Odyn's own confirmation: one request,
@@ -433,12 +510,7 @@ mod tests {
             &dir.0,
             0.3,
             |event| {
-                seen.push(match event {
-                    TurnEvent::Delta(delta) => format!("delta:{delta}"),
-                    TurnEvent::Saved(slug) => format!("saved:{slug}"),
-                    TurnEvent::Updated(slug) => format!("updated:{slug}"),
-                    TurnEvent::Deleted(slug) => format!("deleted:{slug}"),
-                });
+                seen.push(label(event));
                 Ok(())
             },
         ))
@@ -461,7 +533,11 @@ mod tests {
         );
 
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 1, "a clean write asks the model nothing more");
+        assert_eq!(
+            requests.len(),
+            1,
+            "a clean write asks the model nothing more"
+        );
         assert_eq!(requests[0].1, 1, "tools offered on the first request");
         assert_eq!(requests[0].2, Some(0.3));
     }
@@ -581,12 +657,7 @@ mod tests {
             &dir.0,
             0.3,
             |event| {
-                seen.push(match event {
-                    TurnEvent::Delta(delta) => format!("delta:{delta}"),
-                    TurnEvent::Saved(slug) => format!("saved:{slug}"),
-                    TurnEvent::Updated(slug) => format!("updated:{slug}"),
-                    TurnEvent::Deleted(slug) => format!("deleted:{slug}"),
-                });
+                seen.push(label(event));
                 Ok(())
             },
         ))
@@ -608,7 +679,11 @@ mod tests {
             "Car keys are above the fridge.\n"
         );
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 1, "a clean write asks the model nothing more");
+        assert_eq!(
+            requests.len(),
+            1,
+            "a clean write asks the model nothing more"
+        );
     }
 
     #[test]
@@ -630,6 +705,68 @@ mod tests {
         let (result, written) = run_tool(
             &dir.0,
             &named_call(DELETE_MEMORY, serde_json::json!({"slug": "ghost"})),
+        );
+        assert!(slug_of(written).is_none());
+        assert!(result.starts_with("error:"), "{result}");
+    }
+
+    /// A second call for a pair that is already connected still confirms: the
+    /// folder is where it ends up that matters, not who wrote the link.
+    #[test]
+    fn a_link_call_connects_the_pair_and_repeats_are_not_errors() {
+        let dir = TempDir::new("link");
+        notes::write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("seed");
+        notes::write_note(&dir.0, Some("mitul"), "The user.").expect("seed");
+        let asked = named_call(
+            LINK_MEMORY,
+            serde_json::json!({"from": "football", "to": "mitul"}),
+        );
+        let provider = Scripted::new(vec![vec![Ok(ChatEvent::ToolCall(asked)), done()]]);
+        let mut seen = Vec::new();
+        let reply = block_on(run_turn(
+            &provider,
+            "llama3.2:3b",
+            vec![Message::new(Role::User, "connect those two")],
+            &[link_memory_tool()],
+            &dir.0,
+            0.3,
+            |event| {
+                seen.push(label(event));
+                Ok(())
+            },
+        ))
+        .expect("turn");
+
+        assert_eq!(
+            reply.linked,
+            vec![("football".to_string(), "mitul".to_string())]
+        );
+        assert_eq!(reply.text, "linked football to mitul");
+        assert_eq!(
+            seen,
+            vec!["linked:football->mitul", "delta:linked football to mitul"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("football.md")).expect("note"),
+            "He plays on Sundays.\n\nSee also [[mitul]].\n"
+        );
+
+        let (result, written) = run_tool(
+            &dir.0,
+            &named_call(
+                LINK_MEMORY,
+                serde_json::json!({"from": "football", "to": "mitul"}),
+            ),
+        );
+        assert_eq!(slug_of(written).as_deref(), Some("football->mitul"));
+        assert_eq!(result, "football already links to mitul");
+
+        let (result, written) = run_tool(
+            &dir.0,
+            &named_call(
+                LINK_MEMORY,
+                serde_json::json!({"from": "ghost", "to": "mitul"}),
+            ),
         );
         assert!(slug_of(written).is_none());
         assert!(result.starts_with("error:"), "{result}");

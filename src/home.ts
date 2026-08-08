@@ -1,6 +1,7 @@
 import { prefillComposer } from "./chat";
 import { accept, ghost } from "./complete";
 import { el } from "./dom";
+import { mentionAsk } from "./mentions";
 import { setView, state, type View } from "./state";
 
 type Command = {
@@ -74,10 +75,6 @@ input.addEventListener("keydown", (event) => {
     setView("chat");
   }
 });
-
-// A bare `/brain` opens the brain view; with text after it, it is a message.
-const mentionAsk = (text: string): boolean =>
-  /(^|\s)\/(brain|memory|update-memory|delete-memory)([\s.,;:!?]|$)/i.test(text);
 
 export function renderHome(): HTMLElement {
   const view = el("div", "home");

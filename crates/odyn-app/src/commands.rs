@@ -121,6 +121,10 @@ pub(crate) enum Body {
     Deleted {
         slug: String,
     },
+    Linked {
+        from: String,
+        to: String,
+    },
     Done {
         usage: Option<Usage>,
         interrupted: bool,
@@ -541,7 +545,7 @@ async fn run(
     }
     history.extend(prior);
     history.push(Message::new(Role::User, ask.message));
-    let tools = tools::offered(ask.memorize, ask.update, ask.delete);
+    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link);
 
     let outcome = drive(
         &app,
@@ -654,7 +658,7 @@ pub(crate) async fn build_context(
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
-        if !ask.recall && !ask.memorize && !ask.update && !ask.delete {
+        if !ask.any() {
             return Some(brain::empty_context(brevity));
         }
         // The folder is the truth: recall reads the files as they are now.
@@ -724,7 +728,7 @@ pub async fn context_preview(
         let brevity = chosen.unwrap_or(ready.config.style.brevity);
         let cap_tokens = ready.config.brain.cap_tokens;
         // A draft without triggers previews what it would send: nothing.
-        if !ask.recall && !ask.memorize && !ask.update && !ask.delete {
+        if !ask.any() {
             return Ok(preview(brain::empty_context(brevity), cap_tokens, false));
         }
         sync_index(&ready)?;
@@ -813,6 +817,14 @@ async fn drive(
                     request_id,
                     Body::Deleted {
                         slug: slug.to_string(),
+                    },
+                ),
+                TurnEvent::Linked { from, to } => emit(
+                    app,
+                    request_id,
+                    Body::Linked {
+                        from: from.to_string(),
+                        to: to.to_string(),
                     },
                 ),
             }

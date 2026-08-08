@@ -3,6 +3,7 @@ import { renderBrevity } from "./brevctl";
 import { accept, ghost } from "./complete";
 import { el, forgetTraces, trace, waiting } from "./dom";
 import { renderMarkdown } from "./markdown";
+import { MENTIONS } from "./mentions";
 import { renderPickers } from "./picker";
 import {
   cancelStream,
@@ -21,7 +22,6 @@ const MOD = navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl";
 // How far from the end still counts as reading the end of the stream.
 const SLACK = 24;
 // Mentions can sit anywhere in a line, so the word under the caret is matched.
-const MENTIONS = ["/brain", "/memory", "/update-memory", "/delete-memory"];
 
 // The composer outlives every redraw: draft, height and caret all survive.
 const input = el("textarea", "composer-input");
@@ -145,6 +145,9 @@ function streamed(stream: Stream): HTMLElement {
   if (stream.deleted.length > 0) {
     block.append(trace("✕", "deleted", stream.deleted, "stream-deleted"));
   }
+  if (stream.linked.length > 0) {
+    block.append(trace("⌇", "linked", stream.linked, "stream-linked"));
+  }
   return block;
 }
 
@@ -194,7 +197,7 @@ function ledger(): HTMLElement {
       el(
         "span",
         "ledger-note",
-        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets",
+        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects",
       ),
     );
     return line;

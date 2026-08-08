@@ -120,6 +120,17 @@ pub async fn run(
                         trace(&format!("deleted {slug}"));
                     }
                 }
+                TurnEvent::Linked { from, to } => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "linked", "from": from, "to": to})
+                        )?;
+                    } else {
+                        trace(&format!("linked {from} to {to}"));
+                    }
+                }
             }
             out.flush()
         },

@@ -10,6 +10,7 @@ import { accept, ghost } from "./complete";
 import { el, forgetTraces, trace, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
 import { renderMarkdown } from "./markdown";
+import { mentionAsk } from "./mentions";
 
 type SpotEvent =
   | {
@@ -22,6 +23,7 @@ type SpotEvent =
   | { request_id: number; kind: "saved"; slug: string }
   | { request_id: number; kind: "updated"; slug: string }
   | { request_id: number; kind: "deleted"; slug: string }
+  | { request_id: number; kind: "linked"; from: string; to: string }
   | { request_id: number; kind: "done" }
   // `detail` present means `message` stands in for the provider's own words.
   | { request_id: number; kind: "error"; message: string; detail?: string };
@@ -68,6 +70,7 @@ const COMMANDS: Command[] = [
   { cmd: "/memory", view: null, hint: "tell odyn something to remember" },
   { cmd: "/update-memory", view: null, hint: "tell odyn something changed" },
   { cmd: "/delete-memory", view: null, hint: "tell odyn to forget something" },
+  { cmd: "/link-memory", view: null, hint: "connect two memories" },
 ];
 
 let current: number | null = null;
@@ -77,6 +80,7 @@ let used: string[] = [];
 let saved: string[] = [];
 let updated: string[] = [];
 let deleted: string[] = [];
+let linked: string[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
 let keyMode = false;
@@ -171,6 +175,9 @@ function draw(): void {
   if (!streaming && deleted.length > 0) {
     results.append(trace("✕", "deleted", deleted, "deleted"));
   }
+  if (!streaming && linked.length > 0) {
+    results.append(trace("⌇", "linked", linked, "linked"));
+  }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
 
@@ -195,6 +202,7 @@ function clearScreen(): void {
   saved = [];
   updated = [];
   deleted = [];
+  linked = [];
   forgetTraces();
   commandMode = false;
   cursor = 0;
@@ -297,6 +305,7 @@ async function ask(): Promise<void> {
   saved = [];
   updated = [];
   deleted = [];
+  linked = [];
   forgetTraces();
   ledger.hidden = true;
   ledger.replaceChildren();
@@ -362,10 +371,6 @@ function cycleModel(): void {
   const next = models[(Math.max(at, 0) + 1) % models.length];
   if (next !== undefined) void pick(target.provider, next);
 }
-
-// A memory mention is a message, never a command.
-const mentionAsk = (text: string): boolean =>
-  /(^|\s)\/(brain|memory|update-memory|delete-memory)([\s.,;:!?]|$)/i.test(text);
 
 input.addEventListener("input", () => {
   if (!keyMode && input.value.startsWith("/") && !mentionAsk(input.value)) {
@@ -451,6 +456,8 @@ void listen<SpotEvent>("spotlight-event", (event) => {
     updated.push(data.slug);
   } else if (data.kind === "deleted") {
     deleted.push(data.slug);
+  } else if (data.kind === "linked") {
+    linked.push(`${data.from} → ${data.to}`);
   } else if (data.kind === "done") {
     streaming = false;
     draw();

@@ -34,6 +34,7 @@ export type ChatEvent = { request_id: number } & (
   | { kind: "saved"; slug: string }
   | { kind: "updated"; slug: string }
   | { kind: "deleted"; slug: string }
+  | { kind: "linked"; from: string; to: string }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );

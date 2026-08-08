@@ -28,6 +28,8 @@ export type Stream = {
   saved: string[];
   updated: string[];
   deleted: string[];
+  // `from → to` pairs the model connected this reply.
+  linked: string[];
 };
 
 // The backend's refusal when a conversation has no model; picking one clears it.
@@ -306,6 +308,7 @@ async function start(prompt: string, retry: boolean): Promise<void> {
     saved: [],
     updated: [],
     deleted: [],
+    linked: [],
   };
   state.stream = stream;
   render();
@@ -356,6 +359,11 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   if (event.kind === "deleted") {
     stream.deleted.push(event.slug);
+    render();
+    return;
+  }
+  if (event.kind === "linked") {
+    stream.linked.push(`${event.from} → ${event.to}`);
     render();
     return;
   }

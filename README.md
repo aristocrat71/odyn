@@ -152,17 +152,21 @@ best-ranked relevant notes are injected up to the cap. A message mentioning
 `/memory` hands the model a `save_memory` tool for that turn, so "remember
 this" becomes a new note; `/update-memory` hands it `update_memory` instead,
 so "this changed" rewrites the note it belongs to; `/delete-memory` hands it
-`delete_memory`, which moves the note to `.trash` in the brain folder. One
-tool per mention — the choice between them is yours, not the model's. A stale `[memory]` section from brain v1 still
+`delete_memory`, which moves the note to `.trash` in the brain folder; and
+`/link-memory` hands it `link_memory`, which writes a `[[wikilink]]` into one
+note pointing at another. A turn with a tool recalls wider than `/brain` does
+— no relevance floor, no `top_k` limit, just the token cap — and is also given
+every memory's name, because its job is finding the right note rather than
+answering from the best few. One tool per mention — the choice between them is yours, not the model's. A stale `[memory]` section from brain v1 still
 parses and is ignored.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | data dir | Where the note files live. `~` expands; point it at an Obsidian vault if you like. |
 | `model` | `bge-small` | Which model embeds notes and questions — see below. Changing it re-embeds the whole folder. |
-| `top_k` | `6` | How many nearest notes seed the recall walk, and the most one recall may inject. Must be at least 1. |
+| `top_k` | `6` | How many nearest notes seed the recall walk, and the most one `/brain` recall may inject. Must be at least 1. |
 | `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
-| `min_relevance` | `0.3` | Only notes scoring at least this share of the best match are injected. `0` keeps everything the cap allows. |
+| `min_relevance` | `0.3` | Only notes scoring at least this share of the best match are injected. `0` keeps everything the cap allows. Applies to `/brain`; a turn with a memory tool ignores it. |
 | `save_temperature` | `0.3` | Sampling temperature for `/memory` save turns; lower is more literal. Between 0 and 2. |
 | `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
@@ -281,10 +285,11 @@ decide about tokio?` — is a chat message with recall on. Likewise `/memory`:
 that turn the model is handed a `save_memory` tool and asked to distill what
 you told it into a new note in the brain folder, `/update-memory` hands it
 `update_memory` to rewrite the note a changed fact belongs to, and
-`/delete-memory` hands it `delete_memory` to move a note into `.trash` (the
-model must support tool calls). These turns also recall the notes nearest
-your message, so the model sees what exists to `[[link]]`, rewrite or forget. Both tokens are stripped before
-the model or the transcript sees them.
+`/delete-memory` hands it `delete_memory` to move a note into `.trash`, and
+`/link-memory` hands it `link_memory` to connect two notes (the model must
+support tool calls). These turns also recall the notes nearest your message,
+so the model sees what exists to `[[link]]`, rewrite, forget or connect. Every
+such token is stripped before the model or the transcript sees it.
 
 ### `odyn config`
 

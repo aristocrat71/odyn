@@ -342,7 +342,7 @@ odyn chat`),
           "would push past `cap_tokens` (default 1200). A bare `/brain` recalls on " +
           "the conversation history alone.",
       ),
-      sub("saving, updating, deleting — the memory mentions"),
+      sub("saving, updating, deleting, linking — the memory mentions"),
       p(
         "Mention `/memory` and the model is handed one tool for that turn: " +
           "`save_memory`, which writes a new `.md` note into the brain folder. " +
@@ -350,12 +350,20 @@ odyn chat`),
           "note in place — same slug, same graph edges, new fact. " +
           "`/delete-memory` hands it `delete_memory`, which moves the note into " +
           "`.trash` inside the brain folder — out of recall, but recoverable " +
-          "until you empty it. One tool per mention, on purpose: a small model " +
+          "until you empty it. `/link-memory` hands it `link_memory`, which " +
+          "writes a `[[wikilink]]` into one note pointing at another — the " +
+          "strongest edge the recall walk knows, for connecting two notes that " +
+          "were saved apart. One tool per mention, on purpose: a small model " +
           "asked to choose between them picks wrong, so the choice stays with " +
           "you. Every such turn also recalls the notes nearest your message — " +
           "that is how the model knows what `[[slug]]` links to write, or which " +
-          "note your change belongs to. " +
-          "A `✎ saved`, `✎ updated` or `✕ deleted` trace names the note under the " +
+          "note your change belongs to — and wider than `/brain` recalls, since " +
+          "the note to rewrite or forget is often not among the best few answers " +
+          "to what you said: no `min_relevance` floor, no `top_k` limit, only " +
+          "`cap_tokens`. Those turns are also handed every memory's name, so a " +
+          "note whose content did not fit can still be named to a tool. " +
+          "A `✎ saved`, `✎ updated`, `✕ deleted` or `⌇ linked` trace names the note " +
+          "under the " +
           "reply; each note is a plain file you can edit or delete like any " +
           "other. A call that succeeds ends the turn on odyn's own one-line " +
           "confirmation — the model does not get to talk over your notes after a " +

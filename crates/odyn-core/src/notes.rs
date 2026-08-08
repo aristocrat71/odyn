@@ -11,6 +11,8 @@ const BRAIN_DIR_NAME: &str = "brain";
 const TRASH_DIR_NAME: &str = ".trash";
 /// A derived slug stays short enough to read as an id in the ledger.
 const SLUG_MAX_CHARS: usize = 48;
+/// The line `link_note` keeps a note's added links on.
+const SEE_ALSO: &str = "See also ";
 
 #[derive(Debug, thiserror::Error)]
 pub enum NotesError {
@@ -35,6 +37,8 @@ pub enum NotesError {
     Exists(String),
     #[error("no note named `{0}`")]
     NotFound(String),
+    #[error("`{0}` cannot link to itself")]
+    SelfLink(String),
     #[error("the note has no content")]
     EmptyNote,
 }
@@ -173,6 +177,43 @@ pub fn update_note(dir: &Path, slug: &str, content: &str) -> Result<(), NotesErr
         return Err(NotesError::NotFound(slug.to_string()));
     }
     write(dir, slug, content)
+}
+
+/// Writes a `[[to]]` wikilink into `from`, leaving the rest of the note — and
+/// its frontmatter — byte for byte. Idempotent: `Ok(false)` means the link was
+/// already there. Both notes must exist, so a slug a small model invented comes
+/// back as an error it can read rather than a dangling edge.
+pub fn link_note(dir: &Path, from: &str, to: &str) -> Result<bool, NotesError> {
+    if from.eq_ignore_ascii_case(to) {
+        return Err(NotesError::SelfLink(from.to_string()));
+    }
+    let path = note_path(dir, from);
+    if !path.exists() {
+        return Err(NotesError::NotFound(from.to_string()));
+    }
+    if !note_path(dir, to).exists() {
+        return Err(NotesError::NotFound(to.to_string()));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|source| NotesError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    if parse_links(strip_frontmatter(&raw)).contains(&to.to_lowercase()) {
+        return Ok(false);
+    }
+    let body = raw.trim_end();
+    let link = format!("[[{to}]]");
+    // A note collects its links on one trailing line instead of growing a
+    // paragraph per link — these files are read by hand, not only by Odyn.
+    let text = match body.rsplit_once('\n') {
+        Some((head, last)) if last.starts_with(SEE_ALSO) => {
+            format!("{head}\n{}, {link}.\n", last.trim_end_matches('.'))
+        }
+        _ if body.starts_with(SEE_ALSO) => format!("{}, {link}.\n", body.trim_end_matches('.')),
+        _ => format!("{body}\n\n{SEE_ALSO}{link}.\n"),
+    };
+    std::fs::write(&path, text).map_err(|source| NotesError::Write { path, source })?;
+    Ok(true)
 }
 
 pub fn delete_note(dir: &Path, slug: &str) -> Result<(), NotesError> {
@@ -483,13 +524,62 @@ mod tests {
     }
 
     #[test]
+    fn linking_appends_one_see_also_line_and_repeats_collect_on_it() {
+        let dir = TempDir::new("link");
+        write_note(&dir.0, Some("mitul"), "---\ntype: person\n---\nThe user.").expect("write");
+        write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("write");
+        write_note(&dir.0, Some("anna"), "His sister.").expect("write");
+
+        assert!(link_note(&dir.0, "football", "mitul").expect("link"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n\nSee also [[mitul]].\n"
+        );
+        assert!(link_note(&dir.0, "football", "anna").expect("second link"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n\nSee also [[mitul]], [[anna]].\n"
+        );
+        assert_eq!(
+            read_notes(&dir.0).expect("read")[1].links,
+            vec!["mitul".to_string(), "anna".to_string()]
+        );
+
+        // Idempotent, whatever the case the model names the target in.
+        assert!(!link_note(&dir.0, "football", "Mitul").expect("again"));
+
+        // Frontmatter survives a link written into the note below it.
+        assert!(link_note(&dir.0, "mitul", "football").expect("link back"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "mitul")).expect("read"),
+            "---\ntype: person\n---\nThe user.\n\nSee also [[football]].\n"
+        );
+
+        assert!(matches!(
+            link_note(&dir.0, "football", "ghost"),
+            Err(NotesError::NotFound(slug)) if slug == "ghost"
+        ));
+        assert!(matches!(
+            link_note(&dir.0, "ghost", "mitul"),
+            Err(NotesError::NotFound(slug)) if slug == "ghost"
+        ));
+        assert!(matches!(
+            link_note(&dir.0, "mitul", "mitul"),
+            Err(NotesError::SelfLink(_))
+        ));
+    }
+
+    #[test]
     fn trash_moves_the_note_out_of_the_brain_but_keeps_the_file() {
         let dir = TempDir::new("trash");
         let slug = write_note(&dir.0, Some("car-keys"), "on the desk").expect("write");
         trash_note(&dir.0, &slug).expect("trash");
         assert!(read_notes(&dir.0).expect("read").is_empty());
         let kept = dir.0.join(TRASH_DIR_NAME).join("car-keys.md");
-        assert_eq!(std::fs::read_to_string(&kept).expect("kept"), "on the desk\n");
+        assert_eq!(
+            std::fs::read_to_string(&kept).expect("kept"),
+            "on the desk\n"
+        );
         // A recreated then re-trashed slug replaces the older copy.
         write_note(&dir.0, Some("car-keys"), "on the fridge").expect("rewrite");
         trash_note(&dir.0, "car-keys").expect("retrash");

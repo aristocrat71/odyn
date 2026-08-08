@@ -52,10 +52,7 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
         // The memory mentions look like commands but are chat messages, so
         // they must never fall into the command parser.
         let ask = odyn_core::brain::parse_ask(line);
-        if let Some(command) = line
-            .strip_prefix('/')
-            .filter(|_| !ask.recall && !ask.memorize && !ask.update && !ask.delete)
-        {
+        if let Some(command) = line.strip_prefix('/').filter(|_| !ask.any()) {
             let (name, arg) = match command.split_once(char::is_whitespace) {
                 Some((name, arg)) => (name, arg.trim()),
                 None => (command, ""),
@@ -138,6 +135,7 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
                     TurnEvent::Saved(slug) => trace(&format!("saved {slug}")),
                     TurnEvent::Updated(slug) => trace(&format!("updated {slug}")),
                     TurnEvent::Deleted(slug) => trace(&format!("deleted {slug}")),
+                    TurnEvent::Linked { from, to } => trace(&format!("linked {from} to {to}")),
                 }
                 out.flush()
             },
