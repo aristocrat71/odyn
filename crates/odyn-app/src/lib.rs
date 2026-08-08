@@ -4,6 +4,7 @@ mod config;
 mod spotlight;
 mod state;
 mod tray;
+mod update;
 
 use tauri::Manager;
 
@@ -11,7 +12,8 @@ use tauri::Manager;
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build());
     // The spotlight panel type lives behind this plugin; macOS only.
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());

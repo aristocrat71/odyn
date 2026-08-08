@@ -9,6 +9,27 @@ memory graph — wikilinks, embedding similarity, shared use — for the notes
 that answer you, accounted for token by token before anything is sent. Every
 other message reaches the model bare.
 
+## Install
+
+macOS on Apple Silicon:
+
+```sh
+curl -fsSL --connect-timeout 10 https://raw.githubusercontent.com/aristocrat71/odyn/main/install.sh | bash
+```
+
+That fetches the latest release, checks it against its published SHA-256, and
+installs it to `/Applications`. Once installed, Odyn updates itself: the tray
+checks at launch and offers a restart when it has staged a new version.
+
+Or take the `.dmg` from the [releases
+page](https://github.com/aristocrat71/odyn/releases/latest). Odyn isn't notarized
+yet, so a hand-installed copy needs one **right-click → Open** — the script above
+does that part for you.
+
+Everywhere else, build from source (below). Intel Macs have no release build
+because the bundled embedder's onnxruntime has no `x86_64-apple-darwin` binary to
+link against.
+
 ## Layout
 
 | Path | What it is |
@@ -60,8 +81,11 @@ nothing in the repository requires it.
 the frontend never has to be built by hand. A plain `cargo build --workspace`
 compiles the app crate in dev mode and does not need `dist/` to exist.
 
-The app lives in the tray under its own icon, with two items: **Open Odyn**
-brings the dashboard back, **Quit** ends the process. Closing the dashboard only
+The app lives in the tray under its own icon, with three items: **Open Odyn**
+brings the dashboard back, **Check for updates…** is the whole update interface
+(it relabels itself through downloading and lands on **Restart to finish
+updating**; the launch check is silent unless it finds something), and **Quit**
+ends the process. Closing the dashboard only
 hides it — the spotlight hotkey has to keep answering — and on macOS the dock
 icon goes with it, so odyn is a menu bar app until the dashboard is reopened. If
 the tray cannot be created the close button quits instead, rather than leaving
@@ -259,13 +283,14 @@ session.
 
 Verified on this machine (macOS, Apple Silicon): `cargo build --workspace`,
 `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
-warnings`, `cargo test --workspace` and `bun run build`. Everything else in the
-table below is untested.
+warnings`, `cargo test --workspace`, `bun run build`, and a signed release bundle
+via `bun tauri build --target aarch64-apple-darwin`. Everything else in the table
+below is untested.
 
 | Platform | Desktop app (`tauri dev`) | Bundle (`tauri build`) | Spotlight |
 | --- | --- | --- | --- |
-| macOS (Apple Silicon) | untested | untested | untested |
-| macOS (Intel) | untested | untested | untested |
+| macOS (Apple Silicon) | untested | **builds** | untested |
+| macOS (Intel) | untested | **cannot build** — `ort-sys` publishes no `x86_64-apple-darwin` binary | untested |
 | Windows | untested | untested | untested |
 | Linux, X11 | untested | untested | untested |
 | Linux, Wayland | untested | untested | untested — expected to use the fallback window |
