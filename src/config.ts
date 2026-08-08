@@ -17,7 +17,7 @@ export function renderConfig(): HTMLElement {
     el(
       "div",
       "config-note",
-      "read-only · edit the file, or run odyn config set <key> <value>",
+      "read-only · edit the file in your editor",
     ),
   );
   return root;
