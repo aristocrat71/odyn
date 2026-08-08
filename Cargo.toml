@@ -36,6 +36,9 @@ tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-build = { version = "2", features = [] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"
+# Update integrity is minisign over the release bundle; rustls-tls (the default)
+# is what fetches it, so no openssl enters the tree.
+tauri-plugin-updater = "2"
 # Parse only; writing config (Step 2.2) is toml_edit's job.
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 # Comment- and layout-preserving TOML, for the app's config writes.

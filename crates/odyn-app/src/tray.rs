@@ -2,6 +2,8 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
+use crate::update;
+
 const MAIN: &str = "main";
 const OPEN: &str = "open";
 const QUIT: &str = "quit";
@@ -15,13 +17,17 @@ pub fn setup(app: &AppHandle) {
 
 fn build(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, OPEN, "Open Odyn", true, None::<&str>)?;
+    // Starts disabled: the launch check owns it from here, and it re-enables
+    // itself once there is something a click could do.
+    let update = MenuItem::with_id(app, update::ID, update::IDLE, false, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &update, &quit])?;
     let mut tray = TrayIconBuilder::new()
         .tooltip("odyn")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             OPEN => open_dashboard(app),
+            update::ID => update::clicked(app),
             QUIT => app.exit(0),
             _ => {}
         });
@@ -29,6 +35,7 @@ fn build(app: &AppHandle) -> tauri::Result<()> {
         tray = tray.icon(icon);
     }
     tray.build(app)?;
+    update::arm(app, update);
     Ok(())
 }
 

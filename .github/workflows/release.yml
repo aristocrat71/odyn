@@ -1,0 +1,242 @@
+name: release
+
+# Tag-triggered release. Push a tag like `v0.2.0` and CI builds an Apple Silicon
+# macOS app, uploads the .dmg to a GitHub Release, and publishes the
+# `latest.json` the in-app updater reads. macOS on arm64 is the only target: the
+# `ort-sys` crate behind `fastembed` publishes no prebuilt binary for
+# `x86_64-apple-darwin`, so neither an Intel nor a universal build links.
+#
+# The version the updater compares is the semver in
+# crates/odyn-app/tauri.conf.json. The guard job below refuses to release unless
+# the tag, that file, Cargo.toml and package.json all agree, so there is no way
+# to ship a mismatch.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege by default: every job is read-only unless it opts into more.
+permissions:
+  contents: read
+
+jobs:
+  # Pre-flight. Everything here is cheap, read-only, and needs no secrets — so a
+  # bad release fails in seconds rather than after a full macOS build.
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      notes: ${{ steps.notes.outputs.body }}
+    steps:
+      # All actions pinned to a full commit SHA (not a movable tag) so a hijacked
+      # or repointed tag can't inject code — the version is in the trailing comment.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          fetch-depth: 0 # full history so --contains can see origin/main
+
+      - name: Refuse to release a tag that isn't on main
+        run: |
+          if ! git branch -r --contains "${{ github.sha }}" --format='%(refname:short)' | grep -qx 'origin/main'; then
+            echo "::error::${{ github.ref_name }} points at a commit that is not on main — refusing to release."
+            exit 1
+          fi
+
+      # A version that disagrees with the tag ships an update the updater will
+      # never offer (it compares tauri.conf.json's semver, not the tag). The Rust
+      # version is the workspace one — every crate inherits it.
+      - name: Check the version is consistent everywhere
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          conf=$(jq -r .version crates/odyn-app/tauri.conf.json)
+          pkg=$(jq -r .version package.json)
+          cargo=$(awk '/^\[workspace.package\]/ {p=1; next} /^\[/ {p=0} p && /^version = /' Cargo.toml | cut -d'"' -f2)
+          fail=0
+          for pair in "crates/odyn-app/tauri.conf.json:$conf" "package.json:$pkg" "Cargo.toml:$cargo"; do
+            if [ "${pair#*:}" != "$version" ]; then
+              echo "::error::${pair%%:*} says ${pair#*:}, tag says $version"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "version $version consistent across all three files"
+
+      # An empty pubkey builds fine and signs fine — but every installed copy
+      # rejects the update, and you don't find out until the next release.
+      - name: Check the updater public key is configured
+        run: |
+          set -euo pipefail
+          pubkey=$(jq -r '.plugins.updater.pubkey // ""' crates/odyn-app/tauri.conf.json)
+          if [ -z "$pubkey" ]; then
+            echo "::error::crates/odyn-app/tauri.conf.json has no plugins.updater.pubkey — see DEPLOY.md step 1."
+            exit 1
+          fi
+
+      # Note what reaches the shell: the `!= ''` comparison is evaluated by the
+      # runner, so HAS_KEY is the literal string "true" or "false" — the key
+      # itself is never assigned to a variable in this job at all.
+      - name: Check the signing key secret exists
+        env:
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::error::the TAURI_SIGNING_PRIVATE_KEY repository secret is not set — see DEPLOY.md step 1."
+            exit 1
+          fi
+
+      # The release body comes from CHANGELOG.md.
+      - name: Extract release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # Print the body of the "## [<version>]" section, stopping at the next
+          # one. Blank lines top and bottom are trimmed; the heading itself (and
+          # so its date) never reaches the release page.
+          body=$(awk -v v="$version" '
+            { sub(/\r$/, "") }
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { lines[++n] = $0; if (NF) { if (!first) first = n; last = n } }
+            END { if (first) for (i = first; i <= last; i++) print lines[i] }
+          ' CHANGELOG.md)
+          if [ -z "$body" ]; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section — add one before tagging."
+            exit 1
+          fi
+          # A line equal to the delimiter would close the value early and let the
+          # rest of the file forge step outputs.
+          if printf '%s\n' "$body" | grep -qx 'CHANGELOG_EOF'; then
+            echo "::error::CHANGELOG.md contains the output delimiter CHANGELOG_EOF"
+            exit 1
+          fi
+          {
+            echo 'body<<CHANGELOG_EOF'
+            printf '%s\n' "$body"
+            echo
+            echo '---'
+            echo
+            echo '### Install'
+            echo
+            echo '```sh'
+            echo 'curl -fsSL --connect-timeout 10 https://raw.githubusercontent.com/aristocrat71/odyn/main/install.sh | bash'
+            echo '```'
+            echo
+            echo 'Or download the .dmg below. Odyn is not notarized yet, so a'
+            echo 'hand-installed .dmg needs one Gatekeeper override —'
+            echo 'the install script handles that for you. Once installed, Odyn updates itself.'
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: guard
+    # No `environment:` gate — pushing a `v*` tag releases without an approval
+    # step. What keeps the signing key safe is that only repo collaborators can
+    # push a tag, and that the key is scoped to one step below. If you ever want
+    # a manual approval before the key is handed to a runner, add
+    # `environment: release` here and see DEPLOY.md.
+    permissions:
+      contents: write # create the release + upload assets
+      id-token: write # OIDC token used to sign the provenance attestation
+      attestations: write # write the build-provenance attestation
+    # macos-latest is already arm64, so this is a native build, not a cross one.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      # The ONLY step that can see the signing key. Keeping the secret in this
+      # step's `env:` (never the job's) means no other step — and nothing that
+      # dumps the environment — can reach it. Nothing here echoes it, runs under
+      # `set -x`, or passes it on a command line where `ps` could see it.
+      # Do not enable step debug logging on this workflow.
+      #
+      # tauri-action finds crates/odyn-app/tauri.conf.json itself (it globs for
+      # it, honouring .gitignore), and runs the build from the repository root —
+      # which is where package.json lives, so `beforeBuildCommand` resolves the
+      # same way it does locally.
+      - name: Build and release
+        id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Update-integrity signing (NOT Apple code-signing). Generated once with
+          # `tauri signer generate`; the public key lives in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # Absent secret resolves to an empty string, which is what a
+          # passwordless key wants. GitHub rejects empty secret values, so don't
+          # create this one unless the key actually has a password.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseBody: ${{ needs.guard.outputs.notes }}
+          releaseDraft: false
+          # Must NOT be a prerelease: both install.sh and the updater read
+          # releases/latest/download/..., which only sees the latest full release.
+          prerelease: false
+          args: --target aarch64-apple-darwin
+
+      # Publish a "<file>.sha256" next to the installer so install.sh can verify
+      # the download and fail closed on a mismatch.
+      - name: Publish SHA-256 checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          n=0
+          # Read from a redirect, not a pipe, so the loop runs in this shell and an
+          # `exit 1` below actually fails the step.
+          while read -r f; do
+            case "$f" in
+              *.dmg) ;;
+              *) continue ;;
+            esac
+            # Fail loud. Skipping here silently publishes a release whose installer
+            # can't be verified, which fails install.sh closed.
+            [ -f "$f" ] || { echo "::error::installer not found on disk: $f"; exit 1; }
+            ( cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")" ) > "${f}.sha256"
+            gh release upload "${{ github.ref_name }}" "${f}.sha256" --clobber
+            n=$((n + 1))
+          done < <(echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]')
+          # The build always produces a .dmg, so zero checksums means the matching
+          # itself broke — don't let that pass green.
+          [ "$n" -gt 0 ] || { echo "::error::no installer checksums published"; exit 1; }
+          echo "published $n checksum(s)"
+
+      # Cryptographic build provenance: a signed attestation tying each artifact
+      # to this repo + workflow run, verifiable with
+      # `gh attestation verify <file> --repo aristocrat71/odyn`. Independent of
+      # the release assets, so it holds even if a release is later tampered with.
+      - name: Collect artifact paths
+        id: artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only what a user actually downloads. artifactPaths also lists
+          # odyn.app — a directory, which the attest action would expand into
+          # every file inside the bundle.
+          {
+            echo 'paths<<EOF'
+            echo '${{ steps.tauri.outputs.artifactPaths }}' \
+              | jq -r '.[] | select(test("\\.(dmg|tar\\.gz|sig)$"))'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ steps.artifacts.outputs.paths }}
