@@ -125,6 +125,10 @@ pub(crate) enum Body {
         from: String,
         to: String,
     },
+    Unlinked {
+        from: String,
+        to: String,
+    },
     Done {
         usage: Option<Usage>,
         interrupted: bool,
@@ -545,7 +549,7 @@ async fn run(
     }
     history.extend(prior);
     history.push(Message::new(Role::User, ask.message));
-    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link);
+    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link, ask.unlink);
 
     let outcome = drive(
         &app,
@@ -823,6 +827,14 @@ async fn drive(
                     app,
                     request_id,
                     Body::Linked {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    },
+                ),
+                TurnEvent::Unlinked { from, to } => emit(
+                    app,
+                    request_id,
+                    Body::Unlinked {
                         from: from.to_string(),
                         to: to.to_string(),
                     },

@@ -131,6 +131,17 @@ pub async fn run(
                         trace(&format!("linked {from} to {to}"));
                     }
                 }
+                TurnEvent::Unlinked { from, to } => {
+                    if json {
+                        writeln!(
+                            out,
+                            "{}",
+                            serde_json::json!({"type": "unlinked", "from": from, "to": to})
+                        )?;
+                    } else {
+                        trace(&format!("unlinked {from} from {to}"));
+                    }
+                }
             }
             out.flush()
         },

@@ -353,7 +353,10 @@ odyn chat`),
           "until you empty it. `/link-memory` hands it `link_memory`, which " +
           "writes a `[[wikilink]]` into one note pointing at another — the " +
           "strongest edge the recall walk knows, for connecting two notes that " +
-          "were saved apart. One tool per mention, on purpose: a small model " +
+          "were saved apart, and `/unlink-memory` hands it `unlink_memory` to " +
+          "take that edge back out — on the `See also` line the name goes, in a " +
+          "sentence the brackets are unwrapped so the words survive. " +
+          "One tool per mention, on purpose: a small model " +
           "asked to choose between them picks wrong, so the choice stays with " +
           "you. Every such turn also recalls the notes nearest your message — " +
           "that is how the model knows what `[[slug]]` links to write, or which " +
@@ -362,7 +365,8 @@ odyn chat`),
           "to what you said: no `min_relevance` floor, no `top_k` limit, only " +
           "`cap_tokens`. Those turns are also handed every memory's name, so a " +
           "note whose content did not fit can still be named to a tool. " +
-          "A `✎ saved`, `✎ updated`, `✕ deleted` or `⌇ linked` trace names the note " +
+          "A `✎ saved`, `✎ updated`, `✕ deleted`, `⌇ linked` or `⌇ unlinked` trace " +
+          "names the note " +
           "under the " +
           "reply; each note is a plain file you can edit or delete like any " +
           "other. A call that succeeds ends the turn on odyn's own one-line " +

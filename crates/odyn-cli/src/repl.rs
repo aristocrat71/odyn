@@ -136,6 +136,9 @@ pub fn run(runtime: &Runtime, mut session: Session, show_context: bool) -> Resul
                     TurnEvent::Updated(slug) => trace(&format!("updated {slug}")),
                     TurnEvent::Deleted(slug) => trace(&format!("deleted {slug}")),
                     TurnEvent::Linked { from, to } => trace(&format!("linked {from} to {to}")),
+                    TurnEvent::Unlinked { from, to } => {
+                        trace(&format!("unlinked {from} from {to}"))
+                    }
                 }
                 out.flush()
             },

@@ -148,6 +148,9 @@ function streamed(stream: Stream): HTMLElement {
   if (stream.linked.length > 0) {
     block.append(trace("⌇", "linked", stream.linked, "stream-linked"));
   }
+  if (stream.unlinked.length > 0) {
+    block.append(trace("⌇", "unlinked", stream.unlinked, "stream-unlinked"));
+  }
   return block;
 }
 
@@ -197,7 +200,7 @@ function ledger(): HTMLElement {
       el(
         "span",
         "ledger-note",
-        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects",
+        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects · /unlink-memory disconnects",
       ),
     );
     return line;

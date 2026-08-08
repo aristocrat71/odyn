@@ -483,6 +483,7 @@ async fn run(
     let update = ask.update;
     let delete = ask.delete;
     let link = ask.link;
+    let unlink = ask.unlink;
     let mut history = vec![Message::new(Role::User, ask.message.clone())];
     if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
         *lock(&shared.injected) = context.memory_ids();
@@ -507,7 +508,7 @@ async fn run(
             history.insert(0, Message::new(Role::System, context.system_message));
         }
     }
-    let tools = odyn_core::tools::offered(memorize, update, delete, link);
+    let tools = odyn_core::tools::offered(memorize, update, delete, link, unlink);
     // A model that says nothing is as unusable as one that errored.
     let mut spoke = false;
     let driven = odyn_core::tools::run_turn(
@@ -555,6 +556,14 @@ async fn run(
                     &app,
                     request_id,
                     Body::Linked {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    },
+                ),
+                TurnEvent::Unlinked { from, to } => emit(
+                    &app,
+                    request_id,
+                    Body::Unlinked {
                         from: from.to_string(),
                         to: to.to_string(),
                     },

@@ -7,6 +7,7 @@ export const MENTIONS = [
   "/update-memory",
   "/delete-memory",
   "/link-memory",
+  "/unlink-memory",
 ];
 
 // Longest-first, so `/update-memory` is never read as `/memory`.

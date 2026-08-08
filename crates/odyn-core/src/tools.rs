@@ -2,10 +2,11 @@
 //!
 //! Tools are offered only when the message asked for them: `/memory` earns
 //! `save_memory`, `/update-memory` earns `update_memory`, `/delete-memory`
-//! earns `delete_memory`, `/link-memory` earns `link_memory`. One tool per
-//! trigger — small models misroute a choice between tools, so the user makes
-//! it. The index is not touched here — the folder is the truth, and the next
-//! recall or preview syncs it.
+//! earns `delete_memory`, `/link-memory` earns `link_memory`, and
+//! `/unlink-memory` earns `unlink_memory`. One tool per trigger — small
+//! models misroute a choice between tools, so the user makes it. The index is
+//! not touched here — the folder is the truth, and the next recall or preview
+//! syncs it.
 
 use std::path::Path;
 
@@ -20,6 +21,7 @@ pub const SAVE_MEMORY: &str = "save_memory";
 pub const UPDATE_MEMORY: &str = "update_memory";
 pub const DELETE_MEMORY: &str = "delete_memory";
 pub const LINK_MEMORY: &str = "link_memory";
+pub const UNLINK_MEMORY: &str = "unlink_memory";
 
 /// A model that keeps asking for tools is looping, not working.
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -39,6 +41,7 @@ pub enum TurnEvent<'a> {
     Updated(&'a str),
     Deleted(&'a str),
     Linked { from: &'a str, to: &'a str },
+    Unlinked { from: &'a str, to: &'a str },
 }
 
 pub struct TurnReply {
@@ -52,6 +55,8 @@ pub struct TurnReply {
     pub deleted: Vec<String>,
     /// `(from, to)` pairs connected this turn, in call order.
     pub linked: Vec<(String, String)>,
+    /// `(from, to)` pairs disconnected this turn, in call order.
+    pub unlinked: Vec<(String, String)>,
 }
 
 pub fn save_memory_tool() -> ToolDef {
@@ -83,7 +88,13 @@ pub fn save_memory_tool() -> ToolDef {
 
 /// The tools a turn's mentions earn. Update leads when several are offered: a
 /// misrouted update errors and self-corrects, a misrouted save duplicates.
-pub fn offered(memorize: bool, update: bool, delete: bool, link: bool) -> Vec<ToolDef> {
+pub fn offered(
+    memorize: bool,
+    update: bool,
+    delete: bool,
+    link: bool,
+    unlink: bool,
+) -> Vec<ToolDef> {
     let mut tools = Vec::new();
     if update {
         tools.push(update_memory_tool());
@@ -97,7 +108,33 @@ pub fn offered(memorize: bool, update: bool, delete: bool, link: bool) -> Vec<To
     if link {
         tools.push(link_memory_tool());
     }
+    if unlink {
+        tools.push(unlink_memory_tool());
+    }
     tools
+}
+
+pub fn unlink_memory_tool() -> ToolDef {
+    ToolDef {
+        name: UNLINK_MEMORY.to_string(),
+        description: "Disconnect two memories that should not be related.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "from": {
+                    "type": "string",
+                    "description": "The memory the link is written in — its \
+                                    exact slug from the ### heading above."
+                },
+                "to": {
+                    "type": "string",
+                    "description": "The memory it points at — its exact slug \
+                                    from the ### heading above."
+                }
+            },
+            "required": ["from", "to"]
+        }),
+    }
 }
 
 pub fn link_memory_tool() -> ToolDef {
@@ -186,6 +223,7 @@ pub async fn run_turn(
     let mut updated = Vec::new();
     let mut deleted = Vec::new();
     let mut linked = Vec::new();
+    let mut unlinked = Vec::new();
     for _ in 0..=MAX_TOOL_ROUNDS {
         let mut round_text = String::new();
         let mut calls = Vec::new();
@@ -244,6 +282,15 @@ pub async fn run_turn(
                     linked.push((from, to));
                     clean.push(result.clone());
                 }
+                Some(Written::Unlinked(from, to)) => {
+                    emit(TurnEvent::Unlinked {
+                        from: &from,
+                        to: &to,
+                    })
+                    .map_err(TurnError::Write)?;
+                    unlinked.push((from, to));
+                    clean.push(result.clone());
+                }
                 None => failed = true,
             }
             messages.push(Message::tool_result(call, result));
@@ -271,6 +318,7 @@ pub async fn run_turn(
         updated,
         deleted,
         linked,
+        unlinked,
     })
 }
 
@@ -280,6 +328,7 @@ enum Written {
     Updated(String),
     Deleted(String),
     Linked(String, String),
+    Unlinked(String, String),
 }
 
 /// Answers the call with a result the model can read; a bad call gets its error
@@ -290,6 +339,7 @@ fn run_tool(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
         UPDATE_MEMORY => update(brain_dir, call),
         DELETE_MEMORY => delete(brain_dir, call),
         LINK_MEMORY => link(brain_dir, call),
+        UNLINK_MEMORY => unlink(brain_dir, call),
         other => (format!("error: no tool named `{other}`"), None),
     }
 }
@@ -363,6 +413,28 @@ fn link(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
                 format!("{from} already links to {to}")
             },
             Some(Written::Linked(from.to_string(), to.to_string())),
+        ),
+        Err(err) => (format!("error: {err}"), None),
+    }
+}
+
+/// A pair that was not linked is a success too: the folder ends up the way the
+/// user asked, which is all the turn was for.
+fn unlink(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
+    let (Some(from), Some(to)) = (text_arg(call, "from"), text_arg(call, "to")) else {
+        return (
+            "error: unlink_memory needs non-empty strings `from` and `to`".to_string(),
+            None,
+        );
+    };
+    match notes::unlink_note(brain_dir, from, to) {
+        Ok(removed) => (
+            if removed {
+                format!("unlinked {from} from {to}")
+            } else {
+                format!("{from} does not link to {to}")
+            },
+            Some(Written::Unlinked(from.to_string(), to.to_string())),
         ),
         Err(err) => (format!("error: {err}"), None),
     }
@@ -476,7 +548,7 @@ mod tests {
     fn slug_of(written: Option<Written>) -> Option<String> {
         written.map(|written| match written {
             Written::Saved(slug) | Written::Updated(slug) | Written::Deleted(slug) => slug,
-            Written::Linked(from, to) => format!("{from}->{to}"),
+            Written::Linked(from, to) | Written::Unlinked(from, to) => format!("{from}->{to}"),
         })
     }
 
@@ -487,6 +559,7 @@ mod tests {
             TurnEvent::Updated(slug) => format!("updated:{slug}"),
             TurnEvent::Deleted(slug) => format!("deleted:{slug}"),
             TurnEvent::Linked { from, to } => format!("linked:{from}->{to}"),
+            TurnEvent::Unlinked { from, to } => format!("unlinked:{from}->{to}"),
         }
     }
 
@@ -765,6 +838,71 @@ mod tests {
             &dir.0,
             &named_call(
                 LINK_MEMORY,
+                serde_json::json!({"from": "ghost", "to": "mitul"}),
+            ),
+        );
+        assert!(slug_of(written).is_none());
+        assert!(result.starts_with("error:"), "{result}");
+    }
+
+    #[test]
+    fn an_unlink_call_removes_the_edge_and_a_missing_one_is_not_an_error() {
+        let dir = TempDir::new("unlink");
+        notes::write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("seed");
+        notes::write_note(&dir.0, Some("mitul"), "The user.").expect("seed");
+        notes::link_note(&dir.0, "football", "mitul").expect("seed link");
+        let asked = named_call(
+            UNLINK_MEMORY,
+            serde_json::json!({"from": "football", "to": "mitul"}),
+        );
+        let provider = Scripted::new(vec![vec![Ok(ChatEvent::ToolCall(asked)), done()]]);
+        let mut seen = Vec::new();
+        let reply = block_on(run_turn(
+            &provider,
+            "llama3.2:3b",
+            vec![Message::new(Role::User, "those two are unrelated")],
+            &[unlink_memory_tool()],
+            &dir.0,
+            0.3,
+            |event| {
+                seen.push(label(event));
+                Ok(())
+            },
+        ))
+        .expect("turn");
+
+        assert_eq!(
+            reply.unlinked,
+            vec![("football".to_string(), "mitul".to_string())]
+        );
+        assert!(reply.linked.is_empty());
+        assert_eq!(reply.text, "unlinked football from mitul");
+        assert_eq!(
+            seen,
+            vec![
+                "unlinked:football->mitul",
+                "delta:unlinked football from mitul"
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("football.md")).expect("note"),
+            "He plays on Sundays.\n"
+        );
+
+        let (result, written) = run_tool(
+            &dir.0,
+            &named_call(
+                UNLINK_MEMORY,
+                serde_json::json!({"from": "football", "to": "mitul"}),
+            ),
+        );
+        assert_eq!(slug_of(written).as_deref(), Some("football->mitul"));
+        assert_eq!(result, "football does not link to mitul");
+
+        let (result, written) = run_tool(
+            &dir.0,
+            &named_call(
+                UNLINK_MEMORY,
                 serde_json::json!({"from": "ghost", "to": "mitul"}),
             ),
         );

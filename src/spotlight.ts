@@ -24,6 +24,7 @@ type SpotEvent =
   | { request_id: number; kind: "updated"; slug: string }
   | { request_id: number; kind: "deleted"; slug: string }
   | { request_id: number; kind: "linked"; from: string; to: string }
+  | { request_id: number; kind: "unlinked"; from: string; to: string }
   | { request_id: number; kind: "done" }
   // `detail` present means `message` stands in for the provider's own words.
   | { request_id: number; kind: "error"; message: string; detail?: string };
@@ -71,6 +72,7 @@ const COMMANDS: Command[] = [
   { cmd: "/update-memory", view: null, hint: "tell odyn something changed" },
   { cmd: "/delete-memory", view: null, hint: "tell odyn to forget something" },
   { cmd: "/link-memory", view: null, hint: "connect two memories" },
+  { cmd: "/unlink-memory", view: null, hint: "disconnect two memories" },
 ];
 
 let current: number | null = null;
@@ -81,6 +83,7 @@ let saved: string[] = [];
 let updated: string[] = [];
 let deleted: string[] = [];
 let linked: string[] = [];
+let unlinked: string[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
 let keyMode = false;
@@ -178,6 +181,9 @@ function draw(): void {
   if (!streaming && linked.length > 0) {
     results.append(trace("⌇", "linked", linked, "linked"));
   }
+  if (!streaming && unlinked.length > 0) {
+    results.append(trace("⌇", "unlinked", unlinked, "unlinked"));
+  }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
 
@@ -203,6 +209,7 @@ function clearScreen(): void {
   updated = [];
   deleted = [];
   linked = [];
+  unlinked = [];
   forgetTraces();
   commandMode = false;
   cursor = 0;
@@ -306,6 +313,7 @@ async function ask(): Promise<void> {
   updated = [];
   deleted = [];
   linked = [];
+  unlinked = [];
   forgetTraces();
   ledger.hidden = true;
   ledger.replaceChildren();
@@ -458,6 +466,8 @@ void listen<SpotEvent>("spotlight-event", (event) => {
     deleted.push(data.slug);
   } else if (data.kind === "linked") {
     linked.push(`${data.from} → ${data.to}`);
+  } else if (data.kind === "unlinked") {
+    unlinked.push(`${data.from} ⇢ ${data.to}`);
   } else if (data.kind === "done") {
     streaming = false;
     draw();

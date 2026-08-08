@@ -114,7 +114,7 @@ pub async fn stream_reply(
     ask: &Ask,
     emit: impl FnMut(TurnEvent<'_>) -> std::io::Result<()>,
 ) -> Result<Reply, Failure> {
-    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link);
+    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link, ask.unlink);
     let dir = notes::brain_dir(config.brain.path.as_deref())
         .map_err(|err| Failure::run(err.to_string()))?;
     let temperature = config.brain.save_temperature;

@@ -25,6 +25,8 @@ pub const UPDATE: &str = "/update-memory";
 pub const DELETE: &str = "/delete-memory";
 /// The mention that asks the model to connect two memories this turn.
 pub const LINK: &str = "/link-memory";
+/// The mention that asks the model to disconnect two memories this turn.
+pub const UNLINK: &str = "/unlink-memory";
 
 /// Two turns of history join the retrieval query.
 const QUERY_MESSAGES: usize = 4;
@@ -67,20 +69,22 @@ pub struct Ask {
     pub delete: bool,
     /// Whether the model is handed `link_memory` this turn.
     pub link: bool,
+    /// Whether the model is handed `unlink_memory` this turn.
+    pub unlink: bool,
 }
 
 impl Ask {
     /// Whether any trigger fired. Every trigger recalls, so this is also what
     /// decides whether a turn touches the brain at all.
     pub fn any(&self) -> bool {
-        self.recall || self.memorize || self.update || self.delete || self.link
+        self.recall || self.writes()
     }
 
     /// Whether the turn is handed a tool that writes to the folder. Those
     /// turns recall wider and see every memory's name, because their task is
     /// picking the right note rather than answering from the best few.
     pub fn writes(&self) -> bool {
-        self.memorize || self.update || self.delete || self.link
+        self.memorize || self.update || self.delete || self.link || self.unlink
     }
 }
 
@@ -91,18 +95,19 @@ struct Mentions {
     update: bool,
     delete: bool,
     link: bool,
+    unlink: bool,
 }
 
 impl Mentions {
     fn any(&self) -> bool {
-        self.recall || self.memorize || self.update || self.delete || self.link
+        self.recall || self.memorize || self.update || self.delete || self.link || self.unlink
     }
 }
 
 /// Finds a whitespace-delimited `/brain`, `/memory`, `/update-memory`,
-/// `/delete-memory` or `/link-memory` anywhere in the message, case
-/// insensitively, tolerating trailing punctuation. Each token and the
-/// whitespace after it are removed; everything else stays byte-for-byte.
+/// `/delete-memory`, `/link-memory` or `/unlink-memory` anywhere in the
+/// message, case insensitively, tolerating trailing punctuation. Each token
+/// and the whitespace after it are removed; everything else stays byte-for-byte.
 pub fn parse_ask(text: &str) -> Ask {
     let mut cleaned = String::with_capacity(text.len());
     let mut token = String::new();
@@ -123,6 +128,8 @@ pub fn parse_ask(text: &str) -> Ask {
             Some(&mut found.delete)
         } else if trailer.eq_ignore_ascii_case(LINK) {
             Some(&mut found.link)
+        } else if trailer.eq_ignore_ascii_case(UNLINK) {
+            Some(&mut found.unlink)
         } else {
             None
         };
@@ -162,6 +169,7 @@ pub fn parse_ask(text: &str) -> Ask {
             update: found.update,
             delete: found.delete,
             link: found.link,
+            unlink: found.unlink,
         };
     }
     Ask {
@@ -176,6 +184,7 @@ pub fn parse_ask(text: &str) -> Ask {
         update: found.update,
         delete: found.delete,
         link: found.link,
+        unlink: found.unlink,
     }
 }
 
@@ -204,7 +213,7 @@ impl InjectedContext {
 pub fn empty_context(brevity: Brevity) -> InjectedContext {
     InjectedContext {
         memories: Vec::new(),
-        system_message: render(&[], &[], brevity, false, false, false, false),
+        system_message: render(&[], &[], brevity, Tasks::default()),
         tokens: 0,
     }
 }
@@ -360,18 +369,33 @@ where
         Vec::new()
     };
     Ok(InjectedContext {
-        system_message: render(
-            &kept,
-            &names,
-            brevity,
-            ask.memorize,
-            ask.update,
-            ask.delete,
-            ask.link,
-        ),
+        system_message: render(&kept, &names, brevity, Tasks::from(ask)),
         memories: kept,
         tokens,
     })
+}
+
+/// Which task sections the turn earns. One field per trigger, so the next one
+/// is a field rather than another parameter.
+#[derive(Default, Clone, Copy)]
+struct Tasks {
+    saving: bool,
+    updating: bool,
+    deleting: bool,
+    linking: bool,
+    unlinking: bool,
+}
+
+impl From<&Ask> for Tasks {
+    fn from(ask: &Ask) -> Self {
+        Self {
+            saving: ask.memorize,
+            updating: ask.update,
+            deleting: ask.delete,
+            linking: ask.link,
+            unlinking: ask.unlink,
+        }
+    }
 }
 
 /// How much of the ranked sweep survives into the prompt.
@@ -539,6 +563,12 @@ const NAMING: &str = "Every memory that exists, by name. The ones written out \
 above were recalled for this message; the others exist but their content was \
 not. A name here is a slug you may pass to a tool.";
 
+const UNLINKING: &str = "The user asked you to disconnect two memories. \
+Call unlink_memory with their exact slugs: `from` is the memory the link is \
+written in, `to` is the memory it points at. If the two memories the user \
+means are not both above, say so in one line and call nothing. Otherwise \
+confirm in one line without repeating the other memories.";
+
 const LINKING: &str = "The user asked you to connect two memories. Call \
 link_memory with their exact slugs: `from` is the memory the link is written \
 into, `to` is the memory it points at — for a memory `football` about the \
@@ -550,15 +580,7 @@ other memories.";
 /// The injected system message, golden-tested byte for byte: `## Memories`
 /// (omitted when empty), `## Memory names` on a write turn, a task section per
 /// mentioned trigger, then `## Style`.
-fn render(
-    memories: &[Memory],
-    names: &[String],
-    brevity: Brevity,
-    saving: bool,
-    updating: bool,
-    deleting: bool,
-    linking: bool,
-) -> String {
+fn render(memories: &[Memory], names: &[String], brevity: Brevity, tasks: Tasks) -> String {
     let mut sections = Vec::new();
     if !memories.is_empty() {
         let mut lines = vec![format!("## Memories\n{PREAMBLE}")];
@@ -577,17 +599,20 @@ fn render(
         }
         sections.push(format!("## Memory names\n{NAMING}\n{line}"));
     }
-    if saving {
+    if tasks.saving {
         sections.push(format!("## Saving\n{SAVING}"));
     }
-    if updating {
+    if tasks.updating {
         sections.push(format!("## Updating\n{UPDATING}"));
     }
-    if deleting {
+    if tasks.deleting {
         sections.push(format!("## Deleting\n{DELETING}"));
     }
-    if linking {
+    if tasks.linking {
         sections.push(format!("## Linking\n{LINKING}"));
+    }
+    if tasks.unlinking {
+        sections.push(format!("## Unlinking\n{UNLINKING}"));
     }
     if let Some(directive) = brevity.directive() {
         sections.push(format!("## Style\n{directive}"));
@@ -682,6 +707,7 @@ mod tests {
             update: false,
             delete: false,
             link: false,
+            unlink: false,
         }
     }
 
@@ -707,6 +733,7 @@ mod tests {
                 update: false,
                 delete: false,
                 link: false,
+                unlink: false,
             }
         );
         // Only the trigger: recall runs on history alone, message stays non-empty.
@@ -720,6 +747,7 @@ mod tests {
                 update: false,
                 delete: false,
                 link: false,
+                unlink: false,
             }
         );
     }
@@ -736,6 +764,7 @@ mod tests {
                 update: false,
                 delete: false,
                 link: false,
+                unlink: false,
             }
         );
         assert_eq!(
@@ -748,6 +777,7 @@ mod tests {
                 update: false,
                 delete: false,
                 link: false,
+                unlink: false,
             }
         );
         assert_eq!(
@@ -760,6 +790,7 @@ mod tests {
                 update: false,
                 delete: false,
                 link: false,
+                unlink: false,
             }
         );
     }
@@ -776,6 +807,7 @@ mod tests {
                 update: false,
                 delete: true,
                 link: false,
+                unlink: false,
             }
         );
     }
@@ -795,10 +827,25 @@ mod tests {
                 update: false,
                 delete: false,
                 link: true,
+                unlink: false,
             }
         );
         assert!(ask.any(), "a link turn touches the brain");
         assert!(!parse_ask("/memory a fact").link);
+    }
+
+    /// `/unlink-memory` is its own token: it never trips the `/link-memory` flag.
+    #[test]
+    fn the_unlink_trigger_parses_and_never_reads_as_link() {
+        let ask = parse_ask("/unlink-memory football has nothing to do with anna");
+        assert!(ask.unlink);
+        assert!(!ask.link);
+        assert!(
+            ask.writes(),
+            "an unlink turn recalls wide and sees the names"
+        );
+        assert_eq!(ask.message, "football has nothing to do with anna");
+        assert!(!parse_ask("/link-memory a and b").unlink);
     }
 
     #[test]
@@ -836,6 +883,7 @@ mod tests {
                 update: true,
                 delete: false,
                 link: false,
+                unlink: false,
             }
         );
         assert_eq!(
@@ -848,6 +896,7 @@ mod tests {
                 update: true,
                 delete: false,
                 link: false,
+                unlink: false,
             }
         );
     }
@@ -873,6 +922,7 @@ mod tests {
             update: false,
             delete: false,
             link: false,
+            unlink: false,
         };
         let context =
             build_context(Some(&storage), &config, &[], &ask, Brevity::Off, never).expect("build");
@@ -1000,6 +1050,7 @@ mod tests {
             update: false,
             delete: true,
             link: false,
+            unlink: false,
         };
         let context = build_context(None, &config, &[], &ask, Brevity::Off, never).expect("build");
         assert!(context.system_message.contains("note-000, note-001"));
@@ -1020,6 +1071,7 @@ mod tests {
             update: true,
             delete: false,
             link: false,
+            unlink: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1053,6 +1105,7 @@ mod tests {
             update: false,
             delete: true,
             link: false,
+            unlink: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1092,6 +1145,7 @@ mod tests {
             update: false,
             delete: false,
             link: false,
+            unlink: false,
         };
         let context = build_context(
             Some(&storage),

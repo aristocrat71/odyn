@@ -216,6 +216,88 @@ pub fn link_note(dir: &Path, from: &str, to: &str) -> Result<bool, NotesError> {
     Ok(true)
 }
 
+/// Removes the `[[to]]` edge from `from`, keeping the note readable. On the
+/// `See also` line the entry goes, and the line with it once nothing is left;
+/// anywhere else the brackets are unwrapped so the sentence still reads.
+/// Idempotent: `Ok(false)` means there was no such link. `to` need not exist —
+/// a link left dangling by a delete is exactly the kind worth clearing.
+pub fn unlink_note(dir: &Path, from: &str, to: &str) -> Result<bool, NotesError> {
+    let path = note_path(dir, from);
+    if !path.exists() {
+        return Err(NotesError::NotFound(from.to_string()));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|source| NotesError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let target = link_target(to);
+    if !parse_links(strip_frontmatter(&raw)).contains(&target) {
+        return Ok(false);
+    }
+    // Frontmatter belongs to other tools; only the memory below it is edited.
+    let (head, body) = raw.split_at(raw.len() - strip_frontmatter(&raw).len());
+    let kept: Vec<String> = body
+        .lines()
+        .filter_map(|line| unlinked_line(line, &target))
+        .collect();
+    let body = kept.join("\n");
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(NotesError::EmptyNote);
+    }
+    std::fs::write(&path, format!("{head}{body}\n"))
+        .map_err(|source| NotesError::Write { path, source })?;
+    Ok(true)
+}
+
+/// `None` drops the line: it was Odyn's `See also` line and held nothing else.
+fn unlinked_line(line: &str, target: &str) -> Option<String> {
+    let Some(links) = see_also_links(line) else {
+        return Some(unwrap_links(line, target));
+    };
+    let kept: Vec<&str> = links
+        .into_iter()
+        .filter(|inner| link_target(inner) != target)
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = kept.iter().map(|inner| format!("[[{inner}]]")).collect();
+    Some(format!("{SEE_ALSO}{}.", names.join(", ")))
+}
+
+/// The insides of `See also [[a]], [[b]].` and nothing else — a line a human
+/// wrote around its links is prose, and is never rebuilt.
+fn see_also_links(line: &str) -> Option<Vec<&str>> {
+    let inner = line.strip_prefix(SEE_ALSO)?.strip_suffix('.')?;
+    inner
+        .split(", ")
+        .map(|part| part.strip_prefix("[[")?.strip_suffix("]]"))
+        .collect()
+}
+
+/// `[[anna]]` becomes `anna` and `[[anna|Anna]]` becomes `Anna`: the edge goes,
+/// the sentence stays.
+fn unwrap_links(line: &str, target: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("[[") {
+        let Some(end) = rest[start + 2..].find("]]") else {
+            break;
+        };
+        let inner = &rest[start + 2..start + 2 + end];
+        out.push_str(&rest[..start]);
+        if link_target(inner) == target {
+            out.push_str(display_text(inner));
+        } else {
+            out.push_str(&rest[start..start + 2 + end + 2]);
+        }
+        rest = &rest[start + 2 + end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn delete_note(dir: &Path, slug: &str) -> Result<(), NotesError> {
     let path = note_path(dir, slug);
     std::fs::remove_file(&path).map_err(|source| match source.kind() {
@@ -307,20 +389,33 @@ fn parse_links(content: &str) -> Vec<String> {
         };
         let inner = &rest[..end];
         rest = &rest[end + 2..];
-        let target = inner
-            .split('|')
-            .next()
-            .unwrap_or_default()
-            .split('#')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_lowercase();
+        let target = link_target(inner);
         if !target.is_empty() && !links.contains(&target) {
             links.push(target);
         }
     }
     links
+}
+
+/// What a `[[wikilink]]`'s insides resolve to: the file stem, lowercased.
+fn link_target(inner: &str) -> String {
+    inner
+        .split('|')
+        .next()
+        .unwrap_or_default()
+        .split('#')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
+}
+
+/// What a `[[wikilink]]` reads as on the page: its alias, or its target.
+fn display_text(inner: &str) -> &str {
+    match inner.split_once('|') {
+        Some((_, alias)) => alias.trim(),
+        None => inner.split('#').next().unwrap_or_default().trim(),
+    }
 }
 
 /// FNV-1a, 64-bit: deterministic across runs and toolchains, as a stored
@@ -567,6 +662,83 @@ mod tests {
             link_note(&dir.0, "mitul", "mitul"),
             Err(NotesError::SelfLink(_))
         ));
+    }
+
+    #[test]
+    fn unlinking_clears_the_see_also_entry_and_unwraps_links_in_prose() {
+        let dir = TempDir::new("unlink");
+        write_note(&dir.0, Some("mitul"), "The user.").expect("write");
+        write_note(&dir.0, Some("anna"), "His sister.").expect("write");
+        write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("write");
+        link_note(&dir.0, "football", "mitul").expect("link");
+        link_note(&dir.0, "football", "anna").expect("link");
+
+        assert!(unlink_note(&dir.0, "football", "mitul").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n\nSee also [[anna]].\n"
+        );
+        // The last entry takes the line with it, blank separator included.
+        assert!(unlink_note(&dir.0, "football", "ANNA").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "football")).expect("read"),
+            "He plays on Sundays.\n"
+        );
+        assert!(!unlink_note(&dir.0, "football", "anna").expect("again"));
+        assert!(matches!(
+            unlink_note(&dir.0, "ghost", "anna"),
+            Err(NotesError::NotFound(slug)) if slug == "ghost"
+        ));
+    }
+
+    #[test]
+    fn unlinking_in_prose_keeps_the_sentence_and_the_other_links() {
+        let dir = TempDir::new("unwrap");
+        std::fs::write(
+            dir.0.join("keys.md"),
+            "---\ntype: note\n---\n[[Anna|Anna]] left the [[car-keys#spare]] with [[mitul]].\n\
+             \nShe told [[anna]] twice.\n",
+        )
+        .expect("write");
+
+        assert!(unlink_note(&dir.0, "keys", "anna").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "keys")).expect("read"),
+            "---\ntype: note\n---\nAnna left the [[car-keys#spare]] with [[mitul]].\n\
+             \nShe told anna twice.\n"
+        );
+        assert_eq!(
+            read_notes(&dir.0).expect("read")[0].links,
+            vec!["car-keys".to_string(), "mitul".to_string()]
+        );
+
+        // A hand-written `See also` line is prose, so it is unwrapped, not rebuilt.
+        std::fs::write(
+            dir.0.join("spare.md"),
+            "See also [[anna]] — she has the spare.\n",
+        )
+        .expect("write");
+        assert!(unlink_note(&dir.0, "spare", "anna").expect("unlink"));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "spare")).expect("read"),
+            "See also anna — she has the spare.\n"
+        );
+    }
+
+    /// Unlinking the whole of a note would leave a file that is no longer a
+    /// memory; it errors instead, and the model reads why.
+    #[test]
+    fn unlinking_cannot_empty_a_note() {
+        let dir = TempDir::new("unlink-empty");
+        std::fs::write(dir.0.join("stub.md"), "See also [[anna]].\n").expect("write");
+        assert!(matches!(
+            unlink_note(&dir.0, "stub", "anna"),
+            Err(NotesError::EmptyNote)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(note_path(&dir.0, "stub")).expect("read"),
+            "See also [[anna]].\n"
+        );
     }
 
     #[test]
