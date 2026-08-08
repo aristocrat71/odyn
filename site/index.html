@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>odyn — the context is always visible</title>
+<meta name="description" content="A personal AI harness. Open-weight models only, and a memory that is a folder of markdown notes — accounted for token by token before anything is sent.">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="odyn">
+<meta property="og:description" content="A personal AI harness. Open-weight models only, and a memory you can read as plain markdown.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='25' x='6' font-size='24' fill='%235fd4b0'>&#5854;</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* Values mirror src/tokens.css — DESIGN.md §2. Dark only: "Do not build a
+     theme system." Nothing here is colored for decoration: amber is the core
+     memory tier, teal is episodic / odyn itself. */
+  :root {
+    --bg: #0d1015;
+    --bg-soft: #11151c;
+    --ink: #e6ebf1;
+    --muted: #8b95a4;
+    --dim: #535d6b;
+    --faint: #3a4350;
+    --core: #e0a458;
+    --epi: #5fd4b0;
+    --epi-soft: rgba(95, 212, 176, 0.07);
+
+    --ring: 0 0 0 1px rgba(255, 255, 255, 0.045);
+    --radius-composer: 14px;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --gutter: 44px;
+    --column: 660px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background-color: var(--bg);
+    background-image: radial-gradient(1200px 700px at 75% -10%, rgba(95, 212, 176, 0.045), transparent 60%);
+    background-repeat: no-repeat;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 14.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection { background: rgba(95, 212, 176, 0.22); color: var(--ink); }
+
+  a { color: var(--epi); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  :focus-visible { outline: 2px solid var(--epi); outline-offset: 2px; border-radius: 2px; }
+
+  .wrap {
+    max-width: calc(var(--column) + var(--gutter) * 2);
+    margin: 0 auto;
+    padding: 0 var(--gutter);
+  }
+
+  /* Mono label — DESIGN.md §2.2: 9–11px, uppercase, wide tracking. */
+  .label {
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .label--epi { color: var(--epi); }
+  .label--core { color: var(--core); }
+
+  /* ── masthead ─────────────────────────────────────────────────────────── */
+
+  header { padding: 96px 0 0; }
+
+  h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.42em;
+    color: var(--ink);
+  }
+  h1 .rune {
+    color: var(--epi);
+    letter-spacing: 0;
+    margin-right: 0.5em;
+    font-size: 17px;
+  }
+
+  .thesis {
+    margin: 40px 0 0;
+    font-size: 25px;
+    line-height: 1.42;
+    font-weight: 400;
+    letter-spacing: -0.017em;
+    color: var(--ink);
+    max-width: 19ch;
+  }
+  .thesis em { font-style: normal; color: var(--epi); }
+
+  .standfirst {
+    margin: 26px 0 0;
+    max-width: 58ch;
+    color: var(--muted);
+  }
+  .standfirst strong { color: var(--ink); font-weight: 500; }
+
+  /* ── the one elevated surface ─────────────────────────────────────────── */
+  /* DESIGN.md §5.2: exactly ONE raised surface exists in the app, the
+     composer. This page keeps that rule — everything else sits on the page. */
+
+  .stage { margin: 56px 0 0; }
+
+  .composer {
+    background: var(--bg-soft);
+    border-radius: var(--radius-composer);
+    box-shadow: var(--ring);
+    padding: 13px 16px 11px;
+    transition: box-shadow 200ms ease;
+  }
+  .composer:hover { box-shadow: 0 0 0 1px rgba(95, 212, 176, 0.32); }
+
+  /* §5.1 the context ledger — the signature element. */
+  .ledger {
+    display: flex;
+    align-items: baseline;
+    gap: 18px;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .ledger::-webkit-scrollbar { display: none; }
+  .ledger > .label { flex: none; }
+
+  .chip { flex: none; opacity: 0; transition: opacity 220ms ease; }
+  .chip.is-in { opacity: 1; }
+  .chip .glyph { color: var(--epi); }
+  .chip .id { color: var(--epi); }
+  .chip .tk { color: var(--faint); }
+  .chip--core .glyph, .chip--core .id { color: var(--core); }
+
+  .ledger .total {
+    margin-left: auto;
+    flex: none;
+    padding-left: 20px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .ledger .total b { color: var(--muted); font-weight: 500; }
+
+  .field {
+    margin: 12px 0 0;
+    min-height: 24px;
+    color: var(--ink);
+    font-size: 14.5px;
+    word-break: break-word;
+  }
+  .field .slash { color: var(--epi); }
+  .field .placeholder { color: var(--dim); }
+
+  /* Streaming cursor — §2.4: 7×15px teal block, 1s step blink. */
+  .caret {
+    display: inline-block;
+    width: 7px;
+    height: 15px;
+    background: var(--epi);
+    vertical-align: -2px;
+    margin-left: 2px;
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .composer-foot {
+    display: flex;
+    gap: 16px;
+    margin: 12px 0 0;
+    font-size: 10.5px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .composer-foot::-webkit-scrollbar { display: none; }
+  .composer-foot .k { color: var(--faint); }
+  .composer-foot .keys { margin-left: auto; padding-left: 16px; color: var(--faint); }
+
+  .stage-note {
+    margin: 14px 0 0;
+    text-align: center;
+    font-size: 9.5px;
+    color: var(--faint);
+    letter-spacing: 0.04em;
+  }
+
+  /* ── install ──────────────────────────────────────────────────────────── */
+  /* No box. The command is a line of text, because it is a line of text. */
+
+  .install { margin: 84px 0 0; }
+
+  /* The command scrolls; the button must not go with it. Two containers, so
+     `copy` is always on screen however long the command gets. */
+  .cmd-row {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin: 14px 0 0;
+  }
+
+  .cmd {
+    flex: 1 1 auto;
+    min-width: 0; /* without this the code refuses to shrink and shoves the button off */
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    font-size: 12.5px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* Fade the tail so a clipped command reads as clipped, not as finished. */
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+  }
+  .cmd::-webkit-scrollbar { display: none; }
+  .cmd .prompt { color: var(--epi); flex: none; }
+  .cmd code { color: var(--ink); white-space: pre; }
+
+  .copy {
+    flex: none;
+    background: none;
+    border: 0;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--dim);
+    cursor: pointer;
+    padding: 4px 0;
+    transition: color 150ms ease;
+  }
+  .copy:hover { color: var(--epi); }
+  .copy[data-done="1"] { color: var(--epi); }
+
+  .install-meta { margin: 16px 0 0; font-size: 11px; color: var(--dim); }
+  .install-meta .sep { color: var(--faint); margin: 0 8px; }
+
+  /* ── prose sections ───────────────────────────────────────────────────── */
+
+  section.block { margin: 84px 0 0; }
+  section.block > .label { display: block; margin-bottom: 16px; }
+
+  section.block h2 {
+    margin: 0 0 14px;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  section.block p {
+    margin: 0 0 14px;
+    color: var(--muted);
+    max-width: 62ch;
+  }
+  section.block p:last-child { margin-bottom: 0; }
+  section.block strong { color: var(--ink); font-weight: 500; }
+
+  code.inline {
+    background: var(--epi-soft);
+    color: var(--epi);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.92em;
+  }
+
+  .tools { margin: 18px 0 0; display: grid; gap: 7px; font-size: 12px; }
+  .tools div { color: var(--dim); }
+  .tools .t { color: var(--epi); }
+
+  /* ── the graph ────────────────────────────────────────────────────────── */
+  /* §6.2: full-bleed, on the raw background, no frame. */
+
+  .graph { margin: 84px 0 0; }
+  .graph figure { margin: 22px 0 0; }
+  .graph svg { display: block; width: 100%; height: auto; }
+  .graph figcaption {
+    margin: 10px 0 0;
+    font-size: 10px;
+    color: var(--faint);
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .graph figcaption .sw { color: var(--epi); }
+  .graph figcaption .sw--core { color: var(--core); }
+
+  /* ── footer ───────────────────────────────────────────────────────────── */
+  /* The sidebar's status line, per §3. */
+
+  footer {
+    margin: 96px 0 0;
+    padding: 0 0 96px;
+    font-size: 11px;
+    color: var(--dim);
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    align-items: baseline;
+  }
+  footer .dot { color: var(--epi); }
+  footer .sep { color: var(--faint); }
+  footer .right { margin-left: auto; color: var(--faint); }
+
+  @media (max-width: 720px) {
+    :root { --gutter: 22px; }
+    header { padding-top: 64px; }
+    .thesis { font-size: 21px; max-width: none; }
+    .composer-foot .keys { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .caret { animation: none; }
+    .chip { transition: none; }
+    * { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header>
+    <h1><span class="rune" aria-hidden="true">&#5854;</span>ODYN</h1>
+
+    <p class="thesis">The context is <em>always visible</em>.</p>
+
+    <p class="standfirst">
+      A personal AI harness: a desktop app over a pure-Rust core. It talks only to
+      open-weight models — any OpenAI-compatible endpoint and a local Ollama — and
+      never to a closed-weight provider. <strong>Every other chat app hides what the
+      model sees.</strong> Odyn puts it on one line above the thing you're typing,
+      counted token by token, before anything is sent.
+    </p>
+
+    <!-- The app's one elevated surface, reproduced. Fills the way it fills in
+         the app: type, pause, retrieve. -->
+    <div class="stage">
+      <div class="composer" id="composer">
+        <div class="ledger" id="ledger" aria-label="context ledger">
+          <span class="label">Context</span>
+          <span class="chip chip--core"><span class="glyph">&#9679;</span> <span class="id">core</span> <span class="tk">342</span></span>
+          <span class="chip"><span class="glyph">&#9672;</span> <span class="id">e-0142</span> <span class="tk">61</span></span>
+          <span class="chip"><span class="glyph">&#9672;</span> <span class="id">e-0087</span> <span class="tk">48</span></span>
+          <span class="chip"><span class="glyph">&#9672;</span> <span class="id">e-0031</span> <span class="tk">37</span></span>
+          <span class="total"><b id="total">0</b> / 1,200 tk</span>
+        </div>
+
+        <div class="field" id="field"><span class="placeholder">Message Odyn&#8230;</span></div>
+
+        <div class="composer-foot">
+          <span><span class="k">brevity</span> full &#9662;</span>
+          <span><span class="k">provider</span> ollama &#9662;</span>
+          <span><span class="k">model</span> qwen3 &#9662;</span>
+          <span class="keys">&#9166; send &#183; &#8679;&#9166; newline &#183; &#8984;K spotlight</span>
+        </div>
+      </div>
+      <p class="stage-note">the CONTEXT line is exactly what the model sees</p>
+    </div>
+  </header>
+
+  <section class="install">
+    <span class="label">Install</span>
+    <div class="cmd-row">
+      <div class="cmd">
+        <span class="prompt" aria-hidden="true">$</span>
+        <code id="cmd">curl -fsSL --connect-timeout 10 https://raw.githubusercontent.com/aristocrat71/odyn/main/install.sh | bash</code>
+      </div>
+      <button class="copy" id="copy" type="button" aria-label="Copy the install command">copy</button>
+    </div>
+    <p class="install-meta">
+      macOS &#183; Apple Silicon<span class="sep">&#183;</span>verifies its own checksum<span class="sep">&#183;</span>then updates itself
+    </p>
+    <p class="install-meta">
+      Not notarized yet, so a hand-downloaded <code class="inline">.dmg</code> needs one
+      right-click &#8594; Open — the script above does that part for you. Or take the
+      <a href="https://github.com/aristocrat71/odyn/releases/latest">.dmg from the releases page</a>.
+    </p>
+  </section>
+
+  <section class="block">
+    <span class="label label--epi">The ledger</span>
+    <h2>A receipt, not a preview</h2>
+    <p>
+      One mono line fused to the top of the composer: <strong>one chip per memory</strong>,
+      each with what it costs, and a running total against the cap. It updates as you
+      pause, so you watch the retrieval happen before you commit to it.
+    </p>
+    <p>
+      It is not a summary of the context. It <strong>is</strong> the context. Every path
+      that injects anything goes through one function, and the interface renders that
+      function's exact output — if the line and what gets sent could ever disagree, that
+      is a critical bug, not a rounding error.
+    </p>
+  </section>
+
+  <section class="block">
+    <span class="label label--core">The brain</span>
+    <h2>A folder of markdown notes</h2>
+    <p>
+      One file per memory, the file stem as its id, <code class="inline">[[wikilinks]]</code>
+      as authored edges. No database you can't read, no format you can't grep. Point it at
+      an Obsidian vault if you like.
+    </p>
+    <p>
+      Nothing is injected unless a message mentions <code class="inline">/brain</code>.
+      That turn's question then seeds a walk over the memory graph — wikilinks, embedding
+      similarity, shared use — for the notes that answer you.
+      <strong>Every other message reaches the model bare.</strong>
+    </p>
+    <p>
+      Embeddings run locally by default, on a bundled model that loads when it is needed
+      and is dropped the moment it isn't. Nothing about your notes leaves the machine
+      unless you point the embedder at an endpoint yourself — and the app says so, in the
+      header, the whole time you do.
+    </p>
+    <div class="tools">
+      <div><span class="t">/memory</span> &#8194;saves a note</div>
+      <div><span class="t">/update-memory</span> &#8194;rewrites the one it belongs to</div>
+      <div><span class="t">/delete-memory</span> &#8194;moves it to .trash</div>
+      <div><span class="t">/link-memory</span> &#8194;draws an edge</div>
+      <div><span class="t">/unlink-memory</span> &#8194;takes it back out</div>
+    </div>
+    <p style="margin-top:18px">
+      One tool per mention — the choice between them is yours, not the model's.
+    </p>
+  </section>
+
+  <section class="graph">
+    <span class="label">The graph</span>
+    <figure>
+      <!-- §6.2: amber core, teal episodic sized by hits, faint similarity edges,
+           dashed teal co-injection. Decorative — the labelled prose carries it. -->
+      <svg viewBox="0 0 660 232" role="img" aria-label="A memory graph: two amber core nodes and eleven teal episodic nodes, joined by similarity and co-injection edges.">
+        <g stroke="#3a4350" stroke-width="1" fill="none">
+          <path d="M188 118 L96 62"/><path d="M188 118 L104 176"/><path d="M188 118 L282 74"/>
+          <path d="M188 118 L268 168"/><path d="M282 74 L370 48"/><path d="M282 74 L392 108"/>
+          <path d="M268 168 L358 196"/><path d="M268 168 L392 108"/><path d="M392 108 L486 76"/>
+          <path d="M392 108 L498 150"/><path d="M486 76 L576 108"/><path d="M498 150 L576 108"/>
+          <path d="M358 196 L498 150"/>
+        </g>
+        <g stroke="#5fd4b0" stroke-width="1" stroke-dasharray="3 4" fill="none" opacity="0.55">
+          <path d="M96 62 L282 74"/><path d="M104 176 L358 196"/><path d="M486 76 L498 150"/>
+        </g>
+        <g fill="#0d1015">
+          <circle cx="188" cy="118" r="11" stroke="#e0a458" stroke-width="1.5" fill="rgba(224,164,88,.14)"/>
+          <circle cx="392" cy="108" r="11" stroke="#e0a458" stroke-width="1.5" fill="rgba(224,164,88,.14)"/>
+          <circle cx="96"  cy="62"  r="8.2"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="104" cy="176" r="6.4"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="282" cy="74"  r="9.6"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="268" cy="168" r="7.3"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="370" cy="48"  r="5.9"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="358" cy="196" r="7.8"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="486" cy="76"  r="8.6"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="498" cy="150" r="6.8"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+          <circle cx="576" cy="108" r="5.9"  stroke="#5fd4b0" stroke-width="1.3" fill="rgba(95,212,176,.10)"/>
+        </g>
+      </svg>
+      <figcaption>
+        <span><span class="sw sw--core">&#9679;</span> core &#183; always injected</span>
+        <span><span class="sw">&#9672;</span> episodic &#183; radius is retrieval frequency</span>
+        <span><span style="color:#3a4350">&#8212;</span> similarity &#8805; 0.78</span>
+        <span><span class="sw">&#8211; &#8211;</span> retrieved together</span>
+      </figcaption>
+    </figure>
+  </section>
+
+  <section class="block">
+    <span class="label label--epi">The models</span>
+    <h2>Open weights, as a rule</h2>
+    <p>
+      Not a default you can talk it out of. Any OpenAI-compatible endpoint and a local
+      Ollama; never a closed-weight provider.
+    </p>
+    <p>
+      The providers view already knows the endpoint and the model list for OpenRouter,
+      Groq, Cerebras, DeepSeek, Together, Mistral, OpenCode Zen and Ollama — so a key is
+      the whole of what it asks for. Paste one and a shape only one provider issues names
+      its own. <strong>Free models are listed first, everywhere.</strong>
+    </p>
+    <p>
+      Keys live in <code class="inline">odyn.toml</code>, or stay out of it entirely:
+      <code class="inline">api_key_env</code> names an environment variable that is read
+      only when that provider is actually used.
+    </p>
+  </section>
+
+  <section class="block">
+    <span class="label label--epi">Spotlight</span>
+    <h2>&#8997;Space, anywhere</h2>
+    <p>
+      A borderless panel that answers <strong>without taking focus</strong> from whatever
+      you were doing — the app in front of you keeps the caret. Ask, read, dismiss with
+      Esc. Or promote the exchange into a full conversation and keep going.
+    </p>
+    <p>
+      Odyn otherwise lives in the menu bar. Closing the dashboard only hides it, because
+      the hotkey has to keep answering.
+    </p>
+  </section>
+
+  <footer>
+    <span><span class="dot">&#9679;</span> v0.1.0</span>
+    <span class="sep">&#183;</span>
+    <span>MIT</span>
+    <span class="sep">&#183;</span>
+    <a href="https://github.com/aristocrat71/odyn">github.com/aristocrat71/odyn</a>
+    <span class="right">&#5854;</span>
+  </footer>
+
+</div>
+
+<script>
+  (function () {
+    var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    var field = document.getElementById('field');
+    var chips = Array.prototype.slice.call(document.querySelectorAll('#ledger .chip'));
+    var totalEl = document.getElementById('total');
+    var TYPED = '/brain what did we decide about the ledger?';
+    var TOTAL = 488;
+
+    function caret() {
+      var c = document.createElement('span');
+      c.className = 'caret';
+      return c;
+    }
+
+    // Paint the typed line: "/brain" carries the teal that marks a recall turn.
+    function paint(n, withCaret) {
+      var text = TYPED.slice(0, n);
+      field.textContent = '';
+      var cut = text.indexOf(' ');
+      if (cut === -1) cut = text.length;
+      var slash = document.createElement('span');
+      slash.className = 'slash';
+      slash.textContent = text.slice(0, cut);
+      field.appendChild(slash);
+      field.appendChild(document.createTextNode(text.slice(cut)));
+      if (withCaret) field.appendChild(caret());
+    }
+
+    function countTo(value, ms) {
+      var start = null;
+      function step(now) {
+        if (start === null) start = now;
+        var t = Math.min(1, (now - start) / ms);
+        // ease-out: the number settles rather than slamming into place
+        var eased = 1 - Math.pow(1 - t, 3);
+        totalEl.textContent = Math.round(value * eased).toLocaleString('en-US');
+        if (t < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+
+    function settled() {
+      paint(TYPED.length, true);
+      chips.forEach(function (c) { c.classList.add('is-in'); });
+      totalEl.textContent = TOTAL.toLocaleString('en-US');
+    }
+
+    if (reduced) { settled(); return; }
+
+    var timers = [];
+    function run() {
+      timers.forEach(clearTimeout);
+      timers = [];
+      chips.forEach(function (c) { c.classList.remove('is-in'); });
+      totalEl.textContent = '0';
+      paint(0, true);
+
+      var i = 0;
+      (function type() {
+        paint(i, true);
+        if (i++ < TYPED.length) {
+          // Uneven cadence reads as a hand, not a machine.
+          timers.push(setTimeout(type, 26 + Math.random() * 44));
+          return;
+        }
+        // Retrieval is debounced behind a typing pause — same as the app.
+        timers.push(setTimeout(function () {
+          chips.forEach(function (c, n) {
+            timers.push(setTimeout(function () { c.classList.add('is-in'); }, n * 130));
+          });
+          countTo(TOTAL, 620);
+        }, 420));
+      })();
+    }
+
+    // Only animate once it can actually be seen.
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting) { run(); io.disconnect(); }
+        });
+      }, { threshold: 0.35 });
+      io.observe(document.getElementById('composer'));
+    } else {
+      run();
+    }
+
+    document.getElementById('composer').addEventListener('click', run);
+
+    var btn = document.getElementById('copy');
+    var doneTimer;
+    btn.addEventListener('click', function () {
+      var text = document.getElementById('cmd').textContent;
+      var restore = function (ok) {
+        btn.textContent = ok ? 'copied' : 'select it';
+        btn.dataset.done = ok ? '1' : '';
+        clearTimeout(doneTimer);
+        doneTimer = setTimeout(function () {
+          btn.textContent = 'copy';
+          btn.dataset.done = '';
+        }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { restore(true); }, function () { restore(false); });
+      } else {
+        restore(false);
+      }
+    });
+  })();
+</script>
+
+</body>
+</html>

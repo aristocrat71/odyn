@@ -134,9 +134,10 @@ There's nothing to bump for the install one-liner. It tracks `main` rather than 
 tag, so the published command is identical every release and the script resolves
 `releases/latest` at run time.
 
-If you ever change that command, it lives in three places that must stay
-byte-identical: `README.md`, the header comment in `install.sh`, and the
-release-notes snippet in `.github/workflows/release.yml`.
+If you ever change that command, it lives in four places that must stay
+byte-identical: `README.md`, the header comment in `install.sh`, the
+release-notes snippet in `.github/workflows/release.yml`, and the copy button's
+`<code id="cmd">` on the landing page in `site/index.html`.
 
 Then sync `Cargo.lock` (it records each crate's version) and land it:
 
