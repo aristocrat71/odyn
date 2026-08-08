@@ -76,8 +76,8 @@ const SECTIONS: Section[] = [
     title: "what odyn is",
     body: () => [
       p(
-        "Odyn is a personal AI harness: a desktop app and an `odyn` command-line binary " +
-          "over one Rust core, sharing one config file, one database and one brain. It " +
+        "Odyn is a personal AI harness: a desktop app over a Rust core, with one " +
+          "config file, one database and one brain. It " +
           "talks only to open-weight models — any OpenAI-compatible endpoint and a local " +
           "Ollama. The brain is a folder of markdown notes, and it stays out of your " +
           "context window until you ask: mention `/brain` in a message and Odyn walks " +
@@ -95,7 +95,7 @@ const SECTIONS: Section[] = [
           "then parsed as the running configuration — the file on disk and the running " +
           "process can never disagree. Unknown keys are rejected by name.",
       ),
-      p("`odyn config path` prints where it lives on this machine:"),
+      p("Where it lives on this machine:"),
       rows([
         ["macOS", "`~/Library/Application Support/odyn/odyn.toml`"],
         ["Linux", "`$XDG_CONFIG_HOME/odyn/odyn.toml`, else `~/.config/odyn/odyn.toml`"],
@@ -144,7 +144,7 @@ brevity = "full"`,
         ],
         [
           "[providers.<name>]",
-          "any number of `kind = \"openai_compat\"` entries. `base_url` is the endpoint root, `default_model` the model new sessions start on. The name is yours: it is what `--provider` and `/model` refer to.",
+          "any number of `kind = \"openai_compat\"` entries. `base_url` is the endpoint root, `default_model` the model new sessions start on. The name is yours: it is what the model picker groups models under.",
         ],
         [
           "api_key",
@@ -157,14 +157,8 @@ brevity = "full"`,
       ]),
       p("First run, from the repository root:"),
       pre(`bun install
-bun run tauri dev                       # the desktop app
-
-cargo install --path crates/odyn-cli    # installs odyn into ~/.cargo/bin
-odyn chat`),
-      p(
-        "The app opens on an empty chat. Pick a model in the top right, and type. The CLI " +
-          "reads the same config and the same database.",
-      ),
+bun run tauri dev`),
+      p("The app opens on an empty chat. Pick a model in the top right, and type."),
     ],
   },
   {
@@ -181,7 +175,7 @@ odyn chat`),
       sub("connecting"),
       list([
         "Paste a key. A key whose shape belongs to one provider and no other — `sk-or-` is OpenRouter's, `gsk_` is Groq's — names its own; anything else is one click on a tile.",
-        "`connect` asks the endpoint what models it serves, starts you on a sensible one, and writes `[providers.<name>]` into `odyn.toml`. The name is the catalog's, so `--provider openrouter` works from the CLI immediately.",
+        "`connect` asks the endpoint what models it serves, starts you on a sensible one, and writes `[providers.<name>]` into `odyn.toml` under the catalog's own name.",
         "A key the endpoint rejects is the one refusal: nothing is written, and the key stays in the field to be fixed. An endpoint that is merely unreachable still connects — being offline now says nothing about whether the key is good.",
         "`use by default` points `default_provider` at it. It starts ticked when nothing but a local Ollama is configured, since the first key is usually the one meant to answer.",
         "Connecting an endpoint that is already there replaces its key, which is how a rotated one gets in.",
@@ -312,7 +306,7 @@ odyn chat`),
     body: () => [
       sub("a folder of notes"),
       p(
-        "The brain is a folder of markdown files — `odyn mem path` prints where, and " +
+        "The brain is a folder of markdown files — the brain view names the spot, and " +
           "`path` under `[brain]` moves it anywhere, an Obsidian vault included. One " +
           "file is one memory: the file's name is its id, the text is the memory, and " +
           "YAML frontmatter is tolerated but never injected. Write files with any " +
@@ -390,18 +384,6 @@ odyn chat`),
         "Under any answer that recalled: `◈ used cern-trip espresso-order` — the " +
           "note slugs injected for the question above it.",
       ),
-      sub("from the command line"),
-      rows([
-        ["odyn mem add <CONTENT>", "write a new note; the name is derived from the first line, or given with `--name`."],
-        ["odyn mem list", "every note, oldest first, as `<slug>  <tokens> tk  <first line>`."],
-        [
-          "odyn mem search <QUERY>",
-          "the notes closest in meaning, up to 20 — browsing is deliberately wider than injection.",
-        ],
-        ["odyn mem rm <NAME>", "delete the note's file."],
-        ["odyn mem edit <NAME> <CONTENT>", "replace a note's content; it is re-embedded on sync."],
-        ["odyn mem path", "print the brain folder."],
-      ]),
       sub("brain view — list mode"),
       p(
         "The count sits beside the title; the line under it states the brain — " +
@@ -410,8 +392,8 @@ odyn chat`),
           "One row per note; hover " +
           "reveals `✎` and `✕`, and editing happens in place — the row becomes an " +
           "input, Enter commits, Esc cancels. `+ add a note` writes a new file the " +
-          "same way. The semantic search runs the same embedding pipeline as recall " +
-          "and `odyn mem search`, so all three agree on order; results replace the " +
+          "same way. The semantic search runs the same embedding pipeline as recall, " +
+          "so the two agree on order; results replace the " +
           "list rather than filter it, and clearing the field restores browsing. The " +
           "sort word cycles `recent` → `hits` → `created`. A note recalled in the " +
           "last five minutes carries a teal `injected 2m ago` tag. The list pages in " +
@@ -435,7 +417,7 @@ odyn chat`),
       p(
         "`[brain] model` decides what turns notes and questions into vectors. " +
           "The picker in the brain view's header writes it and re-indexes on the spot; " +
-          "the same value works from `odyn config set brain.model`. Three backends:",
+          "the same value works written into `odyn.toml` by hand. Three backends:",
       ),
       rows([
         [
@@ -476,41 +458,6 @@ odyn chat`),
     ],
   },
   {
-    id: "context",
-    title: "context inspection",
-    body: () => [
-      p(
-        "`odyn ask --show-context` and `odyn chat --show-context` print the context before " +
-          "the answer. In text mode it goes to stderr, so a piped answer stays clean:",
-      ),
-      pre(`----- context -----
-## Memories
-
-### cern-trip
-went to CERN in june
-
-### espresso-order
-likes espresso, flat and short
-
-## Style
-Prefer tight fragments over full sentences. …
------ tokens (chars/4 approximation) -----
-cern-trip 5
-espresso-order 8
-memories 13/1200 tk
--------------------`),
-      list([
-        "Everything between the two rules is the system message verbatim — the exact bytes the model receives, not a summary of them.",
-        "`## Memories` carries one `### slug` section per recalled note, in walk order, formatting intact. The section is omitted entirely when the message did not mention `/brain`.",
-        "`## Style` is last and appears only when brevity is not `off`.",
-        "Then one `<slug> <tokens>` line per injected note, and the total against `cap_tokens`.",
-        "With nothing to inject the whole block is one line: `----- context: empty -----`.",
-        "Token counts are a chars/4 approximation, not the provider's tokenizer. They are consistent, not exact.",
-        "Under `--json`, this becomes one more event on the stream instead: `{\"type\":\"context\",\"system\":…,\"items\":[…]}`.",
-      ]),
-    ],
-  },
-  {
     id: "keys",
     title: "keyboard",
     body: () => [
@@ -539,62 +486,6 @@ memories 13/1200 tk
     ],
   },
   {
-    id: "cli",
-    title: "cli reference",
-    body: () => [
-      pre("odyn [--provider NAME] [--model NAME] <COMMAND>"),
-      p(
-        "`--provider` and `--model` are global and may appear before or after the " +
-          "subcommand. `--provider` defaults to `default_provider`; `--model` defaults to " +
-          "that provider's `default_model`. Exit codes: `0` success, `1` a provider or " +
-          "runtime failure, `2` anything to fix in `odyn.toml` or in the flags.",
-      ),
-      rows([
-        [
-          "odyn ask [PROMPT]",
-          "one question, streamed to stdout, then exit. With no `PROMPT` the prompt is read from stdin.",
-        ],
-        [
-          "  --json",
-          "NDJSON instead of plain text: `{\"type\":\"delta\",…}` per chunk, then `{\"type\":\"done\",\"usage\":…}`. Errors arrive as `{\"type\":\"error\",…}` on stdout, so consumers never read stderr.",
-        ],
-        [
-          "  --save",
-          "keep the exchange as a conversation, creating the database if needed. Without it, `ask` opens an existing database and otherwise stays ephemeral — asking never conjures a database.",
-        ],
-        ["  --show-context", "print the injected context before the answer."],
-        ["  --brevity LEVEL", "`off`, `lite`, `full` or `ultra`, overriding `[style] brevity` for this run."],
-        [
-          "odyn chat",
-          "the REPL, over the same streaming path. No provider or database failure inside the loop is fatal: it is reported and the prompt comes back. Ctrl-C clears the line, Ctrl-D leaves.",
-        ],
-        ["  --show-context", "print the injected context before each answer."],
-        ["  --brevity LEVEL", "the starting level for this session."],
-        ["  /model", "print the current `provider / model`."],
-        ["  /model <MODEL>", "switch model on the current provider."],
-        [
-          "  /model <PROVIDER>/<MODEL>",
-          "switch both — only when the left side names a configured provider, since model names carry slashes of their own.",
-        ],
-        ["  /new", "start a new conversation; the one being left is saved first."],
-        ["  /brevity", "print the current level."],
-        ["  /brevity <LEVEL>", "switch level for the rest of the session."],
-        ["  /quit", "leave."],
-        ["odyn config path", "print the path of `odyn.toml`."],
-        ["odyn config get <KEY>", "print the value at a dotted key, e.g. `providers.ollama.base_url`."],
-        [
-          "odyn config set <KEY> <VALUE>",
-          "set a dotted key. Numbers and booleans are stored as such, anything else as a string; comments and layout survive, and an invalid result leaves the file untouched.",
-        ],
-        [
-          "  /brain <QUESTION>",
-          "not a command — a chat message with recall on, here and in the GUI alike.",
-        ],
-        ["odyn mem …", "`add`, `list`, `search`, `rm`, `edit`, `path` — see the brain section above."],
-      ]),
-    ],
-  },
-  {
     id: "privacy",
     title: "data & privacy",
     body: () => [
@@ -619,7 +510,6 @@ memories 13/1200 tk
         "A key you paste is written to `odyn.toml` as `api_key`, and nowhere else — never to a log, and never over the wire except to the provider it belongs to. `api_key_env` keeps it out of the file entirely by naming an environment variable instead; either is read only when that provider is actually built.",
         "Memories are the files in the brain folder; `odyn.db` holds conversations, the recall records, and an index derived from those files. Deleting a note's file deletes the memory; deleting a conversation takes its messages with it.",
         "Spotlight asks are stored only when promoted; dismissing drops the exchange. What does persist is the brain's hit ledger: which notes were recalled, never what was asked.",
-        "`odyn ask` without `--save` will not create a database on a machine that never saved anything.",
       ]),
       p("Both locations can be moved:"),
       rows([

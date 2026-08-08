@@ -13,10 +13,10 @@ use crate::commands::sync_index;
 use crate::state::{AppState, Ready};
 
 const PAGE: usize = 50;
-/// Same breadth as `odyn mem search`, whose order the GUI must reproduce.
+/// Browsing is deliberately wider than injection's `top_k`.
 const SEARCH_LIMIT: usize = 20;
 /// What the brain view's field will set. Narrower than the config allows, which
-/// still takes anything from 1 up for hand-edits and `odyn config set`.
+/// still takes anything from 1 up for hand-edits.
 const TOP_K_MIN: u32 = 5;
 const TOP_K_MAX: u32 = 100;
 
@@ -245,7 +245,7 @@ pub async fn brain_memories(
     .map_err(|err| err.to_string())?
 }
 
-/// The same pipeline as chat recall and `odyn mem search`: same query, same order.
+/// The same embedding pipeline as chat recall: same query, same order.
 #[tauri::command]
 pub async fn brain_search(app: AppHandle, query: String) -> Result<Vec<MemoryRow>, String> {
     tauri::async_runtime::spawn_blocking(move || {

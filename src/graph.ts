@@ -29,7 +29,7 @@ export function renderGraph(): HTMLElement {
       el(
         "div",
         "brain-empty",
-        "the ravens haven't returned yet — drop an .md note into the brain folder, or run odyn mem add",
+        "the ravens haven't returned yet — drop an .md note into the brain folder, or add one in list mode",
       ),
     );
     return wrap;
