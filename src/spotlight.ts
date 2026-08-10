@@ -260,6 +260,7 @@ function clearScreen(): void {
   linked = [];
   unlinked = [];
   reminders = [];
+  clearDue();
   forgetTraces();
   commandMode = false;
   cursor = 0;
@@ -537,5 +538,12 @@ void listen<Due[]>("reminder-due", (event) => {
   drawDue();
 });
 
-void listen("spotlight-show", reset);
+// Hiding keeps the exchange, so a re-summon refreshes the target and leaves
+// whatever is on screen alone. Esc and promotion are what empty the panel.
+void listen("spotlight-show", () => {
+  void loadTarget();
+  if (!input.disabled) input.focus();
+});
+
+void listen("spotlight-clear", reset);
 reset();

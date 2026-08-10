@@ -22,6 +22,9 @@ use crate::state::AppState;
 const LABEL: &str = "spotlight";
 const MAIN: &str = "main";
 const EVENT: &str = "spotlight-event";
+/// Tells the panel to empty itself. Concealing deliberately does not send it:
+/// the exchange survives a click-away, and only Esc or a promotion ends one.
+const CLEARED: &str = "spotlight-clear";
 /// Every way a model fails to answer reads the same; the raw text rides `detail`.
 const UNAVAILABLE: &str = "model unavailable";
 /// Room for the 80px shadow to fade out before the window clips it square.
@@ -218,7 +221,14 @@ fn dismiss(app: &AppHandle) {
     if let Some(ask) = lock(&app.state::<AskState>().current).take() {
         abort(&ask);
     }
+    cleared(app);
     conceal(app);
+}
+
+fn cleared(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.emit(CLEARED, ());
+    }
 }
 
 /// The in-app ⌘K, doing exactly what the global hotkey does.
@@ -429,6 +439,8 @@ pub async fn spotlight_promote(
     drop(storage);
 
     let _ = app.emit_to(MAIN, "open-conversation", row.id);
+    // The exchange is a conversation now, so the panel starts empty next time.
+    cleared(&app);
     // An async command runs off the main thread, where AppKit aborts the process.
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
