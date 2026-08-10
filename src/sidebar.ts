@@ -13,7 +13,15 @@ import {
   type View,
 } from "./state";
 
-const NAV: View[] = ["home", "chat", "brain", "providers", "config", "guide"];
+const NAV: View[] = [
+  "home",
+  "chat",
+  "brain",
+  "reminders",
+  "providers",
+  "config",
+  "guide",
+];
 
 const RECENT = 7;
 

@@ -129,6 +129,10 @@ pub(crate) enum Body {
         from: String,
         to: String,
     },
+    Reminded {
+        text: String,
+        due_at: i64,
+    },
     Done {
         usage: Option<Usage>,
         interrupted: bool,
@@ -549,7 +553,14 @@ async fn run(
     }
     history.extend(prior);
     history.push(Message::new(Role::User, ask.message));
-    let tools = tools::offered(ask.memorize, ask.update, ask.delete, ask.link, ask.unlink);
+    let tools = tools::offered(
+        ask.memorize,
+        ask.update,
+        ask.delete,
+        ask.link,
+        ask.unlink,
+        ask.remind,
+    );
 
     let outcome = drive(
         &app,
@@ -575,6 +586,20 @@ async fn run(
         Outcome::Done(usage) => settle(&app, &ready, request_id, &stream, usage, false),
         Outcome::Interrupted => settle(&app, &ready, request_id, &stream, None, true),
         Outcome::Failed(message) => emit(&app, request_id, Body::error(message)),
+    }
+}
+
+/// Lends the tool loop a reminder writer instead of the storage handle: one
+/// lock per statement, and nothing held across the loop's awaits.
+pub(crate) fn reminder_sink(
+    app: &AppHandle,
+) -> impl FnMut(&str, i64) -> Result<i64, String> + Send + '_ {
+    move |text, due_at| {
+        let ready = app.state::<AppState>().inner().ready()?;
+        let stored = ready.storage().add_reminder(text, due_at);
+        stored
+            .map(|reminder| reminder.id)
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -663,7 +688,7 @@ pub(crate) async fn build_context(
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
         if !ask.any() {
-            return Some(brain::empty_context(brevity));
+            return Some(brain::empty_context(brevity, &ask));
         }
         // The folder is the truth: recall reads the files as they are now.
         if let Err(err) = sync_index(&ready) {
@@ -733,7 +758,11 @@ pub async fn context_preview(
         let cap_tokens = ready.config.brain.cap_tokens;
         // A draft without triggers previews what it would send: nothing.
         if !ask.any() {
-            return Ok(preview(brain::empty_context(brevity), cap_tokens, false));
+            return Ok(preview(
+                brain::empty_context(brevity, &ask),
+                cap_tokens,
+                false,
+            ));
         }
         sync_index(&ready)?;
         // One lock per statement — see `sync_index`.
@@ -783,12 +812,17 @@ async fn drive(
     brain_dir: &std::path::Path,
     save_temperature: f32,
 ) -> Outcome {
+    let mut sink = reminder_sink(app);
+    let mut effects = tools::Effects {
+        brain_dir,
+        set_reminder: &mut sink,
+    };
     let driven = tools::run_turn(
         provider,
         model,
         history,
         tools,
-        brain_dir,
+        &mut effects,
         save_temperature,
         |event| {
             match event {
@@ -837,6 +871,14 @@ async fn drive(
                     Body::Unlinked {
                         from: from.to_string(),
                         to: to.to_string(),
+                    },
+                ),
+                TurnEvent::Reminded { text, due_at } => emit(
+                    app,
+                    request_id,
+                    Body::Reminded {
+                        text: text.to_string(),
+                        due_at,
                     },
                 ),
             }

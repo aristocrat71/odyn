@@ -2,11 +2,11 @@
 //!
 //! Tools are offered only when the message asked for them: `/memory` earns
 //! `save_memory`, `/update-memory` earns `update_memory`, `/delete-memory`
-//! earns `delete_memory`, `/link-memory` earns `link_memory`, and
-//! `/unlink-memory` earns `unlink_memory`. One tool per trigger — small
-//! models misroute a choice between tools, so the user makes it. The index is
-//! not touched here — the folder is the truth, and the next recall or preview
-//! syncs it.
+//! earns `delete_memory`, `/link-memory` earns `link_memory`,
+//! `/unlink-memory` earns `unlink_memory`, and `/reminder` earns
+//! `set_reminder`. One tool per trigger — small models misroute a choice
+//! between tools, so the user makes it. The index is not touched here — the
+//! folder is the truth, and the next recall or preview syncs it.
 
 use std::path::Path;
 
@@ -16,12 +16,22 @@ use crate::chat::{
     ChatError, ChatEvent, ChatProvider, ChatRequest, Message, ToolCall, ToolDef, Usage,
 };
 use crate::notes::{self, NotesError};
+use crate::reminder;
+use crate::storage::now_secs;
 
 pub const SAVE_MEMORY: &str = "save_memory";
 pub const UPDATE_MEMORY: &str = "update_memory";
 pub const DELETE_MEMORY: &str = "delete_memory";
 pub const LINK_MEMORY: &str = "link_memory";
 pub const UNLINK_MEMORY: &str = "unlink_memory";
+pub const SET_REMINDER: &str = "set_reminder";
+
+/// Where a call's effects land. The caller lends a writer instead of its
+/// storage handle: that mutex must never be held across an await.
+pub struct Effects<'a> {
+    pub brain_dir: &'a Path,
+    pub set_reminder: &'a mut (dyn FnMut(&str, i64) -> Result<i64, String> + Send),
+}
 
 /// A model that keeps asking for tools is looping, not working.
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -42,6 +52,7 @@ pub enum TurnEvent<'a> {
     Deleted(&'a str),
     Linked { from: &'a str, to: &'a str },
     Unlinked { from: &'a str, to: &'a str },
+    Reminded { text: &'a str, due_at: i64 },
 }
 
 pub struct TurnReply {
@@ -57,6 +68,8 @@ pub struct TurnReply {
     pub linked: Vec<(String, String)>,
     /// `(from, to)` pairs disconnected this turn, in call order.
     pub unlinked: Vec<(String, String)>,
+    /// `(text, due_at)` reminders set this turn, in call order.
+    pub reminders: Vec<(String, i64)>,
 }
 
 pub fn save_memory_tool() -> ToolDef {
@@ -94,6 +107,7 @@ pub fn offered(
     delete: bool,
     link: bool,
     unlink: bool,
+    remind: bool,
 ) -> Vec<ToolDef> {
     let mut tools = Vec::new();
     if update {
@@ -111,7 +125,44 @@ pub fn offered(
     if unlink {
         tools.push(unlink_memory_tool());
     }
+    if remind {
+        tools.push(set_reminder_tool());
+    }
     tools
+}
+
+/// Both times are offered because users phrase it both ways; `in_minutes` is
+/// preferred on resolution, needing no reference clock.
+pub fn set_reminder_tool() -> ToolDef {
+    ToolDef {
+        name: SET_REMINDER.to_string(),
+        description: "Set a reminder that will be shown back to the user at a \
+                      given time."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "What to tell the user when it goes off, in a few \
+                                    words: call mum, leave for the airport."
+                },
+                "in_minutes": {
+                    "type": "integer",
+                    "description": "Whole minutes from now. Use this whenever the user \
+                                    said how long from now: in 20 minutes is 20, in an \
+                                    hour and a half is 90."
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": "Local date and time as YYYY-MM-DD HH:MM on a 24-hour \
+                                    clock. Only for a named day or clock time, and only \
+                                    when in_minutes does not fit."
+                }
+            },
+            "required": ["text"]
+        }),
+    }
 }
 
 pub fn unlink_memory_tool() -> ToolDef {
@@ -213,7 +264,7 @@ pub async fn run_turn(
     model: &str,
     mut messages: Vec<Message>,
     tools: &[ToolDef],
-    brain_dir: &Path,
+    effects: &mut Effects<'_>,
     temperature: f32,
     mut emit: impl FnMut(TurnEvent<'_>) -> std::io::Result<()>,
 ) -> Result<TurnReply, TurnError> {
@@ -224,6 +275,7 @@ pub async fn run_turn(
     let mut deleted = Vec::new();
     let mut linked = Vec::new();
     let mut unlinked = Vec::new();
+    let mut reminders = Vec::new();
     for _ in 0..=MAX_TOOL_ROUNDS {
         let mut round_text = String::new();
         let mut calls = Vec::new();
@@ -256,7 +308,7 @@ pub async fn run_turn(
         let mut clean = Vec::new();
         let mut failed = false;
         for call in calls {
-            let (result, written) = run_tool(brain_dir, &call);
+            let (result, written) = run_tool(effects, &call);
             match written {
                 Some(Written::Saved(slug)) => {
                     emit(TurnEvent::Saved(&slug)).map_err(TurnError::Write)?;
@@ -291,6 +343,15 @@ pub async fn run_turn(
                     unlinked.push((from, to));
                     clean.push(result.clone());
                 }
+                Some(Written::Reminded(text, due_at)) => {
+                    emit(TurnEvent::Reminded {
+                        text: &text,
+                        due_at,
+                    })
+                    .map_err(TurnError::Write)?;
+                    reminders.push((text, due_at));
+                    clean.push(result.clone());
+                }
                 None => failed = true,
             }
             messages.push(Message::tool_result(call, result));
@@ -319,28 +380,62 @@ pub async fn run_turn(
         deleted,
         linked,
         unlinked,
+        reminders,
     })
 }
 
-/// What a call did to the folder, for the trace events.
+/// What a call did, for the trace events.
 enum Written {
     Saved(String),
     Updated(String),
     Deleted(String),
     Linked(String, String),
     Unlinked(String, String),
+    Reminded(String, i64),
 }
 
 /// Answers the call with a result the model can read; a bad call gets its error
 /// the same way, never a failed turn.
-fn run_tool(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
+fn run_tool(effects: &mut Effects<'_>, call: &ToolCall) -> (String, Option<Written>) {
     match call.name.as_str() {
-        SAVE_MEMORY => save(brain_dir, call),
-        UPDATE_MEMORY => update(brain_dir, call),
-        DELETE_MEMORY => delete(brain_dir, call),
-        LINK_MEMORY => link(brain_dir, call),
-        UNLINK_MEMORY => unlink(brain_dir, call),
+        SAVE_MEMORY => save(effects.brain_dir, call),
+        UPDATE_MEMORY => update(effects.brain_dir, call),
+        DELETE_MEMORY => delete(effects.brain_dir, call),
+        LINK_MEMORY => link(effects.brain_dir, call),
+        UNLINK_MEMORY => unlink(effects.brain_dir, call),
+        SET_REMINDER => remind(effects, call),
         other => (format!("error: no tool named `{other}`"), None),
+    }
+}
+
+/// Written before the model is told, so a confirmation never promises a
+/// reminder the database refused.
+fn remind(effects: &mut Effects<'_>, call: &ToolCall) -> (String, Option<Written>) {
+    let Some(text) = text_arg(call, "text") else {
+        return (
+            "error: set_reminder needs a non-empty string `text`".to_string(),
+            None,
+        );
+    };
+    let due = match reminder::resolve_due(
+        now_secs(),
+        int_arg(call, "in_minutes"),
+        text_arg(call, "due_at"),
+    ) {
+        Ok(due) => due,
+        Err(err) => return (format!("error: {err}"), None),
+    };
+    match (effects.set_reminder)(text, due) {
+        Ok(_) => {
+            let stamp = reminder::local_stamp(due);
+            let confirmation = if stamp.is_empty() {
+                format!("reminder set: {text}")
+            } else {
+                format!("reminder set for {stamp}: {text}")
+            };
+            (confirmation, Some(Written::Reminded(text.to_string(), due)))
+        }
+        Err(err) => (format!("error: {err}"), None),
     }
 }
 
@@ -440,11 +535,27 @@ fn unlink(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
     }
 }
 
+#[cfg(test)]
+/// A reminder call in a folder-only test would be a routing bug.
+fn refuse_reminders() -> impl FnMut(&str, i64) -> Result<i64, String> {
+    |_, _| Err("this turn should not have set a reminder".to_string())
+}
+
 fn text_arg<'a>(call: &'a ToolCall, name: &str) -> Option<&'a str> {
     call.arguments
         .get(name)
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
+}
+
+/// Small models quote numbers as often as they send them, and some send a
+/// whole number as a float; all three read the same.
+fn int_arg(call: &ToolCall, name: &str) -> Option<i64> {
+    let value = call.arguments.get(name)?;
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|number| number as i64))
+        .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
 fn add_usage(total: Option<Usage>, reported: Option<Usage>) -> Option<Usage> {
@@ -549,6 +660,7 @@ mod tests {
         written.map(|written| match written {
             Written::Saved(slug) | Written::Updated(slug) | Written::Deleted(slug) => slug,
             Written::Linked(from, to) | Written::Unlinked(from, to) => format!("{from}->{to}"),
+            Written::Reminded(text, due_at) => format!("{text}@{due_at}"),
         })
     }
 
@@ -560,6 +672,7 @@ mod tests {
             TurnEvent::Deleted(slug) => format!("deleted:{slug}"),
             TurnEvent::Linked { from, to } => format!("linked:{from}->{to}"),
             TurnEvent::Unlinked { from, to } => format!("unlinked:{from}->{to}"),
+            TurnEvent::Reminded { text, due_at } => format!("reminded:{text}@{due_at}"),
         }
     }
 
@@ -568,6 +681,11 @@ mod tests {
     #[test]
     fn a_save_call_writes_the_note_and_ends_the_turn_with_its_own_confirmation() {
         let dir = TempDir::new("save");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         let asked = call(serde_json::json!({
             "content": "Mitul takes espresso, no sugar.",
             "slug": "espresso"
@@ -580,7 +698,7 @@ mod tests {
             "llama3.2:3b",
             messages.clone(),
             &[save_memory_tool()],
-            &dir.0,
+            &mut effects,
             0.3,
             |event| {
                 seen.push(label(event));
@@ -620,6 +738,11 @@ mod tests {
     #[test]
     fn a_failed_call_in_a_round_keeps_the_model_in_the_loop() {
         let dir = TempDir::new("mixed");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         let good = call(serde_json::json!({
             "content": "Espresso, no sugar.",
             "slug": "espresso"
@@ -646,7 +769,7 @@ mod tests {
             "llama3.2:3b",
             vec![Message::new(Role::User, "remember and update")],
             &[save_memory_tool(), update_memory_tool()],
-            &dir.0,
+            &mut effects,
             0.3,
             |_| Ok(()),
         ))
@@ -661,6 +784,11 @@ mod tests {
     #[test]
     fn a_bad_call_answers_with_an_error_instead_of_failing_the_turn() {
         let dir = TempDir::new("bad");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         let provider = Scripted::new(vec![
             vec![
                 Ok(ChatEvent::ToolCall(call(serde_json::json!({"slug": "x"})))),
@@ -676,7 +804,7 @@ mod tests {
             "llama3.2:3b",
             vec![Message::new(Role::User, "/memory")],
             &[save_memory_tool()],
-            &dir.0,
+            &mut effects,
             0.3,
             |_| Ok(()),
         ))
@@ -693,9 +821,14 @@ mod tests {
     #[test]
     fn a_taken_slug_falls_back_to_a_derived_one() {
         let dir = TempDir::new("taken");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         notes::write_note(&dir.0, Some("espresso"), "already here").expect("seed");
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &call(serde_json::json!({"content": "Fresh note.", "slug": "espresso"})),
         );
         assert_eq!(slug_of(written).as_deref(), Some("fresh-note"));
@@ -711,6 +844,11 @@ mod tests {
     #[test]
     fn an_update_call_rewrites_the_note_in_place() {
         let dir = TempDir::new("update");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         notes::write_note(&dir.0, Some("car-keys"), "Car keys are on the desk.").expect("seed");
         let asked = named_call(
             UPDATE_MEMORY,
@@ -727,7 +865,7 @@ mod tests {
             "llama3.2:3b",
             vec![Message::new(Role::User, "my keys moved")],
             &[save_memory_tool(), update_memory_tool()],
-            &dir.0,
+            &mut effects,
             0.3,
             |event| {
                 seen.push(label(event));
@@ -762,9 +900,14 @@ mod tests {
     #[test]
     fn a_delete_call_trashes_the_note_and_reports_it() {
         let dir = TempDir::new("delete");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         notes::write_note(&dir.0, Some("car-keys"), "on the desk").expect("seed");
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &named_call(DELETE_MEMORY, serde_json::json!({"slug": "car-keys"})),
         );
         assert_eq!(slug_of(written).as_deref(), Some("car-keys"));
@@ -776,7 +919,7 @@ mod tests {
         );
 
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &named_call(DELETE_MEMORY, serde_json::json!({"slug": "ghost"})),
         );
         assert!(slug_of(written).is_none());
@@ -788,6 +931,11 @@ mod tests {
     #[test]
     fn a_link_call_connects_the_pair_and_repeats_are_not_errors() {
         let dir = TempDir::new("link");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         notes::write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("seed");
         notes::write_note(&dir.0, Some("mitul"), "The user.").expect("seed");
         let asked = named_call(
@@ -801,7 +949,7 @@ mod tests {
             "llama3.2:3b",
             vec![Message::new(Role::User, "connect those two")],
             &[link_memory_tool()],
-            &dir.0,
+            &mut effects,
             0.3,
             |event| {
                 seen.push(label(event));
@@ -825,7 +973,7 @@ mod tests {
         );
 
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &named_call(
                 LINK_MEMORY,
                 serde_json::json!({"from": "football", "to": "mitul"}),
@@ -835,7 +983,7 @@ mod tests {
         assert_eq!(result, "football already links to mitul");
 
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &named_call(
                 LINK_MEMORY,
                 serde_json::json!({"from": "ghost", "to": "mitul"}),
@@ -848,6 +996,11 @@ mod tests {
     #[test]
     fn an_unlink_call_removes_the_edge_and_a_missing_one_is_not_an_error() {
         let dir = TempDir::new("unlink");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         notes::write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("seed");
         notes::write_note(&dir.0, Some("mitul"), "The user.").expect("seed");
         notes::link_note(&dir.0, "football", "mitul").expect("seed link");
@@ -862,7 +1015,7 @@ mod tests {
             "llama3.2:3b",
             vec![Message::new(Role::User, "those two are unrelated")],
             &[unlink_memory_tool()],
-            &dir.0,
+            &mut effects,
             0.3,
             |event| {
                 seen.push(label(event));
@@ -890,7 +1043,7 @@ mod tests {
         );
 
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &named_call(
                 UNLINK_MEMORY,
                 serde_json::json!({"from": "football", "to": "mitul"}),
@@ -900,7 +1053,7 @@ mod tests {
         assert_eq!(result, "football does not link to mitul");
 
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &named_call(
                 UNLINK_MEMORY,
                 serde_json::json!({"from": "ghost", "to": "mitul"}),
@@ -913,8 +1066,13 @@ mod tests {
     #[test]
     fn an_update_of_a_missing_note_answers_with_an_error() {
         let dir = TempDir::new("update-missing");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         let (result, written) = run_tool(
-            &dir.0,
+            &mut effects,
             &named_call(
                 UPDATE_MEMORY,
                 serde_json::json!({"slug": "nowhere", "content": "anything"}),
@@ -926,8 +1084,86 @@ mod tests {
     }
 
     #[test]
+    fn a_reminder_is_stored_before_it_is_confirmed() {
+        let dir = TempDir::new("remind");
+        let mut stored: Vec<(String, i64)> = Vec::new();
+        let asked = named_call(
+            SET_REMINDER,
+            serde_json::json!({"text": "call mum", "in_minutes": "30"}),
+        );
+        let provider = Scripted::new(vec![vec![Ok(ChatEvent::ToolCall(asked)), done()]]);
+        let mut seen = Vec::new();
+        let reply = {
+            let mut sink = |text: &str, due_at: i64| {
+                stored.push((text.to_string(), due_at));
+                Ok(1)
+            };
+            let mut effects = Effects {
+                brain_dir: &dir.0,
+                set_reminder: &mut sink,
+            };
+            block_on(run_turn(
+                &provider,
+                "llama3.2:3b",
+                vec![Message::new(Role::User, "remind me to call mum in 30")],
+                &[set_reminder_tool()],
+                &mut effects,
+                0.3,
+                |event| {
+                    seen.push(label(event));
+                    Ok(())
+                },
+            ))
+            .expect("turn")
+        };
+
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].0, "call mum");
+        assert_eq!(reply.reminders.len(), 1);
+        assert!(reply.text.starts_with("reminder set"), "{}", reply.text);
+        assert!(seen.iter().any(|event| event.starts_with("reminded:")));
+    }
+
+    #[test]
+    fn a_reminder_the_clock_refuses_never_reaches_the_store() {
+        let dir = TempDir::new("remind-bad");
+        let mut calls = 0;
+        let (result, written, missing) = {
+            let mut sink = |_: &str, _: i64| {
+                calls += 1;
+                Ok(1)
+            };
+            let mut effects = Effects {
+                brain_dir: &dir.0,
+                set_reminder: &mut sink,
+            };
+            let (result, written) = run_tool(
+                &mut effects,
+                &named_call(
+                    SET_REMINDER,
+                    serde_json::json!({"text": "too late", "due_at": "2020-01-01 09:00"}),
+                ),
+            );
+            let (missing, _) = run_tool(
+                &mut effects,
+                &named_call(SET_REMINDER, serde_json::json!({"text": "when?"})),
+            );
+            (result, written, missing)
+        };
+        assert!(written.is_none());
+        assert!(result.starts_with("error:"), "{result}");
+        assert!(missing.starts_with("error:"), "{missing}");
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
     fn no_tools_means_exactly_one_request() {
         let dir = TempDir::new("plain");
+        let mut sink = refuse_reminders();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            set_reminder: &mut sink,
+        };
         let provider = Scripted::new(vec![vec![
             Ok(ChatEvent::TextDelta("hi".to_string())),
             done(),
@@ -937,7 +1173,7 @@ mod tests {
             "llama3.2:3b",
             vec![Message::new(Role::User, "hello")],
             &[],
-            &dir.0,
+            &mut effects,
             0.3,
             |_| Ok(()),
         ))

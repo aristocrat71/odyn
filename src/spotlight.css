@@ -368,3 +368,66 @@ button {
   font-size: 12px;
   color: var(--epi);
 }
+
+#spot-due {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 34px 24px 30px;
+  text-align: center;
+  font-family: var(--mono);
+}
+
+/* An id selector outranks the `[hidden]` rule the attribute relies on, so the
+   empty container would hold its padding open on every summon. */
+#spot-due[hidden] {
+  display: none;
+}
+
+.spot-due-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.spot-due-mark {
+  color: var(--epi);
+  font-size: 17px;
+}
+
+.spot-due-text {
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.spot-due-at {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.spot-due-clear {
+  padding: 11px 30px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--bg-soft);
+  box-shadow: var(--ring);
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.spot-due-clear:hover {
+  color: var(--ink);
+}
+
+/* A reminder owns the panel while it is up: nothing else is reachable. */
+.spot-surface.due-only .spot-field,
+.spot-surface.due-only .spot-foot,
+.spot-surface.due-only #spot-ledger,
+.spot-surface.due-only #spot-results {
+  display: none;
+}

@@ -175,6 +175,20 @@ fn defer(app: &AppHandle, act: fn(&AppHandle)) {
     });
 }
 
+/// Summons the panel for a due reminder, leaving any current ask alone.
+pub(crate) fn show_for_reminder(app: &AppHandle) {
+    defer(app, summon);
+}
+
+fn summon(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(LABEL).or_else(|| build(app)) else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        present(app, &window);
+    }
+}
+
 fn toggle(app: &AppHandle) {
     let Some(window) = app.get_webview_window(LABEL).or_else(|| build(app)) else {
         return;
@@ -484,6 +498,7 @@ async fn run(
     let delete = ask.delete;
     let link = ask.link;
     let unlink = ask.unlink;
+    let remind = ask.remind;
     let mut history = vec![Message::new(Role::User, ask.message.clone())];
     if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
         *lock(&shared.injected) = context.memory_ids();
@@ -508,15 +523,20 @@ async fn run(
             history.insert(0, Message::new(Role::System, context.system_message));
         }
     }
-    let tools = odyn_core::tools::offered(memorize, update, delete, link, unlink);
+    let tools = odyn_core::tools::offered(memorize, update, delete, link, unlink, remind);
     // A model that says nothing is as unusable as one that errored.
     let mut spoke = false;
+    let mut sink = crate::commands::reminder_sink(&app);
+    let mut effects = odyn_core::tools::Effects {
+        brain_dir: &brain_dir,
+        set_reminder: &mut sink,
+    };
     let driven = odyn_core::tools::run_turn(
         provider.as_ref(),
         &model,
         history,
         &tools,
-        &brain_dir,
+        &mut effects,
         save_temperature,
         |event| {
             match event {
@@ -566,6 +586,14 @@ async fn run(
                     Body::Unlinked {
                         from: from.to_string(),
                         to: to.to_string(),
+                    },
+                ),
+                TurnEvent::Reminded { text, due_at } => emit(
+                    &app,
+                    request_id,
+                    Body::Reminded {
+                        text: text.to_string(),
+                        due_at,
                     },
                 ),
             }

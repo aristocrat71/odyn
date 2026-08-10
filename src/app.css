@@ -2042,3 +2042,109 @@ g.labeled .gnode-epi text {
   font-size: 11.5px;
   color: var(--dim);
 }
+
+.reminders {
+  max-width: 720px;
+}
+
+.reminders-section {
+  margin-bottom: 34px;
+}
+
+.reminders-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.rem-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 16px;
+  min-width: 0;
+}
+
+.rem-mark {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.rem-mark.epi {
+  color: var(--epi);
+}
+
+.rem-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rem-until {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--epi);
+}
+
+.rem-at {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.rem-row.past .rem-text {
+  color: var(--dim);
+}
+
+.rem-actions {
+  flex: none;
+  opacity: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  transition: opacity 150ms ease;
+}
+
+.rem-row:hover .rem-actions,
+.rem-row:focus-within .rem-actions {
+  opacity: 1;
+}
+
+.rem-delete {
+  font: inherit;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.rem-delete:hover {
+  color: var(--danger);
+}
+
+.reminders-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 80px;
+  text-align: center;
+  color: var(--dim);
+}
+
+.reminders-rune {
+  font-size: 26px;
+  color: var(--faint);
+}
+
+.reminders-hint {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+}

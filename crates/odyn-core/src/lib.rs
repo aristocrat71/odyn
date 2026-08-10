@@ -11,6 +11,7 @@ pub mod graph;
 pub mod notes;
 pub mod providers;
 pub mod reasoning;
+pub mod reminder;
 pub mod storage;
 pub mod tools;
 

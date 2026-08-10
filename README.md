@@ -166,7 +166,11 @@ so "this changed" rewrites the note it belongs to; `/delete-memory` hands it
 `delete_memory`, which moves the note to `.trash` in the brain folder; and
 `/link-memory` hands it `link_memory`, which writes a `[[wikilink]]` into one
 note pointing at another; and `/unlink-memory` hands it `unlink_memory`,
-which takes that edge back out. A turn with a tool recalls wider than `/brain` does
+which takes that edge back out. `/reminder` is the one mention that reads
+nothing: it hands the model `set_reminder`, which writes a row rather than a
+note, so the turn never loads the embedder. Due reminders take over the
+spotlight panel until dismissed; `/view-reminders` lists what is waiting and
+what has already been shown, and cancels any of the former. A turn with a memory tool recalls wider than `/brain` does
 — no relevance floor, no `top_k` limit, just the token cap — and is also given
 every memory's name, because its job is finding the right note rather than
 answering from the best few. One tool per mention — the choice between them is yours, not the model's. A stale `[memory]` section from brain v1 still

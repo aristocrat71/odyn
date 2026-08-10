@@ -1,10 +1,12 @@
 import * as api from "./api";
+import { dueLabel } from "./due";
 
 export const VIEWS = [
   "home",
   "chat",
   "conversations",
   "brain",
+  "reminders",
   "providers",
   "config",
   "guide",
@@ -32,6 +34,8 @@ export type Stream = {
   linked: string[];
   // `from → to` pairs it disconnected.
   unlinked: string[];
+  // Reminders set this reply, already rendered as local time.
+  reminders: string[];
 };
 
 // The backend's refusal when a conversation has no model; picking one clears it.
@@ -78,6 +82,9 @@ export const state = {
   },
   config: {
     file: null as api.ConfigFile | null,
+  },
+  reminders: {
+    list: null as api.ReminderList | null,
   },
   providers: {
     entries: null as api.ProviderEntry[] | null,
@@ -152,6 +159,7 @@ export function setView(view: View): void {
   if (view === "brain") void loadBrain();
   // Re-read on every open, so an edit made outside the app is on screen.
   if (view === "config") void loadConfig();
+  if (view === "reminders") void loadReminders();
   if (view === "providers") void loadProvidersConfig();
   render();
 }
@@ -312,6 +320,7 @@ async function start(prompt: string, retry: boolean): Promise<void> {
     deleted: [],
     linked: [],
     unlinked: [],
+    reminders: [],
   };
   state.stream = stream;
   render();
@@ -372,6 +381,11 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   if (event.kind === "unlinked") {
     stream.unlinked.push(`${event.from} ⇢ ${event.to}`);
+    render();
+    return;
+  }
+  if (event.kind === "reminded") {
+    stream.reminders.push(`${event.text} · ${dueLabel(event.due_at)}`);
     render();
     return;
   }
@@ -535,6 +549,17 @@ export const removeMemory = (slug: string): Promise<void> =>
   guard(async () => {
     await api.brainDeleteNote(slug);
     await loadBrain();
+  });
+
+export const loadReminders = (): Promise<void> =>
+  guard(async () => {
+    state.reminders.list = await api.remindersList();
+  });
+
+export const cancelReminder = (id: number): Promise<void> =>
+  guard(async () => {
+    await api.reminderDelete(id);
+    await loadReminders();
   });
 
 export const loadConfig = (): Promise<void> =>
