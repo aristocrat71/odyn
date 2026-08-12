@@ -14,6 +14,7 @@ const COMMANDS: Command[] = [
   { cmd: "/chat", view: "chat", hint: "the conversation" },
   { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
   { cmd: "/brain", view: "brain", hint: "what odyn remembers" },
+  { cmd: "/view-reminders", view: "reminders", hint: "what odyn will remind you of" },
   { cmd: "/guide", view: "guide", hint: "how everything works" },
   { cmd: "/config", view: "config", hint: "the file behind it all" },
 ];

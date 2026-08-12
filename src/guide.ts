@@ -368,6 +368,39 @@ bun run tauri dev`),
           "write. It never touches the brain without these mentions, and all of " +
           "them need a model that supports tool calls (llama3.2 does).",
       ),
+      sub("reminders"),
+      p(
+        "Mention `/reminder` and the model is handed `set_reminder` for that " +
+          "turn: \"remind me to call mum in 20 minutes\" becomes a row with a " +
+          "time on it. It is the one mention that reads nothing from the brain — " +
+          "a reminder is not written from memory — so the turn never loads the " +
+          "embedder and recalls no notes. The model gives the time either as " +
+          "minutes from now or as a date and time; minutes are preferred, since " +
+          "they need no reference clock and so cannot land on the wrong day, and " +
+          "the current local time is stated in the prompt for when they do not " +
+          "fit. A time already past, or one years away, comes back as an error " +
+          "the model can read and correct rather than a reminder set wrong.",
+      ),
+      p(
+        "The reminders view — `/view-reminders`, or the sidebar — lists what is " +
+          "still waiting, soonest first, with how far off each one is, and the " +
+          "last fifty already shown below that. Hovering a waiting row gives you " +
+          "a ✕ to cancel it; unlike a note there is no `.trash`, because setting " +
+          "one again costs a sentence.",
+      ),
+      p(
+        "When one comes due, spotlight appears with it and takes over the panel " +
+          "— no field, no footer, just the reminder and a dismiss button, so " +
+          "there is nothing to do but read it. Odyn checks every 20 " +
+          "seconds or so while it is running, which is what the tray icon is for: " +
+          "closing the window hides it, it does not quit. Nothing fires while odyn " +
+          "is actually quit — but nothing is lost either, because anything that " +
+          "came due meanwhile is shown the next time it starts. A reminder is " +
+          "marked shown only once the panel has taken it, so one you never saw " +
+          "survives to the next launch. Reminders live in the database rather " +
+          "than the brain folder: they are state with a deadline, not memories, " +
+          "and they never enter recall.",
+      ),
       sub("the ledger"),
       p(
         "One mono line fused to the top of the composer, which is not a " +

@@ -13,11 +13,13 @@ import { renderSidebar } from "./sidebar";
 import {
   isView,
   load,
+  loadReminders,
   newConversation,
   onChange,
   refreshStatus,
   selectConversation,
   setView,
+  state,
   watchStream,
 } from "./state";
 import { renderView } from "./view";
@@ -74,7 +76,11 @@ watchStream();
 void load();
 void refreshStatus();
 
-window.addEventListener("focus", refreshLedger);
+window.addEventListener("focus", () => {
+  refreshLedger();
+  // One may have fired or been set elsewhere while the window was away.
+  if (state.view === "reminders") void loadReminders();
+});
 
 // A promoted spotlight exchange lands here as a ready-made conversation.
 void listen<number>("open-conversation", async (event) => {

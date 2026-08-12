@@ -4,7 +4,7 @@
 //! schema is versioned through `PRAGMA user_version` and migrated at open.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{params, Connection, Row, TransactionBehavior};
@@ -13,8 +13,10 @@ use crate::brevity::Brevity;
 use crate::chat::{Role, Usage};
 
 mod memory;
+mod reminder;
 
 pub use memory::{Injection, Memory, MemorySort, MemoryStats, NotePlan};
+pub use reminder::Reminder;
 
 #[cfg(test)]
 pub(crate) use memory::tests as memory_tests;
@@ -134,6 +136,19 @@ DROP TABLE injections;
 ALTER TABLE injections_next RENAME TO injections;
 DELETE FROM graph_cache;
 ",
+    // Reminders are state with a deadline rather than memories, so they live in
+    // rows and not in the brain folder. The partial index is what the scheduler
+    // asks for the next wake-up, which happens on every write.
+    r"
+CREATE TABLE reminders (
+    id         INTEGER PRIMARY KEY,
+    text       TEXT    NOT NULL,
+    due_at     INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    fired_at   INTEGER
+);
+CREATE INDEX reminders_pending ON reminders(due_at) WHERE fired_at IS NULL;
+",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -157,6 +172,8 @@ pub enum StorageError {
     EmbeddingDimensions { expected: usize, got: usize },
     #[error("note `{0}` changed but no embedding for it was given")]
     MissingEmbedding(String),
+    #[error("a reminder needs something to say")]
+    EmptyReminder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,11 +476,8 @@ fn found(changed: usize, id: i64) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or_default()
+pub(crate) fn now_secs() -> i64 {
+    crate::reminder::now_secs()
 }
 
 fn to_conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {

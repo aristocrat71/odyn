@@ -27,6 +27,9 @@ pub const DELETE: &str = "/delete-memory";
 pub const LINK: &str = "/link-memory";
 /// The mention that asks the model to disconnect two memories this turn.
 pub const UNLINK: &str = "/unlink-memory";
+/// The mention that asks the model to set a reminder this turn. Alone among
+/// the triggers it reads nothing from the brain.
+pub const REMIND: &str = "/reminder";
 
 /// Two turns of history join the retrieval query.
 const QUERY_MESSAGES: usize = 4;
@@ -71,11 +74,13 @@ pub struct Ask {
     pub link: bool,
     /// Whether the model is handed `unlink_memory` this turn.
     pub unlink: bool,
+    /// Whether the model is handed `set_reminder` this turn.
+    pub remind: bool,
 }
 
 impl Ask {
-    /// Whether any trigger fired. Every trigger recalls, so this is also what
-    /// decides whether a turn touches the brain at all.
+    /// Whether the turn reads the brain. `/reminder` is deliberately absent:
+    /// a reminder is not written from memory, so it must not load the embedder.
     pub fn any(&self) -> bool {
         self.recall || self.writes()
     }
@@ -96,17 +101,24 @@ struct Mentions {
     delete: bool,
     link: bool,
     unlink: bool,
+    remind: bool,
 }
 
 impl Mentions {
     fn any(&self) -> bool {
-        self.recall || self.memorize || self.update || self.delete || self.link || self.unlink
+        self.recall
+            || self.memorize
+            || self.update
+            || self.delete
+            || self.link
+            || self.unlink
+            || self.remind
     }
 }
 
 /// Finds a whitespace-delimited `/brain`, `/memory`, `/update-memory`,
-/// `/delete-memory`, `/link-memory` or `/unlink-memory` anywhere in the
-/// message, case insensitively, tolerating trailing punctuation. Each token
+/// `/delete-memory`, `/link-memory`, `/unlink-memory` or `/reminder` anywhere in
+/// the message, case insensitively, tolerating trailing punctuation. Each token
 /// and the whitespace after it are removed; everything else stays byte-for-byte.
 pub fn parse_ask(text: &str) -> Ask {
     let mut cleaned = String::with_capacity(text.len());
@@ -130,6 +142,8 @@ pub fn parse_ask(text: &str) -> Ask {
             Some(&mut found.link)
         } else if trailer.eq_ignore_ascii_case(UNLINK) {
             Some(&mut found.unlink)
+        } else if trailer.eq_ignore_ascii_case(REMIND) {
+            Some(&mut found.remind)
         } else {
             None
         };
@@ -170,6 +184,7 @@ pub fn parse_ask(text: &str) -> Ask {
             delete: found.delete,
             link: found.link,
             unlink: found.unlink,
+            remind: found.remind,
         };
     }
     Ask {
@@ -185,6 +200,7 @@ pub fn parse_ask(text: &str) -> Ask {
         delete: found.delete,
         link: found.link,
         unlink: found.unlink,
+        remind: found.remind,
     }
 }
 
@@ -208,13 +224,23 @@ impl InjectedContext {
     }
 }
 
-/// Context for a turn with no triggers: no memories, style directive only.
-/// Also the fallback when the brain cannot run.
-pub fn empty_context(brevity: Brevity) -> InjectedContext {
+/// For a turn that recalls nothing but still earns a task section, and the
+/// fallback when the brain cannot run.
+pub fn empty_context(brevity: Brevity, ask: &Ask) -> InjectedContext {
+    let tasks = Tasks::from(ask);
     InjectedContext {
         memories: Vec::new(),
-        system_message: render(&[], &[], brevity, Tasks::default()),
+        system_message: render(&[], &[], brevity, tasks, &clock(tasks)),
         tokens: 0,
+    }
+}
+
+/// The wall clock, read only by a turn whose sections quote it.
+fn clock(tasks: Tasks) -> String {
+    if tasks.reminding {
+        crate::reminder::local_now()
+    } else {
+        String::new()
     }
 }
 
@@ -368,8 +394,9 @@ where
     } else {
         Vec::new()
     };
+    let tasks = Tasks::from(ask);
     Ok(InjectedContext {
-        system_message: render(&kept, &names, brevity, Tasks::from(ask)),
+        system_message: render(&kept, &names, brevity, tasks, &clock(tasks)),
         memories: kept,
         tokens,
     })
@@ -384,6 +411,7 @@ struct Tasks {
     deleting: bool,
     linking: bool,
     unlinking: bool,
+    reminding: bool,
 }
 
 impl From<&Ask> for Tasks {
@@ -394,6 +422,7 @@ impl From<&Ask> for Tasks {
             deleting: ask.delete,
             linking: ask.link,
             unlinking: ask.unlink,
+            reminding: ask.remind,
         }
     }
 }
@@ -577,10 +606,25 @@ mitul. If the two memories the user means are not both above, say so in one \
 line and call nothing. Otherwise confirm in one line without repeating the \
 other memories.";
 
+const REMINDING: &str = "The user asked you to set a reminder. Call \
+set_reminder with `text` — what they should be told when it goes off, in a few \
+words — and exactly one time: `in_minutes` for anything measured from now, \
+`due_at` as YYYY-MM-DD HH:MM for a named day or clock time. Prefer \
+`in_minutes` whenever the user said how long from now — for \"remind me in \
+half an hour to call mum\", text is \"call mum\" and in_minutes is 30. Then \
+confirm in one line.";
+
 /// The injected system message, golden-tested byte for byte: `## Memories`
 /// (omitted when empty), `## Memory names` on a write turn, a task section per
-/// mentioned trigger, then `## Style`.
-fn render(memories: &[Memory], names: &[String], brevity: Brevity, tasks: Tasks) -> String {
+/// mentioned trigger, then `## Style`. `now` is the local wall clock the
+/// reminder section quotes, and is read only when that section is rendered.
+fn render(
+    memories: &[Memory],
+    names: &[String],
+    brevity: Brevity,
+    tasks: Tasks,
+    now: &str,
+) -> String {
     let mut sections = Vec::new();
     if !memories.is_empty() {
         let mut lines = vec![format!("## Memories\n{PREAMBLE}")];
@@ -613,6 +657,13 @@ fn render(memories: &[Memory], names: &[String], brevity: Brevity, tasks: Tasks)
     }
     if tasks.unlinking {
         sections.push(format!("## Unlinking\n{UNLINKING}"));
+    }
+    if tasks.reminding {
+        let mut section = format!("## Reminders\n{REMINDING}");
+        if !now.is_empty() {
+            section.push_str(&format!("\nThe current local time is {now}."));
+        }
+        sections.push(section);
     }
     if let Some(directive) = brevity.directive() {
         sections.push(format!("## Style\n{directive}"));
@@ -708,6 +759,7 @@ mod tests {
             delete: false,
             link: false,
             unlink: false,
+            remind: false,
         }
     }
 
@@ -734,6 +786,7 @@ mod tests {
                 delete: false,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
         // Only the trigger: recall runs on history alone, message stays non-empty.
@@ -748,6 +801,7 @@ mod tests {
                 delete: false,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
     }
@@ -765,6 +819,7 @@ mod tests {
                 delete: false,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
         assert_eq!(
@@ -778,6 +833,7 @@ mod tests {
                 delete: false,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
         assert_eq!(
@@ -791,6 +847,7 @@ mod tests {
                 delete: false,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
     }
@@ -808,6 +865,7 @@ mod tests {
                 delete: true,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
     }
@@ -828,6 +886,7 @@ mod tests {
                 delete: false,
                 link: true,
                 unlink: false,
+                remind: false,
             }
         );
         assert!(ask.any(), "a link turn touches the brain");
@@ -884,6 +943,7 @@ mod tests {
                 delete: false,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
         assert_eq!(
@@ -897,6 +957,7 @@ mod tests {
                 delete: false,
                 link: false,
                 unlink: false,
+                remind: false,
             }
         );
     }
@@ -923,6 +984,7 @@ mod tests {
             delete: false,
             link: false,
             unlink: false,
+            remind: false,
         };
         let context =
             build_context(Some(&storage), &config, &[], &ask, Brevity::Off, never).expect("build");
@@ -1051,6 +1113,7 @@ mod tests {
             delete: true,
             link: false,
             unlink: false,
+            remind: false,
         };
         let context = build_context(None, &config, &[], &ask, Brevity::Off, never).expect("build");
         assert!(context.system_message.contains("note-000, note-001"));
@@ -1072,6 +1135,7 @@ mod tests {
             delete: false,
             link: false,
             unlink: false,
+            remind: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1106,6 +1170,7 @@ mod tests {
             delete: true,
             link: false,
             unlink: false,
+            remind: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1146,6 +1211,7 @@ mod tests {
             delete: false,
             link: false,
             unlink: false,
+            remind: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1161,6 +1227,59 @@ mod tests {
         assert!(context
             .system_message
             .contains("## Saving\nThe user asked you to save a memory."));
+    }
+
+    #[test]
+    fn the_reminder_trigger_parses_and_asks_nothing_of_the_brain() {
+        let ask = parse_ask("/reminder call mum in 20 minutes");
+        assert_eq!(ask.message, "call mum in 20 minutes");
+        assert!(ask.remind);
+        assert!(!ask.recall);
+        // Setting a reminder is not reading or writing memory.
+        assert!(!ask.any(), "a reminder turn must not touch the brain");
+        assert!(!ask.writes());
+        assert!(!parse_ask("/reminders are useful").remind);
+    }
+
+    #[test]
+    fn a_reminder_turn_is_told_how_and_never_loads_the_embedder() {
+        // Seeded storage: an embedder load would be possible here, and the
+        // erroring loader is what proves none is attempted.
+        let (_dir, storage) = seeded("reminder-turn");
+        let context = build_context(
+            Some(&storage),
+            &config(6, 900),
+            &[],
+            &parse_ask("/reminder stand up in 20 minutes"),
+            Brevity::Off,
+            never,
+        )
+        .expect("a reminder turn builds without the embedder");
+        assert!(context.is_empty(), "a reminder recalls nothing");
+        assert!(context.system_message.contains("## Reminders"));
+        assert!(
+            !context.system_message.contains("## Memory names"),
+            "a reminder is not a write turn and gets no folder listing"
+        );
+    }
+
+    #[test]
+    fn the_reminder_section_states_the_clock() {
+        let tasks = Tasks {
+            reminding: true,
+            ..Tasks::default()
+        };
+        assert_eq!(
+            render(&[], &[], Brevity::Off, tasks, "2026-08-10 14:32 (Monday)"),
+            format!(
+                "## Reminders\n{REMINDING}\nThe current local time is 2026-08-10 14:32 (Monday)."
+            )
+        );
+        // An unreadable clock drops the line rather than inventing a time.
+        assert_eq!(
+            render(&[], &[], Brevity::Off, tasks, ""),
+            format!("## Reminders\n{REMINDING}")
+        );
     }
 
     #[test]
@@ -1420,12 +1539,15 @@ mod tests {
             assert_eq!(message, format!("{base}\n\n## Style\n{directive}"));
         }
 
-        let message = empty_context(Brevity::Ultra).system_message;
+        let message = empty_context(Brevity::Ultra, &parse_ask("hello")).system_message;
         assert_eq!(
             message,
             format!("## Style\n{}", Brevity::Ultra.directive().expect("ultra"))
         );
-        assert_eq!(empty_context(Brevity::Off).system_message, "");
+        assert_eq!(
+            empty_context(Brevity::Off, &parse_ask("hello")).system_message,
+            ""
+        );
     }
 
     #[test]

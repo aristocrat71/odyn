@@ -36,6 +36,7 @@ export type ChatEvent = { request_id: number } & (
   | { kind: "deleted"; slug: string }
   | { kind: "linked"; from: string; to: string }
   | { kind: "unlinked"; from: string; to: string }
+  | { kind: "reminded"; text: string; due_at: number }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );
@@ -208,6 +209,21 @@ export type Graph = { nodes: GraphNode[]; edges: GraphEdge[] };
 export const brainGraph = (): Promise<Graph> => invoke("brain_graph");
 
 export type ConfigFile = { path: string; text: string };
+
+export type ReminderRow = {
+  id: number;
+  text: string;
+  due_at: number;
+  // Null while it is still waiting.
+  fired_at: number | null;
+};
+
+export type ReminderList = { pending: ReminderRow[]; past: ReminderRow[] };
+
+export const remindersList = (): Promise<ReminderList> => invoke("reminders_list");
+
+export const reminderDelete = (id: number): Promise<void> =>
+  invoke("reminder_delete", { id });
 
 export const configFile = (): Promise<ConfigFile> => invoke("config_file");
 

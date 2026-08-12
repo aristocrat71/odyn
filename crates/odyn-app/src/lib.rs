@@ -1,6 +1,7 @@
 mod brain;
 mod commands;
 mod config;
+mod reminders;
 mod spotlight;
 mod state;
 mod tray;
@@ -22,6 +23,7 @@ pub fn run() {
             app.manage(state::AppState::load());
             spotlight::setup(app.handle());
             tray::setup(app.handle());
+            reminders::setup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,6 +59,8 @@ pub fn run() {
             config::provider_remove,
             config::set_default_provider,
             config::reload_config,
+            reminders::reminders_list,
+            reminders::reminder_delete,
             commands::cancel_message,
             commands::status,
             commands::providers_overview,

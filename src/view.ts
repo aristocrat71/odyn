@@ -6,6 +6,7 @@ import { renderConversations } from "./conversations";
 import { el } from "./dom";
 import { renderHome } from "./home";
 import { renderProviders } from "./providers";
+import { renderReminders } from "./reminders";
 import { state } from "./state";
 
 export function renderView(root: HTMLElement): void {
@@ -44,6 +45,7 @@ function body(): HTMLElement {
   if (state.view === "chat") view.append(renderChat());
   if (state.view === "conversations") view.append(renderConversations());
   if (state.view === "brain") view.append(renderBrain());
+  if (state.view === "reminders") view.append(renderReminders());
   if (state.view === "providers") view.append(renderProviders());
   if (state.view === "config") view.append(renderConfig());
   if (state.view === "guide") view.append(guide());

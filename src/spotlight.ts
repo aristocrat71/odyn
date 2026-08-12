@@ -10,6 +10,7 @@ import { accept, ghost } from "./complete";
 import { el, forgetTraces, trace, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
 import { renderMarkdown } from "./markdown";
+import { dueLabel } from "./due";
 import { mentionAsk } from "./mentions";
 
 type SpotEvent =
@@ -25,6 +26,7 @@ type SpotEvent =
   | { request_id: number; kind: "deleted"; slug: string }
   | { request_id: number; kind: "linked"; from: string; to: string }
   | { request_id: number; kind: "unlinked"; from: string; to: string }
+  | { request_id: number; kind: "reminded"; text: string; due_at: number }
   | { request_id: number; kind: "done" }
   // `detail` present means `message` stands in for the provider's own words.
   | { request_id: number; kind: "error"; message: string; detail?: string };
@@ -40,7 +42,9 @@ type SpotTarget = {
 const input = document.getElementById("spot-input") as HTMLInputElement;
 const ledger = document.getElementById("spot-ledger") as HTMLDivElement;
 const results = document.getElementById("spot-results") as HTMLDivElement;
+const dueBox = document.getElementById("spot-due") as HTMLDivElement;
 const picks = document.getElementById("spot-picks") as HTMLSpanElement;
+const surface = document.querySelector(".spot-surface") as HTMLDivElement;
 
 const hint = ghost(input, "spot-ask");
 
@@ -56,6 +60,11 @@ const modelDrop = dropdown({
 });
 picks.append(providerDrop.root, modelDrop.root);
 
+type Due = { text: string; due_at: number };
+
+const chime = new Audio("/odyn-notif.wav");
+chime.loop = true;
+
 /// `view: null` is a mention, not a destination: the text stays in the field.
 type Command = { cmd: string; view: string | null; hint: string };
 
@@ -67,12 +76,14 @@ const COMMANDS: Command[] = [
   { cmd: "/config", view: "config", hint: "the file behind it all" },
   { cmd: "/guide", view: "guide", hint: "how everything works" },
   { cmd: "/view-brain", view: "brain", hint: "what odyn remembers" },
+  { cmd: "/view-reminders", view: "reminders", hint: "what odyn will remind you of" },
   { cmd: "/brain", view: null, hint: "ask with what odyn remembers" },
   { cmd: "/memory", view: null, hint: "tell odyn something to remember" },
   { cmd: "/update-memory", view: null, hint: "tell odyn something changed" },
   { cmd: "/delete-memory", view: null, hint: "tell odyn to forget something" },
   { cmd: "/link-memory", view: null, hint: "connect two memories" },
   { cmd: "/unlink-memory", view: null, hint: "disconnect two memories" },
+  { cmd: "/reminder", view: null, hint: "set a reminder" },
 ];
 
 let current: number | null = null;
@@ -84,6 +95,8 @@ let updated: string[] = [];
 let deleted: string[] = [];
 let linked: string[] = [];
 let unlinked: string[] = [];
+let reminders: string[] = [];
+let dueNow: Due[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
 let keyMode = false;
@@ -184,7 +197,49 @@ function draw(): void {
   if (!streaming && unlinked.length > 0) {
     results.append(trace("⌇", "unlinked", unlinked, "unlinked"));
   }
+  if (!streaming && reminders.length > 0) {
+    results.append(trace("◔", "reminder", reminders, "reminded"));
+  }
   // No auto-scroll: a growing answer must not yank the panel while reading.
+}
+
+// A due reminder takes the whole panel: the field, footer and any answer are
+// hidden, so the only thing to do is read it and dismiss it.
+function drawDue(): void {
+  dueBox.replaceChildren();
+  surface.classList.toggle("due-only", dueNow.length > 0);
+  if (dueNow.length === 0) {
+    dueBox.hidden = true;
+    input.disabled = false;
+    return;
+  }
+  input.disabled = true;
+  input.blur();
+  void chime.play().catch(() => {});
+  for (const due of dueNow) {
+    const row = el("div", "spot-due-row");
+    row.append(
+      el("span", "spot-due-mark", "◔"),
+      el("span", "spot-due-text", due.text),
+      el("span", "spot-due-at", dueLabel(due.due_at)),
+    );
+    dueBox.append(row);
+  }
+  const dismiss = el("button", "spot-due-clear", "dismiss");
+  dismiss.addEventListener("click", clearDue);
+  dueBox.append(dismiss);
+  dueBox.hidden = false;
+}
+
+function clearDue(): void {
+  chime.pause();
+  chime.currentTime = 0;
+  dueNow = [];
+  dueBox.replaceChildren();
+  dueBox.hidden = true;
+  surface.classList.remove("due-only");
+  input.disabled = false;
+  input.focus();
 }
 
 function fail(message: string, detail?: string): void {
@@ -210,6 +265,8 @@ function clearScreen(): void {
   deleted = [];
   linked = [];
   unlinked = [];
+  reminders = [];
+  clearDue();
   forgetTraces();
   commandMode = false;
   cursor = 0;
@@ -314,6 +371,8 @@ async function ask(): Promise<void> {
   deleted = [];
   linked = [];
   unlinked = [];
+  reminders = [];
+  clearDue();
   forgetTraces();
   ledger.hidden = true;
   ledger.replaceChildren();
@@ -468,6 +527,8 @@ void listen<SpotEvent>("spotlight-event", (event) => {
     linked.push(`${data.from} → ${data.to}`);
   } else if (data.kind === "unlinked") {
     unlinked.push(`${data.from} ⇢ ${data.to}`);
+  } else if (data.kind === "reminded") {
+    reminders.push(`${data.text} · ${dueLabel(data.due_at)}`);
   } else if (data.kind === "done") {
     streaming = false;
     draw();
@@ -476,5 +537,19 @@ void listen<SpotEvent>("spotlight-event", (event) => {
   }
 });
 
-void listen("spotlight-show", reset);
+// Survives `reset`: a reminder stays up until it is dismissed or the next ask,
+// and it is already marked shown, so it never arrives twice.
+void listen<Due[]>("reminder-due", (event) => {
+  for (const due of event.payload) dueNow.push(due);
+  drawDue();
+});
+
+// Hiding keeps the exchange, so a re-summon refreshes the target and leaves
+// whatever is on screen alone. Esc and promotion are what empty the panel.
+void listen("spotlight-show", () => {
+  void loadTarget();
+  if (!input.disabled) input.focus();
+});
+
+void listen("spotlight-clear", reset);
 reset();
