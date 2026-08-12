@@ -62,6 +62,9 @@ picks.append(providerDrop.root, modelDrop.root);
 
 type Due = { text: string; due_at: number };
 
+const chime = new Audio("/odyn-notif.wav");
+chime.loop = true;
+
 /// `view: null` is a mention, not a destination: the text stays in the field.
 type Command = { cmd: string; view: string | null; hint: string };
 
@@ -212,6 +215,7 @@ function drawDue(): void {
   }
   input.disabled = true;
   input.blur();
+  void chime.play().catch(() => {});
   for (const due of dueNow) {
     const row = el("div", "spot-due-row");
     row.append(
@@ -228,6 +232,8 @@ function drawDue(): void {
 }
 
 function clearDue(): void {
+  chime.pause();
+  chime.currentTime = 0;
   dueNow = [];
   dueBox.replaceChildren();
   dueBox.hidden = true;
