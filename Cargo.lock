@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "odyn-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "odyn-core",
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "odyn-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "directories",
  "fastembed",
@@ -2937,7 +2937,7 @@ dependencies = [
 
 [[package]]
 name = "odyn-vec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rusqlite",
  "sqlite-vec",

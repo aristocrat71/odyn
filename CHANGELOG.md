@@ -12,6 +12,42 @@ copy of Odyn sees when it checks for updates. A tag with no matching section her
 fails the release before anything is built. Write the entry as you merge, not at
 tag time.
 
+## [0.2.0] - 2026-08-12
+
+Odyn can hold a time for you now, and it says so out loud when the time comes.
+
+### Added
+
+- **Reminders, on `/reminder`.** Mention it and the model is handed
+  `set_reminder` for that turn: "remind me to call mum in 20 minutes" becomes a
+  row with a time on it. It is the one mention that reads nothing from the
+  brain — a reminder is not written from memory — so the turn never loads the
+  embedder and recalls no notes. The time is given either as minutes from now or
+  as a date and time, and minutes are preferred, since they need no reference
+  clock and so cannot land on the wrong day. A time already past, or one more
+  than five years out, comes back as an error the model can read and correct
+  rather than as a reminder set wrong.
+- **A due reminder takes over spotlight.** The panel appears with it — no field,
+  no footer, just the reminder and a dismiss button — and a chime loops until
+  you dismiss it, so one that arrives while you are elsewhere is still heard.
+  Odyn checks every 20 seconds while it is running, which is what the tray icon
+  is for: closing the window hides it, it does not quit. Nothing fires while
+  Odyn is quit, and nothing is lost either — anything that came due meanwhile is
+  shown at the next launch, because a reminder is marked shown only once the
+  panel has taken it.
+- **A reminders view.** `/view-reminders`, or the sidebar: what is still
+  waiting, soonest first, with how far off each one is, and the last fifty
+  already shown below that. Hovering a waiting row gives you a ✕ to cancel it.
+  Reminders live in the database rather than the brain folder — they are state
+  with a deadline, not memories, and they never enter recall.
+
+### Fixed
+
+- **Spotlight keeps its exchange when it is hidden.** A click away conceals the
+  panel rather than emptying it, so a re-summon finds the answer still there.
+  Esc and promotion remain the only two things that end an exchange — which is
+  also what keeps a due reminder on screen until you dismiss it.
+
 ## [0.1.0] - 2026-08-08
 
 The first build you can install. Odyn is a personal AI harness: a desktop app
