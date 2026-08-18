@@ -377,7 +377,10 @@ bun run tauri dev`),
           "other. A call that succeeds ends the turn on odyn's own one-line " +
           "confirmation — the model does not get to talk over your notes after a " +
           "write. It never touches the brain without these mentions, and all of " +
-          "them need a model that supports tool calls (llama3.2 does).",
+          "them need a model that supports tool calls (llama3.2 does). Ollama " +
+          "reports which models can; the picker marks the rest `no tools`, and " +
+          "sending a memory mention at one is refused up front with that reason " +
+          "instead of failing strangely mid-turn.",
       ),
       sub("reminders"),
       p(

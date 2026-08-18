@@ -69,6 +69,8 @@ export type Model = {
   name: string;
   // On-disk size, which only Ollama reports.
   size_bytes: number | null;
+  // Whether the model can call tools; null when nothing reported it.
+  tools: boolean | null;
 };
 
 export type ProviderGroup = {

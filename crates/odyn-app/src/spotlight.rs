@@ -365,12 +365,14 @@ pub fn spotlight_ask(
 
     match target(&ready) {
         Ok((provider, model)) => match ready.registry.provider(&provider) {
-            Ok(provider) => {
+            Ok(built) => {
+                let config = ready.config.providers.get(&provider).cloned();
                 ask.task = Some(tauri::async_runtime::spawn(run(
                     app.clone(),
                     request_id,
                     shared,
-                    provider,
+                    built,
+                    config,
                     model,
                     parsed,
                 )));
@@ -488,9 +490,17 @@ async fn run(
     request_id: u64,
     shared: Arc<Shared>,
     provider: Box<dyn ChatProvider>,
+    provider_config: Option<ProviderConfig>,
     model: String,
     ask: odyn_core::brain::Ask,
 ) {
+    // Refused before recall runs — same gate as a chat send.
+    if let Some(config) = provider_config.filter(|_| ask.writes() || ask.remind) {
+        if crate::commands::lacks_tools(&config, &model).await {
+            emit(&app, request_id, Body::error(crate::commands::NO_TOOLS));
+            return;
+        }
+    }
     // A spotlight ask has no history: the question alone drives retrieval.
     // Brevity comes from `[spotlight]`, never from any conversation.
     let (brevity, brain_dir, save_temperature) = match app.state::<AppState>().ready() {

@@ -99,6 +99,8 @@ pub struct Model {
     pub(crate) name: String,
     /// On-disk size; only Ollama reports it, and it is never invented.
     size_bytes: Option<u64>,
+    /// Whether the model can call tools; `None` when nothing reported it.
+    tools: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -425,11 +427,13 @@ pub async fn send_message(
     };
     let brevity = row.brevity.unwrap_or(ready.config.style.brevity);
     let save_temperature = ready.config.brain.save_temperature;
+    let provider_config = ready.config.providers.get(&row.provider).cloned();
     let task = tauri::async_runtime::spawn(run(
         app.clone(),
         request_id,
         Arc::clone(&stream),
         provider,
+        provider_config,
         row.model,
         prior,
         ask,
@@ -526,6 +530,7 @@ pub(crate) async fn served(
             .map(|name| Model {
                 name,
                 size_bytes: None,
+                tools: None,
             })
             .collect()
     };
@@ -555,11 +560,36 @@ pub(crate) async fn installed(base_url: &str, keep_alive: Option<String>) -> (bo
     let models = models
         .into_iter()
         .map(|model| Model {
+            tools: model.calls_tools(),
             name: model.name,
             size_bytes: Some(model.size_bytes),
         })
         .collect();
     (true, models)
+}
+
+/// The one failure every small-Ollama user hits: a tool-earning mention sent
+/// at a model that cannot call tools. Known only when the daemon says so;
+/// anything unknown lets the attempt proceed.
+pub(crate) const NO_TOOLS: &str = "this model cannot call tools — the mention needs one that can";
+
+pub(crate) async fn lacks_tools(config: &ProviderConfig, model: &str) -> bool {
+    let ProviderConfig::Ollama {
+        base_url,
+        keep_alive,
+    } = config
+    else {
+        return false;
+    };
+    let (reachable, models) = installed(base_url, keep_alive.clone()).await;
+    if !reachable {
+        return false;
+    }
+    models
+        .into_iter()
+        .find(|served| served.name == model)
+        .and_then(|served| served.tools)
+        == Some(false)
 }
 
 /// Owns one reply from the first token to the stored row.
@@ -569,6 +599,7 @@ async fn run(
     request_id: u64,
     stream: Arc<Stream>,
     provider: Box<dyn ChatProvider>,
+    provider_config: Option<ProviderConfig>,
     model: String,
     prior: Vec<Message>,
     ask: Ask,
@@ -577,6 +608,15 @@ async fn run(
     brain_dir: std::path::PathBuf,
     save_temperature: f32,
 ) {
+    // Refused before recall runs: an embed plus a doomed request helps no one.
+    let earns_tools = ask.writes() || ask.remind;
+    if let Some(config) = provider_config.filter(|_| earns_tools) {
+        if lacks_tools(&config, &model).await {
+            app.state::<AppState>().streams.close(request_id);
+            emit(&app, request_id, Body::error(NO_TOOLS));
+            return;
+        }
+    }
     let context = build_context(&app, prior.clone(), ask.clone(), brevity).await;
     if let Some(context) = &context {
         record(&app, &stream, question_id, context);

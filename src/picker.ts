@@ -119,6 +119,10 @@ function fillModels(current: Conversation): void {
         el("span", "picker-mark", row.name === current.model ? "●" : ""),
         el("span", "picker-name", row.name),
       );
+      // Shown, never hidden: the memory mentions need a tool-calling model.
+      if (row.tools === false) {
+        item.append(el("span", "picker-meta", "no tools"));
+      }
       if (row.size_bytes !== null) {
         item.append(el("span", "picker-meta", size(row.size_bytes)));
       }

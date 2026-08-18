@@ -55,6 +55,19 @@ impl ModelInfo {
             .iter()
             .any(|capability| capability == "embedding")
     }
+
+    /// `Some(false)` only when the daemon reported capabilities and `tools`
+    /// was not among them; a daemon too old to report stays unknown.
+    pub fn calls_tools(&self) -> Option<bool> {
+        if self.capabilities.is_empty() {
+            return None;
+        }
+        Some(
+            self.capabilities
+                .iter()
+                .any(|capability| capability == "tools"),
+        )
+    }
 }
 
 /// The installed models that can embed. An unreachable daemon is an empty
@@ -915,7 +928,8 @@ mod tests {
             r#""modified_at":"2024-11-02T09:01:44.987654321+01:00","size":4683087519,"#,
             r#""digest":"2b0496514337b4a4b0f8c1cbd1e1cd6a1f7ba7b8f5f4a1c3d2e1b0a9f8e7d6c5","#,
             r#""details":{"parent_model":"","format":"gguf","family":"qwen2","families":["qwen2"],"#,
-            r#""parameter_size":"7.6B","quantization_level":"Q4_K_M"}}]}"#,
+            r#""parameter_size":"7.6B","quantization_level":"Q4_K_M"},"#,
+            r#""capabilities":["completion","tools"]}]}"#,
         );
         let (addr, rx) = spawn_server(plain_response("200 OK", "application/json", body));
         let provider = provider_for(addr, None);
@@ -932,11 +946,20 @@ mod tests {
                 ModelInfo {
                     name: "qwen2.5-coder:7b".to_string(),
                     size_bytes: 4_683_087_519,
-                    capabilities: Vec::new(),
+                    capabilities: vec!["completion".to_string(), "tools".to_string()],
                 },
             ]
         );
         assert!(!models[0].embeds());
+        // No capability list is unknown, never a verdict.
+        assert_eq!(models[0].calls_tools(), None);
+        assert_eq!(models[1].calls_tools(), Some(true));
+        let chat_only = ModelInfo {
+            name: "gemma:2b".to_string(),
+            size_bytes: 1,
+            capabilities: vec!["completion".to_string()],
+        };
+        assert_eq!(chat_only.calls_tools(), Some(false));
         let request = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("captured request");
