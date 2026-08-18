@@ -89,10 +89,13 @@ async fn converse(app: &AppHandle, schedule: &Schedule) -> Result<i64, String> {
     // No tools: the run is unattended, and unattended turns write nothing.
     let mut refuse_reminder = |_: &str, _: i64, _: Option<&str>| Err(UNATTENDED.to_string());
     let mut refuse_schedule = |_: &str, _: &str, _: i64| Err(UNATTENDED.to_string());
+    let mut refuse_bash = crate::commands::deny_bash();
     let mut effects = tools::Effects {
         brain_dir: &brain_dir,
+        workspace: None,
         set_reminder: &mut refuse_reminder,
         set_schedule: &mut refuse_schedule,
+        approve: &mut refuse_bash,
     };
     let reply = tools::run_turn(
         provider.as_ref(),

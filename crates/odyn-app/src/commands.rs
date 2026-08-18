@@ -643,6 +643,7 @@ async fn run(
         ask.unlink,
         ask.remind,
         ask.schedule,
+        false,
     );
 
     let outcome = drive(
@@ -671,6 +672,12 @@ async fn run(
         Outcome::Interrupted => settle(&app, &ready, request_id, &stream, None, true),
         Outcome::Failed(message) => emit(&app, request_id, Body::error(message)),
     }
+}
+
+/// For surfaces that never offer bash: any approval request is answered no.
+pub(crate) fn deny_bash(
+) -> impl FnMut(String) -> futures::future::BoxFuture<'static, tools::Verdict> + Send {
+    |_| Box::pin(async { tools::Verdict::Deny })
 }
 
 /// Lends the tool loop a reminder writer instead of the storage handle: one
@@ -934,10 +941,13 @@ async fn drive(
 ) -> Outcome {
     let mut sink = reminder_sink(app);
     let mut plans = schedule_sink(app, provider_name, model);
+    let mut gate = deny_bash();
     let mut effects = tools::Effects {
         brain_dir,
+        workspace: None,
         set_reminder: &mut sink,
         set_schedule: &mut plans,
+        approve: &mut gate,
     };
     let driven = tools::run_turn(
         provider,
@@ -1011,6 +1021,9 @@ async fn drive(
                         next_at,
                     },
                 ),
+                TurnEvent::AgentCall { .. }
+                | TurnEvent::AgentOut { .. }
+                | TurnEvent::Round { .. } => {}
             }
             Ok(())
         },

@@ -183,6 +183,16 @@ CREATE TABLE schedules (
 );
 CREATE INDEX schedules_next ON schedules(next_at);
 ",
+    // A workspace folder makes a conversation an agent conversation; NULL is a
+    // normal one. `agent_allow` holds its approved bash commands, verbatim.
+    r"
+ALTER TABLE conversations ADD COLUMN workspace TEXT;
+CREATE TABLE agent_allow (
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    command         TEXT    NOT NULL,
+    PRIMARY KEY (conversation_id, command)
+);
+",
 ];
 
 /// Marks a matched term in a search snippet; its closer is `SNIPPET_END`.
@@ -228,6 +238,8 @@ pub struct Conversation {
     /// `None` until the user explicitly picks a level for this conversation;
     /// callers fall back to the `[style]` config default.
     pub brevity: Option<Brevity>,
+    /// The agent workspace folder; `None` is a normal conversation.
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,13 +327,14 @@ impl Storage {
             created_at: now,
             updated_at: now,
             brevity: None,
+            workspace: None,
         })
     }
 
     /// Most recently active first; ties broken by id so the order is stable.
     pub fn list_conversations(&self) -> Result<Vec<Conversation>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, provider, created_at, updated_at, brevity
+            "SELECT id, title, model, provider, created_at, updated_at, brevity, workspace
              FROM conversations ORDER BY updated_at DESC, id DESC",
         )?;
         let rows = stmt.query_map([], to_conversation)?;
@@ -332,11 +345,43 @@ impl Storage {
     /// on the last one's provider and model.
     pub fn latest_conversation(&self) -> Result<Option<Conversation>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, provider, created_at, updated_at, brevity
+            "SELECT id, title, model, provider, created_at, updated_at, brevity, workspace
              FROM conversations ORDER BY updated_at DESC, id DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], to_conversation)?;
         Ok(rows.next().transpose()?)
+    }
+
+    /// `None` turns the conversation back into a normal one; its allowlist
+    /// stays, since the approvals were the user's own.
+    pub fn set_conversation_workspace(
+        &self,
+        id: i64,
+        workspace: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let changed = self.conn.execute(
+            "UPDATE conversations SET workspace = ?2 WHERE id = ?1",
+            params![id, workspace],
+        )?;
+        found(changed, id)
+    }
+
+    /// Idempotent: approving the same command twice is one row. The foreign
+    /// key refuses a conversation that does not exist.
+    pub fn allow_command(&self, conversation_id: i64, command: &str) -> Result<(), StorageError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO agent_allow (conversation_id, command) VALUES (?1, ?2)",
+            params![conversation_id, command],
+        )?;
+        Ok(())
+    }
+
+    pub fn allowed_commands(&self, conversation_id: i64) -> Result<Vec<String>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT command FROM agent_allow WHERE conversation_id = ?1 ORDER BY command",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| row.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Writes an explicit brevity choice; the column stays NULL until one.
@@ -593,6 +638,7 @@ fn to_conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         brevity: row.get(6)?,
+        workspace: row.get(7)?,
     })
 }
 
@@ -1108,6 +1154,77 @@ pub(crate) mod tests {
             );
         }
     }
+    #[test]
+    fn a_workspace_round_trips_and_clears() {
+        let dir = TempDir::new("workspace");
+        let storage = Storage::open(dir.db()).expect("open");
+        let created = storage
+            .create_conversation("agent", "ollama", "qwen3:8b")
+            .expect("create");
+        assert_eq!(created.workspace, None);
+
+        storage
+            .set_conversation_workspace(created.id, Some("/tmp/notes"))
+            .expect("set");
+        assert_eq!(
+            storage.list_conversations().expect("list")[0].workspace,
+            Some("/tmp/notes".to_string())
+        );
+        assert_eq!(
+            storage
+                .latest_conversation()
+                .expect("latest")
+                .and_then(|row| row.workspace),
+            Some("/tmp/notes".to_string())
+        );
+
+        storage
+            .set_conversation_workspace(created.id, None)
+            .expect("clear");
+        assert_eq!(
+            storage.list_conversations().expect("list")[0].workspace,
+            None
+        );
+        assert!(matches!(
+            storage.set_conversation_workspace(9999, Some("/tmp")),
+            Err(StorageError::ConversationNotFound(9999))
+        ));
+    }
+
+    #[test]
+    fn the_allowlist_round_trips_idempotently_and_dies_with_its_conversation() {
+        let dir = TempDir::new("allow");
+        let storage = Storage::open(dir.db()).expect("open");
+        let kept = storage
+            .create_conversation("kept", "ollama", "qwen3:8b")
+            .expect("create");
+        let doomed = storage
+            .create_conversation("doomed", "ollama", "qwen3:8b")
+            .expect("create");
+
+        storage.allow_command(kept.id, "cargo test").expect("allow");
+        storage.allow_command(kept.id, "ls -la").expect("allow");
+        storage
+            .allow_command(kept.id, "cargo test")
+            .expect("allow again");
+        storage.allow_command(doomed.id, "make").expect("allow");
+        assert_eq!(
+            storage.allowed_commands(kept.id).expect("list"),
+            vec!["cargo test".to_string(), "ls -la".to_string()]
+        );
+
+        storage.delete_conversation(doomed.id).expect("delete");
+        assert!(storage
+            .allowed_commands(doomed.id)
+            .expect("list")
+            .is_empty());
+        assert_eq!(storage.allowed_commands(kept.id).expect("list").len(), 2);
+        assert!(
+            storage.allow_command(9999, "anything").is_err(),
+            "the foreign key must refuse an unknown conversation"
+        );
+    }
+
     #[test]
     fn brevity_is_null_until_chosen_and_then_persists() {
         let dir = TempDir::new("brevity");
