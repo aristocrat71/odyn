@@ -20,36 +20,12 @@ const NAV: View[] = [
   "reminders",
   "providers",
   "config",
-  "guide",
 ];
 
 const RECENT = 7;
 
 export function renderSidebar(root: HTMLElement): void {
-  root.replaceChildren(
-    wordmark(),
-    nav(),
-    label(),
-    conversations(),
-    newLink(),
-    footer(),
-  );
-}
-
-function label(): HTMLElement {
-  const link = el("button", "label label-link");
-  const word = el("span");
-  if (state.view === "conversations") {
-    link.classList.add("active");
-    word.append(el("span", "mark", "—"), " conversations");
-  } else {
-    word.textContent = "conversations";
-  }
-  link.append(word);
-  const total = state.conversations.length;
-  if (total > RECENT) link.append(el("span", "label-count", String(total)));
-  link.addEventListener("click", () => setView("conversations"));
-  return link;
+  root.replaceChildren(wordmark(), nav(), conversations(), newLink(), footer());
 }
 
 function wordmark(): HTMLElement {

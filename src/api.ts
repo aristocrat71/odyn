@@ -31,15 +31,6 @@ export type Message = {
   commands: string[];
 };
 
-export type SearchHit = {
-  conversation_id: number;
-  title: string;
-  message_id: number;
-  role: "user" | "assistant";
-  // Matched terms sit between the U+0001 and U+0002 markers.
-  snippet: string;
-};
-
 export type Usage = { input_tokens: number; output_tokens: number };
 
 export type ChatEvent = { request_id: number } & (
@@ -125,9 +116,6 @@ export const getConversation = (id: number): Promise<ConversationView> =>
 
 export const messages = (conversationId: number): Promise<Message[]> =>
   invoke("messages", { conversationId });
-
-export const searchMessages = (query: string): Promise<SearchHit[]> =>
-  invoke("search_messages", { query });
 
 export const sendMessage = (
   conversationId: number,

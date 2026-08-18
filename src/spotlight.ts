@@ -74,10 +74,8 @@ type Command = { cmd: string; view: string | null; hint: string };
 const COMMANDS: Command[] = [
   { cmd: "/home", view: "home", hint: "the front door" },
   { cmd: "/chat", view: "chat", hint: "the conversation" },
-  { cmd: "/convos", view: "conversations", hint: "every conversation, searchable" },
   { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
   { cmd: "/config", view: "config", hint: "the file behind it all" },
-  { cmd: "/guide", view: "guide", hint: "how everything works" },
   { cmd: "/view-brain", view: "brain", hint: "what odyn remembers" },
   { cmd: "/view-reminders", view: "reminders", hint: "what odyn will remind you of" },
   { cmd: "/brain", view: null, hint: "ask with what odyn remembers" },

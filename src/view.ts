@@ -2,7 +2,6 @@ import type { Conversation } from "./api";
 import { renderBrain } from "./brain";
 import { refreshLedger, renderChat } from "./chat";
 import { renderConfig } from "./config";
-import { renderConversations } from "./conversations";
 import { el } from "./dom";
 import { renderHome } from "./home";
 import { renderProviders } from "./providers";
@@ -101,39 +100,11 @@ function body(): HTMLElement {
   const view = el("section", "view");
   if (state.view === "home") view.append(renderHome());
   if (state.view === "chat") view.append(renderChat());
-  if (state.view === "conversations") view.append(renderConversations());
   if (state.view === "brain") view.append(renderBrain());
   if (state.view === "reminders") view.append(renderReminders());
   if (state.view === "providers") view.append(renderProviders());
   if (state.view === "config") view.append(renderConfig());
-  if (state.view === "guide") view.append(guide());
   return view;
-}
-
-// The guide is its own chunk, reached by `import()`. The promise is cached,
-// not just the module, so a redraw mid-flight does not start a second load.
-let loaded: typeof import("./guide") | null = null;
-let loading: Promise<typeof import("./guide")> | null = null;
-
-function guide(): HTMLElement {
-  const box = el("div", "guide-view");
-  if (loaded !== null) {
-    box.append(loaded.renderGuide());
-    return box;
-  }
-  box.append(el("div", "guide-loading", "loading guide…"));
-  if (loading === null) loading = import("./guide");
-  // A view switched away leaves `box` detached; writing to it is a no-op.
-  void loading.then(
-    (module) => {
-      loaded = module;
-      box.replaceChildren(module.renderGuide());
-    },
-    (err: unknown) => {
-      box.replaceChildren(el("div", "guide-error", `guide failed to load: ${String(err)}`));
-    },
-  );
-  return box;
 }
 
 function selected(): Conversation | undefined {

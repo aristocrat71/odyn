@@ -93,16 +93,6 @@ export function renderChat(): HTMLElement {
   if (opened) void refreshPreview(input.value);
   // Scrolling needs the transcript to be in the document and laid out.
   queueMicrotask(() => {
-    const jump = state.jump;
-    if (jump !== null) {
-      state.jump = null;
-      const target = rolled.querySelector(`[data-mid="${jump}"]`);
-      if (target !== null) {
-        target.scrollIntoView({ block: "center" });
-        target.classList.add("jumped");
-        return;
-      }
-    }
     rolled.scrollTop = follow ? rolled.scrollHeight : offset;
   });
   return column;
@@ -134,7 +124,6 @@ function patch(): void {
 
 function said(message: Message, index: number): HTMLElement {
   const block = el("div", `message ${message.role}`);
-  block.dataset.mid = String(message.id);
   const text = el("div", "text");
   fill(text, message.content, false);
   block.append(speaker(message.role));
