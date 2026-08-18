@@ -46,6 +46,8 @@ export const state = {
   view: "home" as View,
   conversations: [] as api.Conversation[],
   selected: null as number | null,
+  // A message to scroll to when the chat next renders; a search result set it.
+  jump: null as number | null,
   messages: [] as api.Message[],
   turns: 0,
   tokens: null as number | null,
@@ -126,8 +128,9 @@ export const refreshStatus = (): Promise<void> =>
     state.hotkeyError = await api.spotlightStatus();
   });
 
-export const selectConversation = (id: number): Promise<void> =>
+export const selectConversation = (id: number, message?: number): Promise<void> =>
   guard(async () => {
+    state.jump = message ?? null;
     await open(id);
     state.view = "chat";
   });
@@ -307,7 +310,8 @@ async function start(prompt: string, retry: boolean): Promise<void> {
   const conversation = state.selected;
   if (conversation === null) return;
   // A retry answers a question that is already stored, and already shown.
-  if (!retry) state.messages.push({ role: "user", content: prompt, used: [] });
+  // The optimistic row has no stored id yet; -1 is never a jump target.
+  if (!retry) state.messages.push({ id: -1, role: "user", content: prompt, used: [] });
   const stream: Stream = {
     conversation,
     requestId: null,

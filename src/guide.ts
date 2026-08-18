@@ -215,7 +215,7 @@ bun run tauri dev`),
         ["delete", "the `✕` on a conversation row, revealed on hover or focus."],
         [
           "find one",
-          "the sidebar lists the seven most recently answered and puts the total beside the `CONVERSATIONS` heading; the heading opens all of them with a search on top. The search is fuzzy — letters have to appear in a title in order, not next to each other — and the letters that earned each hit are marked in teal. Arrows move, Enter opens, Esc clears. An older conversation you open takes the sidebar's last slot until something newer pushes it out.",
+          "the sidebar lists the seven most recently answered and puts the total beside the `CONVERSATIONS` heading; the heading opens all of them with a search on top. The search is fuzzy over titles — letters have to appear in order, not next to each other, and the letters that earned each hit are marked in teal — and full-text over every message: content hits appear below the titles under `in messages`, best match first, and opening one lands the chat scrolled to that exact message. Arrows move, Enter opens, Esc clears. An older conversation you open takes the sidebar's last slot until something newer pushes it out.",
         ],
       ]),
       p(

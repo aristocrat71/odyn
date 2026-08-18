@@ -149,7 +149,23 @@ CREATE TABLE reminders (
 );
 CREATE INDEX reminders_pending ON reminders(due_at) WHERE fired_at IS NULL;
 ",
+    // Full-text search over message contents. External-content: the index
+    // stores no second copy of the text, and triggers keep it in step.
+    r"
+CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages', content_rowid='id');
+CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts (rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts (messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+INSERT INTO messages_fts (rowid, content) SELECT id, content FROM messages;
+",
 ];
+
+/// Marks a matched term in a search snippet; its closer is `SNIPPET_END`.
+pub const SNIPPET_START: char = '\u{1}';
+pub const SNIPPET_END: char = '\u{2}';
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -188,6 +204,17 @@ pub struct Conversation {
     /// `None` until the user explicitly picks a level for this conversation;
     /// callers fall back to the `[style]` config default.
     pub brevity: Option<Brevity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub conversation_id: i64,
+    pub title: String,
+    pub message_id: i64,
+    pub role: Role,
+    pub snippet: String,
+    /// Unix epoch seconds.
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,12 +332,17 @@ impl Storage {
         found(changed, id)
     }
 
-    /// Messages go with it, through the foreign key's `ON DELETE CASCADE`.
+    /// Messages are deleted explicitly rather than by cascade, so the search
+    /// index's delete trigger always sees them go.
     pub fn delete_conversation(&self, id: i64) -> Result<(), StorageError> {
-        let changed = self
-            .conn
-            .execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
-        found(changed, id)
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1",
+            params![id],
+        )?;
+        let changed = tx.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        found(changed, id)?;
+        Ok(tx.commit()?)
     }
 
     pub fn set_conversation_model(
@@ -399,6 +431,54 @@ impl Storage {
         let rows = stmt.query_map(params![conversation_id], to_message)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    /// Full-text search over every message, best match first. Matched terms in
+    /// the snippet sit between `SNIPPET_START` and `SNIPPET_END`.
+    pub fn search_messages(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, StorageError> {
+        let terms = fts_query(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT m.conversation_id, c.title, m.id, m.role,
+                    snippet(messages_fts, 0, char(1), char(2), ' … ', 12), m.created_at
+             FROM messages_fts
+             JOIN messages m ON m.id = messages_fts.rowid
+             JOIN conversations c ON c.id = m.conversation_id
+             WHERE messages_fts MATCH ?1
+             ORDER BY bm25(messages_fts), m.id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![terms, limit as i64], |row| {
+            Ok(SearchHit {
+                conversation_id: row.get(0)?,
+                title: row.get(1)?,
+                message_id: row.get(2)?,
+                role: row.get(3)?,
+                snippet: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+/// Every whitespace-separated term, quoted so FTS operators and stray quotes
+/// read as text, joined as an AND; the last term matches as a prefix so the
+/// search works while a word is still being typed.
+fn fts_query(text: &str) -> String {
+    let mut terms: Vec<String> = text
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect();
+    if let Some(last) = terms.last_mut() {
+        last.push('*');
+    }
+    terms.join(" ")
 }
 
 /// The deciding version is read under the write lock: two processes opening the
@@ -867,6 +947,100 @@ pub(crate) mod tests {
             .map(|row| row.title)
             .collect();
         assert_eq!(titles, vec![committed.title, "pending".to_string()]);
+    }
+
+    #[test]
+    fn search_reads_message_contents_and_marks_the_match() {
+        let dir = TempDir::new("search");
+        let storage = Storage::open(dir.db()).expect("open");
+        let coffee = storage
+            .create_conversation("coffee talk", "ollama", "llama3.2:3b")
+            .expect("create");
+        let other = storage
+            .create_conversation("other", "ollama", "llama3.2:3b")
+            .expect("create");
+        storage
+            .append_message(coffee.id, Role::User, "how do I pull espresso?", None, None)
+            .expect("append");
+        storage
+            .append_message(other.id, Role::Assistant, "tokio spawns tasks", None, None)
+            .expect("append");
+
+        let hits = storage.search_messages("espresso", 40).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].conversation_id, coffee.id);
+        assert_eq!(hits[0].title, "coffee talk");
+        assert_eq!(hits[0].role, Role::User);
+        assert!(hits[0]
+            .snippet
+            .contains(&format!("{SNIPPET_START}espresso{SNIPPET_END}")));
+
+        // As-you-type: the last term matches as a prefix.
+        assert_eq!(
+            storage.search_messages("espre", 40).expect("prefix").len(),
+            1
+        );
+        // Terms AND together across the message.
+        assert!(
+            storage
+                .search_messages("pull espresso", 40)
+                .expect("and")
+                .len()
+                == 1
+        );
+        assert!(storage
+            .search_messages("pull tokio", 40)
+            .expect("miss")
+            .is_empty());
+        // Operators and quotes are text, never syntax; blank finds nothing.
+        assert!(storage
+            .search_messages("\"espr AND (", 40)
+            .expect("quoted")
+            .is_empty());
+        assert!(storage
+            .search_messages("   ", 40)
+            .expect("blank")
+            .is_empty());
+
+        storage.delete_conversation(coffee.id).expect("delete");
+        assert!(storage
+            .search_messages("espresso", 40)
+            .expect("pruned")
+            .is_empty());
+    }
+
+    /// Messages stored before the search index existed are backfilled by the
+    /// migration that creates it.
+    #[test]
+    fn upgrading_backfills_the_search_index() {
+        odyn_vec::register().expect("register sqlite-vec");
+        let dir = TempDir::new("fts-upgrade");
+        std::fs::create_dir_all(&dir.0).expect("create the directory");
+        {
+            let conn = Connection::open(dir.db()).expect("open raw");
+            for (index, sql) in MIGRATIONS.iter().take(8).enumerate() {
+                conn.execute_batch(sql).expect("apply old schema");
+                conn.pragma_update(None, "user_version", index as i64 + 1)
+                    .expect("set version");
+            }
+            conn.execute(
+                "INSERT INTO conversations (title, model, provider, created_at, updated_at)
+                 VALUES ('old', 'm', 'p', 5, 5)",
+                [],
+            )
+            .expect("insert conversation");
+            conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, created_at)
+                 VALUES (1, 'assistant', 'rustls everywhere', 5)",
+                [],
+            )
+            .expect("insert message");
+        }
+
+        let storage = Storage::open(dir.db()).expect("open upgrades");
+        let hits = storage.search_messages("rustls", 40).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "old");
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub fn run() {
             commands::set_conversation_brevity,
             commands::get_conversation,
             commands::messages,
+            commands::search_messages,
             commands::send_message,
             commands::context_preview,
             brain::brain_overview,

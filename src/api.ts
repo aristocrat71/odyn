@@ -20,10 +20,20 @@ export type ConversationView = Conversation & {
 };
 
 export type Message = {
+  id: number;
   role: "system" | "user" | "assistant";
   content: string;
   // Assistant rows: the slugs injected for the question this answers.
   used: string[];
+};
+
+export type SearchHit = {
+  conversation_id: number;
+  title: string;
+  message_id: number;
+  role: "user" | "assistant";
+  // Matched terms sit between the U+0001 and U+0002 markers.
+  snippet: string;
 };
 
 export type Usage = { input_tokens: number; output_tokens: number };
@@ -102,6 +112,9 @@ export const getConversation = (id: number): Promise<ConversationView> =>
 
 export const messages = (conversationId: number): Promise<Message[]> =>
   invoke("messages", { conversationId });
+
+export const searchMessages = (query: string): Promise<SearchHit[]> =>
+  invoke("search_messages", { query });
 
 export const sendMessage = (
   conversationId: number,

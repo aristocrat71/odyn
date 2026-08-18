@@ -48,10 +48,21 @@ pub struct ConversationView {
 
 #[derive(serde::Serialize)]
 pub struct MessageView {
+    id: i64,
     role: Role,
     content: String,
     /// Assistant rows only: the slugs injected for the question this answers.
     used: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SearchHit {
+    conversation_id: i64,
+    title: String,
+    message_id: i64,
+    role: Role,
+    /// Matched terms sit between `\u{1}` and `\u{2}`; the view marks them.
+    snippet: String,
 }
 
 #[derive(serde::Serialize)]
@@ -323,10 +334,31 @@ pub async fn messages(
                 Role::System | Role::Tool => Vec::new(),
             };
             MessageView {
+                id: row.id,
                 role: row.role,
                 content: row.content,
                 used,
             }
+        })
+        .collect())
+}
+
+/// Full-text search across every conversation's messages, best match first.
+#[tauri::command]
+pub async fn search_messages(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<SearchHit>, String> {
+    let ready = state.ready()?;
+    let hits = ready.storage().search_messages(&query, 40).map_err(say)?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| SearchHit {
+            conversation_id: hit.conversation_id,
+            title: hit.title,
+            message_id: hit.message_id,
+            role: hit.role,
+            snippet: hit.snippet,
         })
         .collect())
 }
