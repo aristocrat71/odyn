@@ -3,7 +3,6 @@ import { renderBrain } from "./brain";
 import { refreshLedger, renderChat } from "./chat";
 import { renderConfig } from "./config";
 import { el } from "./dom";
-import { renderHome } from "./home";
 import { renderProviders } from "./providers";
 import { renderReminders } from "./reminders";
 import {
@@ -98,7 +97,6 @@ function shortPath(path: string): string {
 
 function body(): HTMLElement {
   const view = el("section", "view");
-  if (state.view === "home") view.append(renderHome());
   if (state.view === "chat") view.append(renderChat());
   if (state.view === "brain") view.append(renderBrain());
   if (state.view === "reminders") view.append(renderReminders());

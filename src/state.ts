@@ -1,8 +1,9 @@
 import * as api from "./api";
 import { dueLabel } from "./due";
 
+// `chat` stays a valid view for spotlight-promoted conversations, but the GUI
+// no longer navigates to it — chatting lives in the TUI now.
 export const VIEWS = [
-  "home",
   "chat",
   "brain",
   "reminders",
@@ -59,7 +60,7 @@ const NO_MODEL = "no model set · pick one";
 const PICKER_REFRESH_MS = 30_000;
 
 export const state = {
-  view: "home" as View,
+  view: "brain" as View,
   conversations: [] as api.Conversation[],
   selected: null as number | null,
   messages: [] as api.Message[],
@@ -71,8 +72,6 @@ export const state = {
     loading: false,
     groups: [] as api.ProviderGroup[],
   },
-  editing: null as number | null,
-  draft: "",
   brevityMenu: false,
   workspacePopover: false,
   status: null as api.Status | null,
@@ -161,7 +160,6 @@ export const deleteConversation = (id: number): Promise<void> =>
   guard(async () => {
     await api.deleteConversation(id);
     state.conversations = state.conversations.filter((row) => row.id !== id);
-    if (state.editing === id) state.editing = null;
     if (state.selected === id) {
       state.selected = null;
       state.messages = [];
@@ -301,42 +299,6 @@ const loadProviders = (): Promise<void> =>
     });
     if (state.picker.open !== null) state.picker.groups = groups;
   });
-
-export function startRename(id: number): void {
-  const row = state.conversations.find((candidate) => candidate.id === id);
-  if (row === undefined) return;
-  state.editing = id;
-  state.draft = row.title;
-  render();
-}
-
-// The input already shows the draft, so nothing has to be redrawn for it.
-export function setDraft(title: string): void {
-  state.draft = title;
-}
-
-export function cancelRename(): void {
-  state.editing = null;
-  render();
-}
-
-export async function commitRename(): Promise<void> {
-  const id = state.editing;
-  const title = state.draft.trim();
-  state.editing = null;
-  const row =
-    id === null
-      ? undefined
-      : state.conversations.find((candidate) => candidate.id === id);
-  if (id === null || row === undefined || title === "" || title === row.title) {
-    render();
-    return;
-  }
-  await guard(async () => {
-    await api.renameConversation(id, title);
-    row.title = title;
-  });
-}
 
 export function watchStream(): void {
   api.onChatEvent(receive);

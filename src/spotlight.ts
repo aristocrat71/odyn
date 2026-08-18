@@ -72,8 +72,6 @@ chime.loop = true;
 type Command = { cmd: string; view: string | null; hint: string };
 
 const COMMANDS: Command[] = [
-  { cmd: "/home", view: "home", hint: "the front door" },
-  { cmd: "/chat", view: "chat", hint: "the conversation" },
   { cmd: "/providers", view: "providers", hint: "models, endpoints and keys" },
   { cmd: "/config", view: "config", hint: "the file behind it all" },
   { cmd: "/view-brain", view: "brain", hint: "what odyn remembers" },

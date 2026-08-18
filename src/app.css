@@ -82,86 +82,6 @@ button {
   color: var(--epi);
 }
 
-.conversations {
-  flex: 1;
-  min-height: 0;
-  margin-top: 36px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--faint) transparent;
-}
-
-.row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  line-height: 1.9;
-}
-
-.row-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 13px;
-  color: var(--dim);
-  transition: color 150ms ease;
-}
-
-.row:hover .row-title {
-  color: var(--muted);
-}
-
-.row.active .row-title {
-  color: var(--ink);
-}
-
-.row-input {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  outline: none;
-  background: none;
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--ink);
-  caret-color: var(--epi);
-}
-
-.row-delete {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--dim);
-  opacity: 0;
-  transition:
-    color 150ms ease,
-    opacity 150ms ease;
-}
-
-/* Focus reveals it too, or the keyboard could not reach it. */
-.row:hover .row-delete,
-.row:focus-within .row-delete {
-  opacity: 1;
-}
-
-.row-delete:hover {
-  color: var(--danger);
-}
-
-.new {
-  margin-top: 10px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--dim);
-  transition: color 150ms ease;
-}
-
-.new:hover {
-  color: var(--epi);
-}
-
 .status {
   display: flex;
   align-items: baseline;
@@ -1249,103 +1169,6 @@ g.labeled .gnode-epi text {
   }
 }
 
-/* ---- home: the front door (issue #9) ---- */
-
-.home {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  min-height: 0;
-}
-
-.home-box {
-  display: flex;
-  flex-direction: column;
-  width: min(520px, 82%);
-  margin-bottom: 8vh;
-}
-
-.home-rune {
-  font-size: 34px;
-  color: var(--epi);
-  text-align: center;
-}
-
-.home-title {
-  margin: 4px 0 26px;
-  font-family: var(--wordmark);
-  font-weight: 600;
-  font-size: 16px;
-  letter-spacing: 0.34em;
-  text-align: center;
-  text-indent: 0.34em;
-  color: var(--muted);
-}
-
-/* The wrap carries the surface and the typography, so the field and the ghost
-   over it are the same text in the same place by construction. */
-.home-field {
-  padding: 12px 16px;
-  border-radius: var(--radius-composer);
-  background: var(--bg-soft);
-  box-shadow: var(--ring);
-  font-family: var(--mono);
-  font-size: 13.5px;
-}
-
-.home-input {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  outline: none;
-  background: none;
-  font: inherit;
-  color: var(--ink);
-  caret-color: var(--epi);
-}
-
-.home-input::placeholder {
-  color: var(--dim);
-}
-
-.home-commands {
-  display: flex;
-  flex-direction: column;
-  margin-top: 14px;
-}
-
-.home-cmd {
-  display: flex;
-  align-items: baseline;
-  gap: 14px;
-  padding: 7px 16px;
-  border-radius: 8px;
-  text-align: left;
-  font-family: var(--mono);
-  font-size: 12.5px;
-}
-
-.home-cmd.active {
-  background: var(--epi-soft);
-}
-
-.home-cmd-name {
-  min-width: 96px;
-  color: var(--epi);
-}
-
-.home-cmd-hint {
-  color: var(--dim);
-}
-
-/* Only on the row the field is completing to, so it reads as an offer. */
-.home-cmd-key {
-  margin-left: auto;
-  color: var(--faint);
-}
-
 /* Inline completion for `/` commands: the rest of the highlighted one, drawn
    where the caret is. Shared with the spotlight window — spotlight.css has the
    same rules, which this window never loads. */
@@ -1387,14 +1210,6 @@ g.labeled .gnode-epi text {
 }
 
 .ghost-rest {
-  color: var(--faint);
-}
-
-.home-note {
-  margin-top: 16px;
-  padding-left: 16px;
-  font-family: var(--mono);
-  font-size: 11px;
   color: var(--faint);
 }
 

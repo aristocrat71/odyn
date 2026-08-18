@@ -13,8 +13,8 @@ import { renderSidebar } from "./sidebar";
 import {
   isView,
   load,
+  loadBrain,
   loadReminders,
-  newConversation,
   onChange,
   refreshStatus,
   selectConversation,
@@ -47,9 +47,7 @@ document.addEventListener("pointerdown", (event) => {
 const MAC = navigator.platform.startsWith("Mac");
 const SHORTCUTS: Record<string, () => void> = {
   k: () => void spotlightToggle(),
-  n: () => void newConversation(),
-  "1": () => setView("chat"),
-  "2": () => setView("brain"),
+  "1": () => setView("brain"),
 };
 
 window.addEventListener("keydown", (event) => {
@@ -74,6 +72,7 @@ renderView(main);
 
 watchStream();
 void load();
+void loadBrain();
 void refreshStatus();
 
 window.addEventListener("focus", () => {
