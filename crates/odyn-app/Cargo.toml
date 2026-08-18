@@ -20,6 +20,8 @@ tauri-plugin-opener = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# "sync" only: the oneshot a bash approval waits on.
+tokio = { workspace = true }
 
 # Spotlight is a real NSPanel on macOS: non-activating, so the app in front
 # keeps focus. Branch-pinned like asklight; Cargo.lock holds the exact rev.

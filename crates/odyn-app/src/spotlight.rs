@@ -558,15 +558,21 @@ async fn run(
             history.insert(0, Message::new(Role::System, context.system_message));
         }
     }
-    let tools = odyn_core::tools::offered(memorize, update, delete, link, unlink, remind, schedule);
+    // Ephemeral asks have no conversation, so no workspace and no agent tools.
+    let tools = odyn_core::tools::offered(
+        memorize, update, delete, link, unlink, remind, schedule, false,
+    );
     // A model that says nothing is as unusable as one that errored.
     let mut spoke = false;
     let mut sink = crate::commands::reminder_sink(&app);
     let mut plans = crate::commands::schedule_sink(&app, &provider_name, &model);
+    let mut gate = crate::commands::deny_bash();
     let mut effects = odyn_core::tools::Effects {
         brain_dir: &brain_dir,
+        workspace: None,
         set_reminder: &mut sink,
         set_schedule: &mut plans,
+        approve: &mut gate,
     };
     let driven = odyn_core::tools::run_turn(
         provider.as_ref(),
@@ -641,6 +647,10 @@ async fn run(
                         next_at,
                     },
                 ),
+                // No workspace here, so agent events cannot fire.
+                TurnEvent::AgentCall { .. }
+                | TurnEvent::AgentOut { .. }
+                | TurnEvent::Round { .. } => {}
             }
             Ok(())
         },

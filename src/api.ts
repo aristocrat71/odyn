@@ -12,6 +12,8 @@ export type Conversation = {
   updated_at: number;
   // The conversation's explicit choice; null follows the [style] default.
   brevity: BrevityLevel | null;
+  // The agent workspace folder; null is a normal conversation.
+  workspace: string | null;
 };
 
 export type ConversationView = Conversation & {
@@ -25,6 +27,8 @@ export type Message = {
   content: string;
   // Assistant rows: the slugs injected for the question this answers.
   used: string[];
+  // Assistant rows: the tool actions this reply ran, kept for five days.
+  commands: string[];
 };
 
 export type SearchHit = {
@@ -48,9 +52,15 @@ export type ChatEvent = { request_id: number } & (
   | { kind: "unlinked"; from: string; to: string }
   | { kind: "reminded"; text: string; due_at: number }
   | { kind: "scheduled"; prompt: string; next_at: number }
+  | { kind: "approval"; approval_id: number; command: string }
+  | { kind: "agentcall"; tool: string; detail: string }
+  | { kind: "agentout"; text: string; truncated: boolean }
+  | { kind: "round"; used: number; budget: number }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );
+
+export type ApprovalVerdict = "run" | "always" | "deny";
 
 export type LedgerItem = { id: string; tokens: number; content: string };
 
@@ -127,6 +137,17 @@ export const sendMessage = (
 
 export const cancelMessage = (requestId: number): Promise<void> =>
   invoke("cancel_message", { requestId });
+
+// Empty path clears; anything else must be an existing folder.
+export const setWorkspace = (
+  conversationId: number,
+  path: string,
+): Promise<Conversation> => invoke("set_workspace", { conversationId, path });
+
+export const approveCommand = (
+  approvalId: number,
+  verdict: ApprovalVerdict,
+): Promise<void> => invoke("approve_command", { approvalId, verdict });
 
 export const contextPreview = (
   conversationId: number | null,

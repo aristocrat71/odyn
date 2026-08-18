@@ -10,10 +10,12 @@ import {
   onStream,
   refreshPreview,
   resend,
+  resolveApproval,
   schedulePreview,
   send,
   state,
   streaming,
+  type AgentItem,
   type Stream,
 } from "./state";
 
@@ -119,11 +121,14 @@ export function prefillComposer(text: string): void {
 }
 
 // One message per delta; the transcript follows only if already at the end.
+// Only the tail text item streams, so only its node is patched.
 function patch(): void {
   const stream = state.stream;
   if (answer === null || transcript === null || stream === null) return;
+  const last = stream.agent[stream.agent.length - 1];
+  if (last === undefined || last.kind !== "text") return;
   const follow = atBottom(transcript);
-  fill(answer, stream.text, true);
+  fill(answer, last.text, true);
   if (follow) transcript.scrollTop = transcript.scrollHeight;
 }
 
@@ -132,20 +137,92 @@ function said(message: Message, index: number): HTMLElement {
   block.dataset.mid = String(message.id);
   const text = el("div", "text");
   fill(text, message.content, false);
-  block.append(speaker(message.role), text);
+  block.append(speaker(message.role));
+  if (message.commands.length > 0) block.append(commandLog(message));
+  block.append(text);
   if (message.used.length > 0) {
     block.append(trace("◈", "used", message.used, `m${index}`));
   }
   return block;
 }
 
+// Message ids are globally unique, so the open set never needs clearing.
+const shownCommands = new Set<number>();
+
+// `show commands ▾` above a stored reply: every tool action the agent ran —
+// file operations and approved shell commands — kept after the live log goes.
+function commandLog(message: Message): HTMLElement {
+  const box = el("div", "agent-cmds");
+  const open = shownCommands.has(message.id);
+  const label = open
+    ? "hide commands ▴"
+    : `show commands (${message.commands.length}) ▾`;
+  const toggle = el("button", "agent-cmds-toggle", label);
+  toggle.addEventListener("click", () => {
+    if (open) shownCommands.delete(message.id);
+    else shownCommands.add(message.id);
+    box.replaceWith(commandLog(message));
+  });
+  box.append(toggle);
+  if (open) {
+    const list = el("div", "agent-cmds-list");
+    for (const command of message.commands) {
+      list.append(el("div", "agent-cmds-line", command));
+    }
+    box.append(list);
+  }
+  return box;
+}
+
+// The reply in arrival order: text, agent calls, outputs and approval rows
+// interleave exactly as they happened.
 function streamed(stream: Stream): HTMLElement {
   const block = el("div", "message assistant");
-  const text = el("div", "text");
-  fill(text, stream.text, stream.error === "");
-  block.append(speaker("assistant"), text);
-  if (stream.error === "") answer = text;
-  else block.append(failed(stream.error));
+  const head = speaker("assistant");
+  if (stream.rounds !== null) {
+    head.append(
+      el("span", "agent-rounds", `⚙ ${stream.rounds.used}/${stream.rounds.budget}`),
+    );
+  }
+  block.append(head);
+  const live = stream.error === "";
+  let tail: HTMLElement | null = null;
+  for (const item of stream.agent) {
+    tail = null;
+    if (item.kind === "text") {
+      const text = el("div", "text");
+      fill(text, item.text, false);
+      block.append(text);
+      tail = text;
+    } else if (item.kind === "call") {
+      const row = el("div", "agent-call");
+      row.append(el("span", "agent-tool", item.tool), " ", item.detail);
+      block.append(row);
+    } else if (item.kind === "out") {
+      const out = el("div", "agent-out", item.text);
+      if (item.truncated) {
+        out.append(el("div", "agent-trunc", "…output truncated to its tail"));
+      }
+      block.append(out);
+    } else {
+      block.append(approvalRow(item));
+    }
+  }
+  if (live) {
+    // The cursor rides the streaming text; between rounds the wait line shows.
+    if (tail !== null) {
+      const last = stream.agent[stream.agent.length - 1];
+      if (last !== undefined && last.kind === "text") fill(tail, last.text, true);
+      answer = tail;
+    } else {
+      const text = el("div", "text");
+      fill(text, "", true);
+      block.append(text);
+      answer = text;
+    }
+  } else {
+    block.append(failed(stream.error));
+  }
   if (stream.used.length > 0) block.append(trace("◈", "used", stream.used, "stream"));
   if (stream.saved.length > 0) {
     block.append(trace("✎", "saved", stream.saved, "stream-saved"));
@@ -171,6 +248,26 @@ function streamed(stream: Stream): HTMLElement {
   return block;
 }
 
+
+// The exact command in mono with run / always / deny; once answered, the row
+// collapses to its outcome.
+function approvalRow(item: AgentItem & { kind: "approval" }): HTMLElement {
+  const row = el("div", "agent-approve");
+  row.append(el("code", "agent-cmd", item.command));
+  if (item.resolved !== null) {
+    const outcome = item.resolved === "deny" ? "✕ denied" : `✓ ${item.resolved}`;
+    row.append(el("span", "agent-verdict", outcome));
+    return row;
+  }
+  const actions = el("span", "agent-actions");
+  for (const verdict of ["run", "always", "deny"] as const) {
+    const button = el("button", `agent-btn ${verdict}`, verdict);
+    button.addEventListener("click", () => void resolveApproval(item.approvalId, verdict));
+    actions.append(button);
+  }
+  row.append(actions);
+  return row;
+}
 
 function speaker(role: Message["role"]): HTMLElement {
   return el("div", "speaker", role === "user" ? "MITUL" : "ᛟ ODYN");

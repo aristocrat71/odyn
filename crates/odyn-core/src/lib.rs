@@ -1,5 +1,6 @@
 //! odyn-core — all Odyn logic lives here; the CLI and app are thin adapters.
 
+pub mod agent;
 pub mod brain;
 pub mod brevity;
 pub mod catalog;

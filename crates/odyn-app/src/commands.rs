@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use odyn_core::agent;
 use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
 use odyn_core::chat::{ChatError, ChatProvider, Message, Role, ToolDef, Usage};
@@ -33,6 +34,8 @@ pub struct Conversation {
     updated_at: i64,
     /// The conversation's explicit choice; `None` follows `[style] brevity`.
     brevity: Option<Brevity>,
+    /// The agent workspace; `None` is a normal conversation.
+    workspace: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -53,6 +56,8 @@ pub struct MessageView {
     content: String,
     /// Assistant rows only: the slugs injected for the question this answers.
     used: Vec<String>,
+    /// Assistant rows only: the tool actions this reply ran, in run order.
+    commands: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -153,6 +158,23 @@ pub(crate) enum Body {
     Scheduled {
         prompt: String,
         next_at: i64,
+    },
+    /// A bash command waiting on the user; `approve_command` resolves it.
+    Approval {
+        approval_id: u64,
+        command: String,
+    },
+    AgentCall {
+        tool: String,
+        detail: String,
+    },
+    AgentOut {
+        text: String,
+        truncated: bool,
+    },
+    Round {
+        used: usize,
+        budget: usize,
     },
     Done {
         usage: Option<Usage>,
@@ -268,6 +290,69 @@ pub async fn set_conversation_model(
     set.map_err(say)
 }
 
+/// An existing folder makes the conversation an agent one; an empty string
+/// turns it back. Stored canonicalized, so containment and display agree.
+#[tauri::command]
+pub async fn set_workspace(
+    state: State<'_, AppState>,
+    conversation_id: i64,
+    path: String,
+) -> Result<Conversation, String> {
+    let ready = state.ready()?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        let cleared = ready
+            .storage()
+            .set_conversation_workspace(conversation_id, None);
+        cleared.map_err(say)?;
+        return conversation(&ready, conversation_id).map(Conversation::from);
+    }
+    let expanded = notes::expand_home(std::path::Path::new(trimmed));
+    let folder = expanded
+        .canonicalize()
+        .map_err(|_| format!("`{trimmed}` is not a folder that exists"))?;
+    if !folder.is_dir() {
+        return Err(format!("`{trimmed}` is not a folder"));
+    }
+    let stored = folder
+        .to_str()
+        .ok_or_else(|| format!("`{trimmed}` is not valid UTF-8"))?;
+    let set = ready
+        .storage()
+        .set_conversation_workspace(conversation_id, Some(stored));
+    set.map_err(say)?;
+    conversation(&ready, conversation_id).map(Conversation::from)
+}
+
+/// Resolves one waiting bash approval. `always` remembers the exact command
+/// for this conversation before running it.
+#[tauri::command]
+pub async fn approve_command(
+    state: State<'_, AppState>,
+    approval_id: u64,
+    verdict: String,
+) -> Result<(), String> {
+    // A missing entry belongs to a turn that was cancelled; nothing to do.
+    let Some(pending) = state.approvals.close(approval_id) else {
+        return Ok(());
+    };
+    let answer = match verdict.as_str() {
+        "run" => tools::Verdict::Run,
+        "always" => {
+            let ready = state.ready()?;
+            let allowed = ready
+                .storage()
+                .allow_command(pending.conversation_id, &pending.command);
+            allowed.map_err(say)?;
+            tools::Verdict::Run
+        }
+        "deny" => tools::Verdict::Deny,
+        other => return Err(format!("unknown verdict `{other}`")),
+    };
+    let _ = pending.sender.send(answer);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_conversation(
     state: State<'_, AppState>,
@@ -324,6 +409,11 @@ pub async fn messages(
         }
     }
 
+    let mut ran: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    for (message_id, command) in storage.agent_commands(conversation_id).map_err(say)? {
+        ran.entry(message_id).or_default().push(command);
+    }
+
     let mut question = None;
     Ok(rows
         .into_iter()
@@ -340,6 +430,7 @@ pub async fn messages(
                 Role::System | Role::Tool => Vec::new(),
             };
             MessageView {
+                commands: ran.remove(&row.id).unwrap_or_default(),
                 id: row.id,
                 role: row.role,
                 content: row.content,
@@ -432,6 +523,7 @@ pub async fn send_message(
     let brevity = row.brevity.unwrap_or(ready.config.style.brevity);
     let save_temperature = ready.config.brain.save_temperature;
     let provider_config = ready.config.providers.get(&row.provider).cloned();
+    let workspace = row.workspace.map(std::path::PathBuf::from);
     let task = tauri::async_runtime::spawn(run(
         app.clone(),
         request_id,
@@ -446,6 +538,7 @@ pub async fn send_message(
         brevity,
         brain_dir,
         save_temperature,
+        workspace,
     ));
     stream.attach(task);
     Ok(request_id)
@@ -463,6 +556,7 @@ pub async fn cancel_message(
         return Ok(());
     };
     stream.abort();
+    state.approvals.abandon(request_id);
     settle(&app, &ready, request_id, &stream, None, true);
     Ok(())
 }
@@ -613,9 +707,11 @@ async fn run(
     brevity: Brevity,
     brain_dir: std::path::PathBuf,
     save_temperature: f32,
+    workspace: Option<std::path::PathBuf>,
 ) {
     // Refused before recall runs: an embed plus a doomed request helps no one.
-    let earns_tools = ask.writes() || ask.remind || ask.schedule;
+    // A workspace earns the agent tools on every turn, so the gate covers it.
+    let earns_tools = ask.writes() || ask.remind || ask.schedule || workspace.is_some();
     if let Some(config) = provider_config.filter(|_| earns_tools) {
         if lacks_tools(&config, &model).await {
             app.state::<AppState>().streams.close(request_id);
@@ -623,7 +719,10 @@ async fn run(
             return;
         }
     }
-    let context = build_context(&app, prior.clone(), ask.clone(), brevity).await;
+    let mut context = build_context(&app, prior.clone(), ask.clone(), brevity).await;
+    if let (Some(context), Some(workspace)) = (context.as_mut(), workspace.as_deref()) {
+        with_workspace(context, workspace);
+    }
     if let Some(context) = &context {
         record(&app, &stream, question_id, context);
         emit(&app, request_id, context_body(context));
@@ -643,6 +742,7 @@ async fn run(
         ask.unlink,
         ask.remind,
         ask.schedule,
+        workspace.is_some(),
     );
 
     let outcome = drive(
@@ -656,6 +756,7 @@ async fn run(
         &tools,
         &brain_dir,
         save_temperature,
+        workspace.as_deref(),
     )
     .await;
     let state = app.state::<AppState>();
@@ -670,6 +771,74 @@ async fn run(
         Outcome::Done(usage) => settle(&app, &ready, request_id, &stream, usage, false),
         Outcome::Interrupted => settle(&app, &ready, request_id, &stream, None, true),
         Outcome::Failed(message) => emit(&app, request_id, Body::error(message)),
+    }
+}
+
+/// For surfaces that never offer bash: any approval request is answered no.
+pub(crate) fn deny_bash(
+) -> impl FnMut(String) -> futures::future::BoxFuture<'static, tools::Verdict> + Send {
+    |_| Box::pin(async { tools::Verdict::Deny })
+}
+
+/// The bash gate for a chat turn: the conversation's allowlist runs the
+/// command silently, anything else is put to the user and awaited.
+fn approver<'a>(
+    app: &'a AppHandle,
+    request_id: u64,
+    stream: &Arc<Stream>,
+) -> impl FnMut(String) -> futures::future::BoxFuture<'static, tools::Verdict> + Send + 'a {
+    let stream = Arc::clone(stream);
+    move |command: String| {
+        let app = app.clone();
+        let stream = Arc::clone(&stream);
+        Box::pin(async move {
+            let conversation_id = stream.conversation_id;
+            let state = app.state::<AppState>();
+            let allowed = match state.inner().ready() {
+                Ok(ready) => {
+                    let listed = ready.storage().allowed_commands(conversation_id);
+                    listed.unwrap_or_default()
+                }
+                Err(_) => Vec::new(),
+            };
+            let verdict = if allowed.iter().any(|line| line == &command) {
+                tools::Verdict::Run
+            } else {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let approval_id =
+                    state
+                        .approvals
+                        .open(request_id, conversation_id, command.clone(), sender);
+                emit(
+                    &app,
+                    request_id,
+                    Body::Approval {
+                        approval_id,
+                        command: command.clone(),
+                    },
+                );
+                // A dropped sender is a cancelled turn: deny.
+                receiver.await.unwrap_or(tools::Verdict::Deny)
+            };
+            // Logged only once it is allowed to run, and in the same
+            // `tool detail` shape the file tools use.
+            if verdict == tools::Verdict::Run {
+                stream.ran(&format!("{} {command}", agent::BASH));
+            }
+            verdict
+        })
+    }
+}
+
+/// The agent preamble joins the system message last, on the send and in the
+/// preview both, so the ledger stays equal to reality.
+fn with_workspace(context: &mut InjectedContext, workspace: &std::path::Path) {
+    let preamble = agent::preamble(workspace);
+    if context.system_message.is_empty() {
+        context.system_message = preamble;
+    } else {
+        context.system_message.push_str("\n\n");
+        context.system_message.push_str(&preamble);
     }
 }
 
@@ -858,23 +1027,30 @@ pub async fn context_preview(
     tauri::async_runtime::spawn_blocking(move || {
         let ready = app.state::<AppState>().inner().ready()?;
         let ask = brain::parse_ask(&draft);
-        let (prior, chosen): (Vec<Message>, Option<Brevity>) = match conversation_id {
-            Some(id) => {
-                // One lock per statement to prevent self-deadlock.
-                let brevity = conversation(&ready, id)?.brevity;
-                let prior = ready
-                    .storage()
-                    .messages(id)
-                    .map_err(say)?
-                    .into_iter()
-                    .map(|row| Message::new(row.role, row.content))
-                    .collect();
-                (prior, brevity)
-            }
-            None => (Vec::new(), None),
-        };
+        let (prior, chosen, workspace): (Vec<Message>, Option<Brevity>, Option<String>) =
+            match conversation_id {
+                Some(id) => {
+                    // One lock per statement to prevent self-deadlock.
+                    let row = conversation(&ready, id)?;
+                    let prior = ready
+                        .storage()
+                        .messages(id)
+                        .map_err(say)?
+                        .into_iter()
+                        .map(|row| Message::new(row.role, row.content))
+                        .collect();
+                    (prior, row.brevity, row.workspace)
+                }
+                None => (Vec::new(), None, None),
+            };
         let brevity = chosen.unwrap_or(ready.config.style.brevity);
         let brain_config = ready.config.brain.clone();
+        let finish = |mut context: InjectedContext, active: bool| {
+            if let Some(workspace) = &workspace {
+                with_workspace(&mut context, std::path::Path::new(workspace));
+            }
+            preview(context, &brain_config, active)
+        };
         // A draft without triggers previews what it would send: the soul alone.
         if !ask.any() {
             let context = brain::build_context(None, &brain_config, &prior, &ask, brevity, || {
@@ -883,7 +1059,7 @@ pub async fn context_preview(
                 ))
             })
             .map_err(|err| err.to_string())?;
-            return Ok(preview(context, &brain_config, false));
+            return Ok(finish(context, false));
         }
         sync_index(&ready)?;
         // One lock per statement — see `sync_index`.
@@ -893,7 +1069,7 @@ pub async fn context_preview(
                 load_embedder(&ready.config, &brain_config.model)
             })
             .map_err(|err| err.to_string())?;
-        Ok(preview(context, &brain_config, true))
+        Ok(finish(context, true))
     })
     .await
     .map_err(|err| err.to_string())?
@@ -923,7 +1099,7 @@ fn preview(context: InjectedContext, config: &BrainConfig, active: bool) -> Cont
 async fn drive(
     app: &AppHandle,
     request_id: u64,
-    stream: &Stream,
+    stream: &Arc<Stream>,
     provider: &dyn ChatProvider,
     provider_name: &str,
     model: &str,
@@ -931,13 +1107,17 @@ async fn drive(
     tools: &[ToolDef],
     brain_dir: &std::path::Path,
     save_temperature: f32,
+    workspace: Option<&std::path::Path>,
 ) -> Outcome {
     let mut sink = reminder_sink(app);
     let mut plans = schedule_sink(app, provider_name, model);
+    let mut gate = approver(app, request_id, stream);
     let mut effects = tools::Effects {
         brain_dir,
+        workspace,
         set_reminder: &mut sink,
         set_schedule: &mut plans,
+        approve: &mut gate,
     };
     let driven = tools::run_turn(
         provider,
@@ -1011,6 +1191,33 @@ async fn drive(
                         next_at,
                     },
                 ),
+                TurnEvent::AgentCall { tool, detail } => {
+                    // File tools always run, so they are logged the moment
+                    // they are called; bash is logged by the approver, but
+                    // only once it is actually allowed to run.
+                    if tool != agent::BASH {
+                        stream.ran(&format!("{tool} {detail}"));
+                    }
+                    emit(
+                        app,
+                        request_id,
+                        Body::AgentCall {
+                            tool: tool.to_string(),
+                            detail: detail.to_string(),
+                        },
+                    );
+                }
+                TurnEvent::AgentOut { text, truncated } => emit(
+                    app,
+                    request_id,
+                    Body::AgentOut {
+                        text: text.to_string(),
+                        truncated,
+                    },
+                ),
+                TurnEvent::Round { used, budget } => {
+                    emit(app, request_id, Body::Round { used, budget })
+                }
             }
             Ok(())
         },
@@ -1050,7 +1257,15 @@ fn settle(
         usage.map(|usage| usage.output_tokens),
     );
     let body = match stored {
-        Ok(_) => Body::Done { usage, interrupted },
+        Ok(message) => {
+            // What the reply ran, kept with its row; a failed record must not
+            // fail the reply that already streamed.
+            let commands = stream.commands();
+            if !commands.is_empty() {
+                let _ = ready.storage().record_commands(message.id, &commands);
+            }
+            Body::Done { usage, interrupted }
+        }
         Err(err) => Body::error(err.to_string()),
     };
     emit(app, request_id, body);
@@ -1110,6 +1325,7 @@ impl From<StoredConversation> for Conversation {
             model: row.model,
             updated_at: row.updated_at,
             brevity: row.brevity,
+            workspace: row.workspace,
         }
     }
 }

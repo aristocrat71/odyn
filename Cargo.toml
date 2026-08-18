@@ -30,8 +30,9 @@ serde_json = "1"
 # Statically linked vector search; registered via odyn-vec's init hook.
 sqlite-vec = "0.1"
 thiserror = "2"
-# "time" drives the first-token deadline; "rt"/"macros" are for #[tokio::test].
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+# "time" drives the first-token deadline; "rt"/"macros" are for #[tokio::test];
+# "process" runs agent bash commands; "sync" is the approval oneshot.
+tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync"] }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-build = { version = "2", features = [] }
 tauri-plugin-global-shortcut = "2"

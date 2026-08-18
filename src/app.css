@@ -2244,3 +2244,192 @@ g.labeled .gnode-epi text {
   font-size: 10.5px;
   color: var(--faint);
 }
+
+/* Agent mode — the workspace chip and the live tool log. Mono and quiet;
+   only the approval buttons get color. */
+
+.workspace {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.workspace-chip {
+  color: var(--muted);
+}
+
+.workspace-chip:hover {
+  color: var(--ink);
+}
+
+.workspace-mark {
+  color: var(--epi);
+}
+
+.workspace-clear {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.workspace-clear:hover {
+  color: var(--danger);
+}
+
+.workspace-set {
+  color: var(--faint);
+}
+
+.workspace-set:hover {
+  color: var(--muted);
+}
+
+.workspace-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 2;
+  width: 300px;
+  padding: 12px 14px;
+  border-radius: var(--radius-menu);
+  background: var(--bg-soft);
+  box-shadow: var(--shadow-menu), var(--ring);
+}
+
+.workspace-input {
+  width: 100%;
+  padding: 0 0 4px;
+  border: 0;
+  border-bottom: 1px solid var(--faint);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  outline: none;
+}
+
+.workspace-input:focus {
+  border-bottom-color: var(--epi);
+}
+
+.workspace-hint {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.agent-rounds {
+  margin-left: 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.agent-call {
+  margin: 6px 0 2px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.agent-tool {
+  color: var(--muted);
+}
+
+.agent-out {
+  margin: 2px 0 6px;
+  padding: 6px 10px;
+  max-height: 180px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--faint) transparent;
+  border-left: 2px solid var(--faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-trunc {
+  margin-top: 4px;
+  color: var(--faint);
+  white-space: normal;
+}
+
+.agent-approve {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-code);
+  background: var(--bg-soft);
+  box-shadow: var(--ring);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.agent-cmd {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.agent-actions {
+  display: flex;
+  gap: 12px;
+  white-space: nowrap;
+}
+
+.agent-btn.run {
+  color: var(--epi);
+}
+
+.agent-btn.always {
+  color: var(--core);
+}
+
+.agent-btn.deny {
+  color: var(--danger);
+}
+
+.agent-btn:hover {
+  text-decoration: underline;
+}
+
+.agent-verdict {
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.agent-cmds {
+  margin: 2px 0 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.agent-cmds-toggle {
+  color: var(--faint);
+}
+
+.agent-cmds-toggle:hover {
+  color: var(--muted);
+}
+
+.agent-cmds-list {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 2px solid var(--faint);
+  color: var(--dim);
+  line-height: 1.7;
+}
+
+.agent-cmds-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
