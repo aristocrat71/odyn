@@ -422,11 +422,14 @@ pub async fn run_turn(
         let mut clean = Vec::new();
         let mut failed = false;
         for call in calls {
-            let seen = repeats
-                .entry((call.name.clone(), call.arguments.to_string()))
-                .or_insert(0);
-            *seen += 1;
-            let runaway = *seen >= RUNAWAY_CALLS;
+            let repeat = {
+                let seen = repeats
+                    .entry((call.name.clone(), call.arguments.to_string()))
+                    .or_insert(0);
+                *seen += 1;
+                *seen
+            };
+            let runaway = repeat >= RUNAWAY_CALLS;
             let detail = agent_detail(&call, agentic);
             if let Some(detail) = &detail {
                 emit(TurnEvent::AgentCall {
@@ -435,7 +438,15 @@ pub async fn run_turn(
                 })
                 .map_err(TurnError::Write)?;
             }
-            let (result, written) = run_tool(effects, &call).await;
+            let (mut result, written) = run_tool(effects, &call).await;
+            // The tools are deterministic: retrying an identical failed call
+            // is a loop starting, and the model is told so in round two.
+            if repeat >= 2 && result.starts_with("error:") {
+                result.push_str(
+                    "\n[you already made this exact call and it failed the same way — \
+                     change the arguments or the approach]",
+                );
+            }
             match written {
                 Some(Written::Agent { truncated }) => {
                     emit(TurnEvent::AgentOut {
@@ -1942,6 +1953,63 @@ mod tests {
         let last = wrap_up.0.last().expect("wrap-up message");
         assert_eq!(last.role, Role::User);
         assert_eq!(last.content, WRAP_UP);
+    }
+
+    /// The second identical failing call carries a spelled-out warning, so a
+    /// small model breaks out of the loop long before the runaway guard.
+    #[test]
+    fn a_repeated_failing_call_is_told_it_is_looping() {
+        let dir = TempDir::new("nudge");
+        std::fs::create_dir_all(dir.0.join("src")).expect("mkdir");
+        let mut sink = refuse_reminders();
+        let mut plans = refuse_schedules();
+        let mut gate = refuse_bash();
+        let mut effects = Effects {
+            brain_dir: &dir.0,
+            workspace: Some(&dir.0),
+            set_reminder: &mut sink,
+            set_schedule: &mut plans,
+            approve: &mut gate,
+        };
+        let misread = || agent_call(agent::READ_FILE, serde_json::json!({"path": "src"}));
+        let provider = Scripted::new(vec![
+            vec![misread(), done()],
+            vec![misread(), done()],
+            vec![
+                Ok(ChatEvent::TextDelta("Right, it is a folder.".to_string())),
+                done(),
+            ],
+        ]);
+        let reply = block_on(run_turn(
+            &provider,
+            "qwen3:8b",
+            vec![Message::new(Role::User, "read src")],
+            &agent::tool_defs(),
+            &mut effects,
+            0.3,
+            |_| Ok(()),
+        ))
+        .expect("turn");
+
+        assert_eq!(reply.text, "Right, it is a folder.");
+        let requests = provider.requests.lock().expect("requests");
+        let results: Vec<&str> = requests[2]
+            .0
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .map(|message| message.content.as_str())
+            .collect();
+        assert!(
+            results[0].starts_with("error: `src` is a folder"),
+            "{}",
+            results[0]
+        );
+        assert!(!results[0].contains("[you already"), "first try, no nudge");
+        assert!(
+            results[1].contains("[you already made this exact call"),
+            "{}",
+            results[1]
+        );
     }
 
     #[test]

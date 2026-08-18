@@ -75,12 +75,22 @@ pub fn contain(workspace: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+/// A raw EISDIR reads as noise to a small model; this redirects it instead.
+fn folder_not_file(path: &str, file: &Path) -> Option<String> {
+    file.is_dir().then(|| {
+        format!("error: `{path}` is a folder, not a file — call ls to see what is inside it")
+    })
+}
+
 /// `offset` and `limit` are line-based, for paging through big files.
 pub fn read_file(workspace: &Path, path: &str, offset: usize, limit: Option<usize>) -> String {
     let file = match contain(workspace, path) {
         Ok(file) => file,
         Err(err) => return format!("error: {err}"),
     };
+    if let Some(answer) = folder_not_file(path, &file) {
+        return answer;
+    }
     let content = match std::fs::read_to_string(&file) {
         Ok(content) => content,
         Err(err) => return format!("error: could not read `{path}`: {err}"),
@@ -119,6 +129,9 @@ pub fn write_file(workspace: &Path, path: &str, content: &str) -> String {
         Ok(file) => file,
         Err(err) => return format!("error: {err}"),
     };
+    if let Some(answer) = folder_not_file(path, &file) {
+        return answer;
+    }
     if let Some(parent) = file.parent() {
         if let Err(err) = std::fs::create_dir_all(parent) {
             return format!("error: could not create the folders for `{path}`: {err}");
@@ -137,6 +150,9 @@ pub fn edit_file(workspace: &Path, path: &str, old: &str, new: &str) -> String {
         Ok(file) => file,
         Err(err) => return format!("error: {err}"),
     };
+    if let Some(answer) = folder_not_file(path, &file) {
+        return answer;
+    }
     let content = match std::fs::read_to_string(&file) {
         Ok(content) => content,
         Err(err) => return format!("error: could not read `{path}`: {err}"),
@@ -156,6 +172,9 @@ pub fn ls(workspace: &Path, path: &str) -> String {
         Ok(dir) => dir,
         Err(err) => return format!("error: {err}"),
     };
+    if dir.is_file() {
+        return format!("error: `{path}` is a file, not a folder — call read_file to read it");
+    }
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(err) => return format!("error: could not list `{path}`: {err}"),
@@ -653,6 +672,28 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.0.join("dupe.txt")).expect("read"),
             "same\nsame\n"
+        );
+    }
+
+    /// The bug that looped a live model: a folder misread answered with a raw
+    /// `Is a directory (os error 21)`. Every wrong-kind call redirects now.
+    #[test]
+    fn wrong_kind_calls_redirect_instead_of_leaking_os_errors() {
+        let dir = seeded("wrong-kind");
+        for answer in [
+            read_file(&dir.0, "src", 0, None),
+            edit_file(&dir.0, "src", "a", "b"),
+            write_file(&dir.0, "src", "clobber"),
+        ] {
+            assert_eq!(
+                answer,
+                "error: `src` is a folder, not a file — call ls to see what is inside it"
+            );
+        }
+        assert!(dir.0.join("src/main.rs").exists(), "nothing was clobbered");
+        assert_eq!(
+            ls(&dir.0, "readme.md"),
+            "error: `readme.md` is a file, not a folder — call read_file to read it"
         );
     }
 
