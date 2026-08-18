@@ -137,11 +137,42 @@ function said(message: Message, index: number): HTMLElement {
   block.dataset.mid = String(message.id);
   const text = el("div", "text");
   fill(text, message.content, false);
-  block.append(speaker(message.role), text);
+  block.append(speaker(message.role));
+  if (message.commands.length > 0) block.append(commandLog(message));
+  block.append(text);
   if (message.used.length > 0) {
     block.append(trace("◈", "used", message.used, `m${index}`));
   }
   return block;
+}
+
+// Message ids are globally unique, so the open set never needs clearing.
+const shownCommands = new Set<number>();
+
+// `show commands ▾` above a stored reply: what the agent actually ran, kept
+// after the live log is gone.
+function commandLog(message: Message): HTMLElement {
+  const box = el("div", "agent-cmds");
+  const open = shownCommands.has(message.id);
+  const count = message.commands.length;
+  const label = open
+    ? "hide commands ▴"
+    : `show commands${count > 1 ? ` (${count})` : ""} ▾`;
+  const toggle = el("button", "agent-cmds-toggle", label);
+  toggle.addEventListener("click", () => {
+    if (open) shownCommands.delete(message.id);
+    else shownCommands.add(message.id);
+    box.replaceWith(commandLog(message));
+  });
+  box.append(toggle);
+  if (open) {
+    const list = el("div", "agent-cmds-list");
+    for (const command of message.commands) {
+      list.append(el("div", "agent-cmds-line", `$ ${command}`));
+    }
+    box.append(list);
+  }
+  return box;
 }
 
 // The reply in arrival order: text, agent calls, outputs and approval rows

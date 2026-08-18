@@ -368,7 +368,9 @@ async function start(prompt: string, retry: boolean): Promise<void> {
   if (conversation === null) return;
   // A retry answers a question that is already stored, and already shown.
   // The optimistic row has no stored id yet; -1 is never a jump target.
-  if (!retry) state.messages.push({ id: -1, role: "user", content: prompt, used: [] });
+  if (!retry) {
+    state.messages.push({ id: -1, role: "user", content: prompt, used: [], commands: [] });
+  }
   const stream: Stream = {
     conversation,
     requestId: null,

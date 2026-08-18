@@ -193,6 +193,15 @@ CREATE TABLE agent_allow (
     PRIMARY KEY (conversation_id, command)
 );
 ",
+    // What a reply actually ran, hung off its stored message: answers "what
+    // did the agent do" after the live log is gone. Id order = run order.
+    r"
+CREATE TABLE agent_commands (
+    id         INTEGER PRIMARY KEY,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    command    TEXT    NOT NULL
+);
+",
 ];
 
 /// Marks a matched term in a search snippet; its closer is `SNIPPET_END`.
@@ -381,6 +390,42 @@ impl Storage {
             "SELECT command FROM agent_allow WHERE conversation_id = ?1 ORDER BY command",
         )?;
         let rows = stmt.query_map(params![conversation_id], |row| row.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The bash commands a reply ran, in run order, against its message row.
+    /// Each write also sweeps expired rows, so the log cannot outgrow its
+    /// retention while it is the thing growing.
+    pub fn record_commands(
+        &self,
+        message_id: i64,
+        commands: &[String],
+    ) -> Result<(), StorageError> {
+        let tx = self.conn.unchecked_transaction()?;
+        prune_commands(&tx, now_secs())?;
+        for command in commands {
+            tx.execute(
+                "INSERT INTO agent_commands (message_id, command) VALUES (?1, ?2)",
+                params![message_id, command],
+            )?;
+        }
+        Ok(tx.commit()?)
+    }
+
+    /// Every recorded command in the conversation, as `(message_id, command)`.
+    /// The retention window filters here too, so an expired row is invisible
+    /// even before a write has swept it — opening must never take the write
+    /// lock, a reader never blocks the writer.
+    pub fn agent_commands(&self, conversation_id: i64) -> Result<Vec<(i64, String)>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.message_id, c.command FROM agent_commands c
+             JOIN messages m ON m.id = c.message_id
+             WHERE m.conversation_id = ?1 AND m.created_at >= ?2 ORDER BY c.id",
+        )?;
+        let rows = stmt.query_map(
+            params![conversation_id, now_secs() - COMMAND_RETENTION_SECS],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -622,6 +667,19 @@ fn found(changed: usize, id: i64) -> Result<(), StorageError> {
     if changed == 0 {
         return Err(StorageError::ConversationNotFound(id));
     }
+    Ok(())
+}
+
+/// The command log is a recent-history convenience, not an archive: rows
+/// older than five days are hidden from reads and swept on every new write.
+const COMMAND_RETENTION_SECS: i64 = 5 * 24 * 60 * 60;
+
+fn prune_commands(conn: &Connection, now: i64) -> Result<(), StorageError> {
+    conn.execute(
+        "DELETE FROM agent_commands WHERE message_id IN
+             (SELECT id FROM messages WHERE created_at < ?1)",
+        params![now - COMMAND_RETENTION_SECS],
+    )?;
     Ok(())
 }
 
@@ -1222,6 +1280,85 @@ pub(crate) mod tests {
         assert!(
             storage.allow_command(9999, "anything").is_err(),
             "the foreign key must refuse an unknown conversation"
+        );
+    }
+
+    #[test]
+    fn ran_commands_persist_with_their_reply_and_die_with_the_conversation() {
+        let dir = TempDir::new("ran");
+        let storage = Storage::open(dir.db()).expect("open");
+        let chat = storage
+            .create_conversation("agent", "ollama", "qwen3:8b")
+            .expect("create");
+        let reply = storage
+            .append_message(chat.id, Role::Assistant, "built it", None, None)
+            .expect("append");
+
+        storage
+            .record_commands(
+                reply.id,
+                &["cargo build".to_string(), "cargo test".to_string()],
+            )
+            .expect("record");
+        storage
+            .record_commands(reply.id, &[])
+            .expect("empty is fine");
+        assert_eq!(
+            storage.agent_commands(chat.id).expect("list"),
+            vec![
+                (reply.id, "cargo build".to_string()),
+                (reply.id, "cargo test".to_string()),
+            ],
+            "run order survives"
+        );
+
+        storage.delete_conversation(chat.id).expect("delete");
+        assert!(storage.agent_commands(chat.id).expect("list").is_empty());
+        assert!(
+            storage.record_commands(9999, &["x".to_string()]).is_err(),
+            "the foreign key must refuse an unknown message"
+        );
+    }
+
+    #[test]
+    fn commands_past_the_retention_window_are_hidden_and_swept() {
+        let dir = TempDir::new("sweep");
+        let storage = Storage::open(dir.db()).expect("open");
+        let chat = storage
+            .create_conversation("agent", "ollama", "qwen3:8b")
+            .expect("create");
+        let old = storage
+            .append_message(chat.id, Role::Assistant, "long ago", None, None)
+            .expect("append");
+        storage
+            .record_commands(old.id, &["make old".to_string()])
+            .expect("record");
+        // Backdate the message past the five-day window: the read filter
+        // hides its commands immediately, before any sweep.
+        storage
+            .conn
+            .execute(
+                "UPDATE messages SET created_at = ?2 WHERE id = ?1",
+                params![old.id, now_secs() - COMMAND_RETENTION_SECS - 60],
+            )
+            .expect("backdate");
+        assert!(storage.agent_commands(chat.id).expect("list").is_empty());
+
+        // The next write physically sweeps the expired rows.
+        let fresh = storage
+            .append_message(chat.id, Role::Assistant, "just now", None, None)
+            .expect("append");
+        storage
+            .record_commands(fresh.id, &["make fresh".to_string()])
+            .expect("record");
+        let rows: i64 = storage
+            .conn
+            .query_row("SELECT COUNT(*) FROM agent_commands", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(rows, 1, "the expired row is gone from disk");
+        assert_eq!(
+            storage.agent_commands(chat.id).expect("list"),
+            vec![(fresh.id, "make fresh".to_string())]
         );
     }
 

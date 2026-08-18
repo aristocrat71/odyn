@@ -2406,3 +2406,30 @@ g.labeled .gnode-epi text {
   color: var(--dim);
   white-space: nowrap;
 }
+
+.agent-cmds {
+  margin: 2px 0 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.agent-cmds-toggle {
+  color: var(--faint);
+}
+
+.agent-cmds-toggle:hover {
+  color: var(--muted);
+}
+
+.agent-cmds-list {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 2px solid var(--faint);
+  color: var(--dim);
+  line-height: 1.7;
+}
+
+.agent-cmds-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

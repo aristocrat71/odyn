@@ -150,6 +150,8 @@ pub struct Streams {
 pub struct Stream {
     pub conversation_id: i64,
     partial: Mutex<String>,
+    /// The bash commands approved to run this reply, in run order.
+    commands: Mutex<Vec<String>>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -161,6 +163,7 @@ impl Streams {
         let stream = Arc::new(Stream {
             conversation_id,
             partial: Mutex::new(String::new()),
+            commands: Mutex::new(Vec::new()),
             task: Mutex::new(None),
         });
         lock(&self.live).insert(id, Arc::clone(&stream));
@@ -183,6 +186,14 @@ impl Stream {
 
     pub fn text(&self) -> String {
         lock(&self.partial).clone()
+    }
+
+    pub fn ran(&self, command: &str) {
+        lock(&self.commands).push(command.to_string());
+    }
+
+    pub fn commands(&self) -> Vec<String> {
+        lock(&self.commands).clone()
     }
 
     /// Abrupt on purpose: a stream waiting on a provider that stopped answering

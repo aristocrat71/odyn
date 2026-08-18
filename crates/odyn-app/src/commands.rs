@@ -56,6 +56,8 @@ pub struct MessageView {
     content: String,
     /// Assistant rows only: the slugs injected for the question this answers.
     used: Vec<String>,
+    /// Assistant rows only: the bash commands this reply ran, in run order.
+    commands: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -407,6 +409,11 @@ pub async fn messages(
         }
     }
 
+    let mut ran: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    for (message_id, command) in storage.agent_commands(conversation_id).map_err(say)? {
+        ran.entry(message_id).or_default().push(command);
+    }
+
     let mut question = None;
     Ok(rows
         .into_iter()
@@ -423,6 +430,7 @@ pub async fn messages(
                 Role::System | Role::Tool => Vec::new(),
             };
             MessageView {
+                commands: ran.remove(&row.id).unwrap_or_default(),
                 id: row.id,
                 role: row.role,
                 content: row.content,
@@ -774,14 +782,17 @@ pub(crate) fn deny_bash(
 
 /// The bash gate for a chat turn: the conversation's allowlist runs the
 /// command silently, anything else is put to the user and awaited.
-fn approver(
-    app: &AppHandle,
+fn approver<'a>(
+    app: &'a AppHandle,
     request_id: u64,
-    conversation_id: i64,
-) -> impl FnMut(String) -> futures::future::BoxFuture<'static, tools::Verdict> + Send + '_ {
+    stream: &Arc<Stream>,
+) -> impl FnMut(String) -> futures::future::BoxFuture<'static, tools::Verdict> + Send + 'a {
+    let stream = Arc::clone(stream);
     move |command: String| {
         let app = app.clone();
+        let stream = Arc::clone(&stream);
         Box::pin(async move {
+            let conversation_id = stream.conversation_id;
             let state = app.state::<AppState>();
             let allowed = match state.inner().ready() {
                 Ok(ready) => {
@@ -790,24 +801,30 @@ fn approver(
                 }
                 Err(_) => Vec::new(),
             };
-            if allowed.iter().any(|line| line == &command) {
-                return tools::Verdict::Run;
+            let verdict = if allowed.iter().any(|line| line == &command) {
+                tools::Verdict::Run
+            } else {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                let approval_id =
+                    state
+                        .approvals
+                        .open(request_id, conversation_id, command.clone(), sender);
+                emit(
+                    &app,
+                    request_id,
+                    Body::Approval {
+                        approval_id,
+                        command: command.clone(),
+                    },
+                );
+                // A dropped sender is a cancelled turn: deny.
+                receiver.await.unwrap_or(tools::Verdict::Deny)
+            };
+            // What actually ran is remembered with the reply's row.
+            if verdict == tools::Verdict::Run {
+                stream.ran(&command);
             }
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            let approval_id =
-                state
-                    .approvals
-                    .open(request_id, conversation_id, command.clone(), sender);
-            emit(
-                &app,
-                request_id,
-                Body::Approval {
-                    approval_id,
-                    command,
-                },
-            );
-            // A dropped sender is a cancelled turn: deny.
-            receiver.await.unwrap_or(tools::Verdict::Deny)
+            verdict
         })
     }
 }
@@ -1081,7 +1098,7 @@ fn preview(context: InjectedContext, config: &BrainConfig, active: bool) -> Cont
 async fn drive(
     app: &AppHandle,
     request_id: u64,
-    stream: &Stream,
+    stream: &Arc<Stream>,
     provider: &dyn ChatProvider,
     provider_name: &str,
     model: &str,
@@ -1093,7 +1110,7 @@ async fn drive(
 ) -> Outcome {
     let mut sink = reminder_sink(app);
     let mut plans = schedule_sink(app, provider_name, model);
-    let mut gate = approver(app, request_id, stream.conversation_id);
+    let mut gate = approver(app, request_id, stream);
     let mut effects = tools::Effects {
         brain_dir,
         workspace,
@@ -1231,7 +1248,15 @@ fn settle(
         usage.map(|usage| usage.output_tokens),
     );
     let body = match stored {
-        Ok(_) => Body::Done { usage, interrupted },
+        Ok(message) => {
+            // What the reply ran, kept with its row; a failed record must not
+            // fail the reply that already streamed.
+            let commands = stream.commands();
+            if !commands.is_empty() {
+                let _ = ready.storage().record_commands(message.id, &commands);
+            }
+            Body::Done { usage, interrupted }
+        }
         Err(err) => Body::error(err.to_string()),
     };
     emit(app, request_id, body);
