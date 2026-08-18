@@ -9,7 +9,7 @@ import { listen } from "@tauri-apps/api/event";
 import { accept, ghost } from "./complete";
 import { el, forgetTraces, trace, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
-import { renderMarkdown } from "./markdown";
+import { renderInto } from "./markdown";
 import { dueLabel } from "./due";
 import { mentionAsk } from "./mentions";
 
@@ -170,6 +170,9 @@ function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.hidden = commandMode;
 }
 
+// Holds the streamed answer so frozen markdown blocks survive each delta.
+const answerBox = el("div", "spot-answer");
+
 function draw(): void {
   if (commandMode) return;
   results.hidden = false;
@@ -177,13 +180,13 @@ function draw(): void {
     results.replaceChildren(waiting());
     return;
   }
-  const body = renderMarkdown(answer);
+  renderInto(answerBox, answer);
+  for (const mark of answerBox.querySelectorAll(".cursor")) mark.remove();
   if (streaming) {
-    const last = body[body.length - 1] ?? el("p");
+    const last = answerBox.lastElementChild ?? answerBox.appendChild(el("p", "para"));
     last.append(el("span", "cursor"));
-    if (body.length === 0) body.push(last);
   }
-  results.replaceChildren(...body);
+  results.replaceChildren(answerBox);
   if (!streaming && used.length > 0) {
     results.append(trace("◈", "used", used, "used"));
   }

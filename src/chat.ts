@@ -2,7 +2,7 @@ import type { Conversation, Message } from "./api";
 import { renderBrevity } from "./brevctl";
 import { accept, ghost } from "./complete";
 import { el, forgetTraces, trace, waiting } from "./dom";
-import { renderMarkdown } from "./markdown";
+import { renderInto } from "./markdown";
 import { MENTIONS } from "./mentions";
 import { renderPickers } from "./picker";
 import {
@@ -169,12 +169,11 @@ function fill(node: HTMLElement, content: string, cursor: boolean): void {
     return;
   }
   const interrupted = content.endsWith(INTERRUPTED);
-  const blocks = renderMarkdown(
-    interrupted ? content.slice(0, -INTERRUPTED.length) : content,
-  );
-  node.replaceChildren(...blocks);
+  renderInto(node, interrupted ? content.slice(0, -INTERRUPTED.length) : content);
+  // The marks live inside re-rendered blocks, so stale ones are swept first.
+  for (const mark of node.querySelectorAll(".cursor, .interrupted")) mark.remove();
   // Both marks belong at the end of the last line, unless that line is code.
-  const last = blocks[blocks.length - 1];
+  const last = node.lastElementChild;
   const tail = last instanceof HTMLParagraphElement ? last : node;
   if (interrupted) tail.append(" ", el("span", "interrupted", "(interrupted)"));
   if (cursor) tail.append(el("span", "cursor"));

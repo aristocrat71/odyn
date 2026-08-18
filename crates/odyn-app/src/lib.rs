@@ -51,6 +51,7 @@ pub fn run() {
             brain::brain_set_min_relevance,
             config::config_file,
             config::open_config,
+            config::open_url,
             config::providers_config,
             config::provider_catalog,
             config::provider_connect,
