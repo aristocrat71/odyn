@@ -161,6 +161,10 @@ CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
 END;
 INSERT INTO messages_fts (rowid, content) SELECT id, content FROM messages;
 ",
+    // NULL means one-shot; otherwise the `every`-phrase the clock re-arms by.
+    r"
+ALTER TABLE reminders ADD COLUMN repeat TEXT;
+",
 ];
 
 /// Marks a matched term in a search snippet; its closer is `SNIPPET_END`.

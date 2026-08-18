@@ -669,10 +669,10 @@ async fn run(
 /// lock per statement, and nothing held across the loop's awaits.
 pub(crate) fn reminder_sink(
     app: &AppHandle,
-) -> impl FnMut(&str, i64) -> Result<i64, String> + Send + '_ {
-    move |text, due_at| {
+) -> impl FnMut(&str, i64, Option<&str>) -> Result<i64, String> + Send + '_ {
+    move |text, due_at, repeat| {
         let ready = app.state::<AppState>().inner().ready()?;
-        let stored = ready.storage().add_reminder(text, due_at);
+        let stored = ready.storage().add_reminder(text, due_at, repeat);
         stored
             .map(|reminder| reminder.id)
             .map_err(|err| err.to_string())

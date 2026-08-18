@@ -39,9 +39,9 @@ function section(name: string, rows: HTMLElement[]): HTMLElement {
 
 function pendingRow(row: ReminderRow): HTMLElement {
   const line = el("div", "rem-row");
+  line.append(el("span", "rem-mark epi", "◔"), el("span", "rem-text", row.text));
+  if (row.repeat) line.append(el("span", "rem-every", row.repeat));
   line.append(
-    el("span", "rem-mark epi", "◔"),
-    el("span", "rem-text", row.text),
     el("span", "rem-until", untilLabel(row.due_at)),
     el("span", "rem-at", dueLabel(row.due_at)),
   );

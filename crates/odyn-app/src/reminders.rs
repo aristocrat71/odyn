@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use odyn_core::reminder::now_secs;
+use odyn_core::reminder::{self, now_secs};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
@@ -33,6 +33,8 @@ pub struct ReminderRow {
     due_at: i64,
     /// `None` while it is still waiting.
     fired_at: Option<i64>,
+    /// The `every`-phrase of a repeating reminder; `None` is one-shot.
+    repeat: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -48,6 +50,7 @@ impl From<odyn_core::storage::Reminder> for ReminderRow {
             text: row.text,
             due_at: row.due_at,
             fired_at: row.fired_at,
+            repeat: row.repeat,
         }
     }
 }
@@ -106,6 +109,7 @@ fn nap(app: &AppHandle) -> Duration {
 
 /// Shows everything overdue, including whatever came due while Odyn was closed.
 /// Marked only after the webview took it: a reminder nobody saw is not spent.
+/// A repeating one re-arms from now instead — one catch-up firing, no backlog.
 fn fire(app: &AppHandle) {
     let Ok(ready) = app.state::<AppState>().inner().ready() else {
         return;
@@ -116,17 +120,32 @@ fn fire(app: &AppHandle) {
     if due.is_empty() {
         return;
     }
-    let ids: Vec<i64> = due.iter().map(|reminder| reminder.id).collect();
     let payload: Vec<Due> = due
-        .into_iter()
+        .iter()
         .map(|reminder| Due {
-            text: reminder.text,
+            text: reminder.text.clone(),
             due_at: reminder.due_at,
         })
         .collect();
     if app.emit_to(SPOTLIGHT, EVENT, payload).is_err() {
         return;
     }
-    let _ = ready.storage().mark_fired(&ids, now);
+    let mut spent = Vec::new();
+    for reminder in due {
+        match next_arm(&reminder, now) {
+            Some(next) => {
+                let _ = ready.storage().rearm(reminder.id, next);
+            }
+            None => spent.push(reminder.id),
+        }
+    }
+    let _ = ready.storage().mark_fired(&spent, now);
     crate::spotlight::show_for_reminder(app);
+}
+
+/// A repeating row's next firing; a phrase that no longer parses burns out
+/// like a one-shot rather than firing forever.
+fn next_arm(row: &odyn_core::storage::Reminder, now: i64) -> Option<i64> {
+    let repeat = reminder::parse_repeat(row.repeat.as_deref()?).ok()?;
+    reminder::next_fire(&repeat, now)
 }

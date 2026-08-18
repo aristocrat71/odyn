@@ -14,18 +14,25 @@ pub struct Reminder {
     pub created_at: i64,
     /// When it was shown, which is not when it came due if Odyn was closed.
     pub fired_at: Option<i64>,
+    /// The `every`-phrase a repeating reminder re-arms by; `None` is one-shot.
+    pub repeat: Option<String>,
 }
 
 impl Storage {
-    pub fn add_reminder(&self, text: &str, due_at: i64) -> Result<Reminder, StorageError> {
+    pub fn add_reminder(
+        &self,
+        text: &str,
+        due_at: i64,
+        repeat: Option<&str>,
+    ) -> Result<Reminder, StorageError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(StorageError::EmptyReminder);
         }
         let created_at = now_secs();
         self.conn.execute(
-            "INSERT INTO reminders (text, due_at, created_at) VALUES (?1, ?2, ?3)",
-            params![text, due_at, created_at],
+            "INSERT INTO reminders (text, due_at, created_at, repeat) VALUES (?1, ?2, ?3, ?4)",
+            params![text, due_at, created_at, repeat],
         )?;
         Ok(Reminder {
             id: self.conn.last_insert_rowid(),
@@ -33,13 +40,14 @@ impl Storage {
             due_at,
             created_at,
             fired_at: None,
+            repeat: repeat.map(str::to_string),
         })
     }
 
     /// Due and unshown, in the order they would have arrived.
     pub fn due_reminders(&self, now: i64) -> Result<Vec<Reminder>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, due_at, created_at, fired_at FROM reminders
+            "SELECT id, text, due_at, created_at, fired_at, repeat FROM reminders
              WHERE fired_at IS NULL AND due_at <= ?1 ORDER BY due_at, id",
         )?;
         let rows = stmt.query_map(params![now], to_reminder)?;
@@ -58,7 +66,7 @@ impl Storage {
     /// Still waiting, soonest first.
     pub fn pending_reminders(&self) -> Result<Vec<Reminder>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, due_at, created_at, fired_at FROM reminders
+            "SELECT id, text, due_at, created_at, fired_at, repeat FROM reminders
              WHERE fired_at IS NULL ORDER BY due_at, id",
         )?;
         let rows = stmt.query_map([], to_reminder)?;
@@ -68,7 +76,7 @@ impl Storage {
     /// Already shown, most recent first.
     pub fn fired_reminders(&self, limit: i64) -> Result<Vec<Reminder>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, text, due_at, created_at, fired_at FROM reminders
+            "SELECT id, text, due_at, created_at, fired_at, repeat FROM reminders
              WHERE fired_at IS NOT NULL ORDER BY due_at DESC, id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], to_reminder)?;
@@ -80,6 +88,16 @@ impl Storage {
     pub fn delete_reminder(&self, id: i64) -> Result<(), StorageError> {
         self.conn
             .execute("DELETE FROM reminders WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Re-arms a repeating reminder at its next firing; never revives one
+    /// already marked shown.
+    pub fn rearm(&self, id: i64, due_at: i64) -> Result<(), StorageError> {
+        self.conn.execute(
+            "UPDATE reminders SET due_at = ?2 WHERE id = ?1 AND fired_at IS NULL",
+            params![id, due_at],
+        )?;
         Ok(())
     }
 
@@ -108,6 +126,7 @@ fn to_reminder(row: &Row<'_>) -> rusqlite::Result<Reminder> {
         due_at: row.get(2)?,
         created_at: row.get(3)?,
         fired_at: row.get(4)?,
+        repeat: row.get(5)?,
     })
 }
 
@@ -126,9 +145,11 @@ mod tests {
         let storage = storage(&dir);
         assert_eq!(storage.next_due().expect("no reminders yet"), None);
 
-        let later = storage.add_reminder("stand up", 2_000).expect("added");
+        let later = storage
+            .add_reminder("stand up", 2_000, None)
+            .expect("added");
         let sooner = storage
-            .add_reminder("  drink water  ", 1_000)
+            .add_reminder("  drink water  ", 1_000, None)
             .expect("added");
         assert_eq!(sooner.text, "drink water");
         assert_eq!(storage.next_due().expect("pending"), Some(1_000));
@@ -144,9 +165,13 @@ mod tests {
     fn only_reminders_that_came_due_fire_and_they_fire_once() {
         let dir = TempDir::new("reminders-fire-once");
         let storage = storage(&dir);
-        let first = storage.add_reminder("call mum", 1_000).expect("added");
-        let second = storage.add_reminder("stretch", 1_500).expect("added");
-        storage.add_reminder("much later", 9_000).expect("added");
+        let first = storage
+            .add_reminder("call mum", 1_000, None)
+            .expect("added");
+        let second = storage.add_reminder("stretch", 1_500, None).expect("added");
+        storage
+            .add_reminder("much later", 9_000, None)
+            .expect("added");
 
         let due = storage.due_reminders(2_000).expect("due");
         assert_eq!(
@@ -165,7 +190,7 @@ mod tests {
     fn a_reminder_missed_while_closed_still_fires_on_the_next_look() {
         let dir = TempDir::new("reminders-catch-up");
         let storage = storage(&dir);
-        let missed = storage.add_reminder("bin day", 1_000).expect("added");
+        let missed = storage.add_reminder("bin day", 1_000, None).expect("added");
         let due = storage.due_reminders(1_000 + 7 * 86_400).expect("due");
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, missed.id);
@@ -175,9 +200,11 @@ mod tests {
     fn the_list_splits_pending_from_shown_and_cancelling_removes_one() {
         let dir = TempDir::new("reminders-list");
         let storage = storage(&dir);
-        let shown = storage.add_reminder("bin day", 1_000).expect("added");
-        let soon = storage.add_reminder("call mum", 5_000).expect("added");
-        let later = storage.add_reminder("dentist", 9_000).expect("added");
+        let shown = storage.add_reminder("bin day", 1_000, None).expect("added");
+        let soon = storage
+            .add_reminder("call mum", 5_000, None)
+            .expect("added");
+        let later = storage.add_reminder("dentist", 9_000, None).expect("added");
         storage.mark_fired(&[shown.id], 1_100).expect("marked");
 
         let pending = storage.pending_reminders().expect("pending");
@@ -199,9 +226,30 @@ mod tests {
     }
 
     #[test]
+    fn a_repeating_reminder_rearms_instead_of_burning_out() {
+        let dir = TempDir::new("reminders-rearm");
+        let storage = storage(&dir);
+        let daily = storage
+            .add_reminder("stand up", 1_000, Some("every day 09:00"))
+            .expect("added");
+        let due = storage.due_reminders(1_000).expect("due");
+        assert_eq!(due[0].repeat.as_deref(), Some("every day 09:00"));
+
+        storage.rearm(daily.id, 87_400).expect("rearmed");
+        assert!(storage.due_reminders(2_000).expect("due").is_empty());
+        assert_eq!(storage.next_due().expect("pending"), Some(87_400));
+        assert!(storage.fired_reminders(10).expect("fired").is_empty());
+
+        // A fired row stays history: re-arming must not revive it.
+        storage.mark_fired(&[daily.id], 90_000).expect("marked");
+        storage.rearm(daily.id, 100_000).expect("no-op");
+        assert_eq!(storage.next_due().expect("pending"), None);
+    }
+
+    #[test]
     fn a_reminder_with_nothing_to_say_is_refused() {
         let dir = TempDir::new("reminders-empty");
         let storage = storage(&dir);
-        assert!(storage.add_reminder("   ", 1_000).is_err());
+        assert!(storage.add_reminder("   ", 1_000, None).is_err());
     }
 }

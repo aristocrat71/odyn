@@ -26,11 +26,14 @@ pub const LINK_MEMORY: &str = "link_memory";
 pub const UNLINK_MEMORY: &str = "unlink_memory";
 pub const SET_REMINDER: &str = "set_reminder";
 
+/// `(text, due_at, every-phrase)` → the stored row's id.
+pub type ReminderSink<'a> = dyn FnMut(&str, i64, Option<&str>) -> Result<i64, String> + Send + 'a;
+
 /// Where a call's effects land. The caller lends a writer instead of its
 /// storage handle: that mutex must never be held across an await.
 pub struct Effects<'a> {
     pub brain_dir: &'a Path,
-    pub set_reminder: &'a mut (dyn FnMut(&str, i64) -> Result<i64, String> + Send),
+    pub set_reminder: &'a mut ReminderSink<'a>,
 }
 
 /// A model that keeps asking for tools is looping, not working.
@@ -158,6 +161,13 @@ pub fn set_reminder_tool() -> ToolDef {
                     "description": "Local date and time as YYYY-MM-DD HH:MM on a 24-hour \
                                     clock. Only for a named day or clock time, and only \
                                     when in_minutes does not fit."
+                },
+                "every": {
+                    "type": "string",
+                    "description": "Only when the user asked for a recurring reminder: \
+                                    `every day 09:00`, `every monday 9:30`, or \
+                                    `every 45m`. With this set, in_minutes and due_at \
+                                    may be omitted."
                 }
             },
             "required": ["text"]
@@ -417,23 +427,49 @@ fn remind(effects: &mut Effects<'_>, call: &ToolCall) -> (String, Option<Written
             None,
         );
     };
-    let due = match reminder::resolve_due(
-        now_secs(),
-        int_arg(call, "in_minutes"),
-        text_arg(call, "due_at"),
-    ) {
-        Ok(due) => due,
+    let every = match text_arg(call, "every")
+        .map(reminder::parse_repeat)
+        .transpose()
+    {
+        Ok(every) => every,
         Err(err) => return (format!("error: {err}"), None),
     };
-    match (effects.set_reminder)(text, due) {
+    let now = now_secs();
+    let timed = int_arg(call, "in_minutes").is_some() || text_arg(call, "due_at").is_some();
+    // A repeat alone fixes the first firing; an explicit time overrides it.
+    let due = match (&every, timed) {
+        (Some(repeat), false) => match reminder::next_fire(repeat, now) {
+            Some(due) => due,
+            None => {
+                return (
+                    "error: could not work out the first firing time".to_string(),
+                    None,
+                )
+            }
+        },
+        _ => {
+            match reminder::resolve_due(now, int_arg(call, "in_minutes"), text_arg(call, "due_at"))
+            {
+                Ok(due) => due,
+                Err(err) => return (format!("error: {err}"), None),
+            }
+        }
+    };
+    let phrase = every.as_ref().map(reminder::Repeat::canonical);
+    match (effects.set_reminder)(text, due, phrase.as_deref()) {
         Ok(_) => {
             let stamp = reminder::local_stamp(due);
-            let confirmation = if stamp.is_empty() {
-                format!("reminder set: {text}")
-            } else {
-                format!("reminder set for {stamp}: {text}")
-            };
-            (confirmation, Some(Written::Reminded(text.to_string(), due)))
+            let mut when = String::new();
+            if !stamp.is_empty() {
+                when.push_str(&format!(" for {stamp}"));
+            }
+            if let Some(every) = &phrase {
+                when.push_str(&format!(", {every}"));
+            }
+            (
+                format!("reminder set{when}: {text}"),
+                Some(Written::Reminded(text.to_string(), due)),
+            )
         }
         Err(err) => (format!("error: {err}"), None),
     }
@@ -537,8 +573,8 @@ fn unlink(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
 
 #[cfg(test)]
 /// A reminder call in a folder-only test would be a routing bug.
-fn refuse_reminders() -> impl FnMut(&str, i64) -> Result<i64, String> {
-    |_, _| Err("this turn should not have set a reminder".to_string())
+fn refuse_reminders() -> impl FnMut(&str, i64, Option<&str>) -> Result<i64, String> {
+    |_, _, _| Err("this turn should not have set a reminder".to_string())
 }
 
 fn text_arg<'a>(call: &'a ToolCall, name: &str) -> Option<&'a str> {
@@ -1094,7 +1130,7 @@ mod tests {
         let provider = Scripted::new(vec![vec![Ok(ChatEvent::ToolCall(asked)), done()]]);
         let mut seen = Vec::new();
         let reply = {
-            let mut sink = |text: &str, due_at: i64| {
+            let mut sink = |text: &str, due_at: i64, _: Option<&str>| {
                 stored.push((text.to_string(), due_at));
                 Ok(1)
             };
@@ -1124,12 +1160,64 @@ mod tests {
         assert!(seen.iter().any(|event| event.starts_with("reminded:")));
     }
 
+    /// `every` alone is a complete call: the first firing comes from the
+    /// phrase, and the stored row carries its canonical form.
+    #[test]
+    fn a_repeating_reminder_needs_no_time_and_carries_its_phrase() {
+        let dir = TempDir::new("remind-every");
+        let mut stored: Vec<(i64, Option<String>)> = Vec::new();
+        let before = now_secs();
+        let (result, written) = {
+            let mut sink = |_: &str, due_at: i64, every: Option<&str>| {
+                stored.push((due_at, every.map(str::to_string)));
+                Ok(1)
+            };
+            let mut effects = Effects {
+                brain_dir: &dir.0,
+                set_reminder: &mut sink,
+            };
+            run_tool(
+                &mut effects,
+                &named_call(
+                    SET_REMINDER,
+                    serde_json::json!({"text": "stand up", "every": "every 45m"}),
+                ),
+            )
+        };
+        assert!(written.is_some());
+        assert!(result.contains("every 45m"), "{result}");
+        assert_eq!(stored[0].1.as_deref(), Some("every 45m"));
+        assert!(stored[0].0 >= before + 45 * 60, "{}", stored[0].0);
+
+        let mut calls = 0;
+        let bad = {
+            let mut sink = |_: &str, _: i64, _: Option<&str>| {
+                calls += 1;
+                Ok(1)
+            };
+            let mut effects = Effects {
+                brain_dir: &dir.0,
+                set_reminder: &mut sink,
+            };
+            run_tool(
+                &mut effects,
+                &named_call(
+                    SET_REMINDER,
+                    serde_json::json!({"text": "x", "every": "every fortnight"}),
+                ),
+            )
+            .0
+        };
+        assert!(bad.starts_with("error:"), "{bad}");
+        assert_eq!(calls, 0);
+    }
+
     #[test]
     fn a_reminder_the_clock_refuses_never_reaches_the_store() {
         let dir = TempDir::new("remind-bad");
         let mut calls = 0;
         let (result, written, missing) = {
-            let mut sink = |_: &str, _: i64| {
+            let mut sink = |_: &str, _: i64, _: Option<&str>| {
                 calls += 1;
                 Ok(1)
             };

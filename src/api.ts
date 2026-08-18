@@ -234,6 +234,8 @@ export type ReminderRow = {
   due_at: number;
   // Null while it is still waiting.
   fired_at: number | null;
+  // The every-phrase of a repeating reminder; null is one-shot.
+  repeat: string | null;
 };
 
 export type ReminderList = { pending: ReminderRow[]; past: ReminderRow[] };

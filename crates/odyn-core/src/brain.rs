@@ -620,8 +620,10 @@ set_reminder with `text` — what they should be told when it goes off, in a few
 words — and exactly one time: `in_minutes` for anything measured from now, \
 `due_at` as YYYY-MM-DD HH:MM for a named day or clock time. Prefer \
 `in_minutes` whenever the user said how long from now — for \"remind me in \
-half an hour to call mum\", text is \"call mum\" and in_minutes is 30. Then \
-confirm in one line.";
+half an hour to call mum\", text is \"call mum\" and in_minutes is 30. Only \
+when the user asked for a recurring reminder, pass `every` instead — \
+\"every day 09:00\", \"every monday 9:30\", or \"every 45m\" — and omit the \
+one-off times. Then confirm in one line.";
 
 /// The injected system message, golden-tested byte for byte: `## Instructions`
 /// (soul.md, when present), `## Memories` (omitted when empty), `## Memory

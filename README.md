@@ -168,7 +168,10 @@ so "this changed" rewrites the note it belongs to; `/delete-memory` hands it
 note pointing at another; and `/unlink-memory` hands it `unlink_memory`,
 which takes that edge back out. `/reminder` is the one mention that reads
 nothing: it hands the model `set_reminder`, which writes a row rather than a
-note, so the turn never loads the embedder. Due reminders take over the
+note, so the turn never loads the embedder. A recurring ask ("every day at 9",
+"every monday 9:30", "every 45 minutes") re-arms itself after each firing;
+one missed while the machine slept fires once and re-arms from now, never as
+a backlog. Due reminders take over the
 spotlight panel until dismissed; `/view-reminders` lists what is waiting and
 what has already been shown, and cancels any of the former. A turn with a memory tool recalls wider than `/brain` does
 — no relevance floor, no `top_k` limit, just the token cap — and is also given

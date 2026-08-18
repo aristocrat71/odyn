@@ -393,7 +393,11 @@ bun run tauri dev`),
           "they need no reference clock and so cannot land on the wrong day, and " +
           "the current local time is stated in the prompt for when they do not " +
           "fit. A time already past, or one years away, comes back as an error " +
-          "the model can read and correct rather than a reminder set wrong.",
+          "the model can read and correct rather than a reminder set wrong. " +
+          "Asking for a recurring one — \"every day at 9\", \"every monday at " +
+          "9:30\", \"every 45 minutes\" — sets a repeating reminder that re-arms " +
+          "itself after each firing instead of burning out. One slept through " +
+          "fires once on wake and re-arms from now, never as a backlog.",
       ),
       p(
         "The reminders view — `/view-reminders`, or the sidebar — lists what is " +
