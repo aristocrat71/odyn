@@ -500,7 +500,8 @@ fn free_slug(dir: &Path, base: &str) -> String {
     unreachable!("the suffix loop is unbounded");
 }
 
-fn expand_home(path: &Path) -> PathBuf {
+/// `~/` becomes the home directory; anything else passes through.
+pub fn expand_home(path: &Path) -> PathBuf {
     let Some(rest) = path
         .to_str()
         .and_then(|path| path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")))

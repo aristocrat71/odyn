@@ -9,6 +9,13 @@ memory graph — wikilinks, embedding similarity, shared use — for the notes
 that answer you, accounted for token by token before anything is sent. Every
 other message reaches the model bare.
 
+Give a conversation a workspace folder and it becomes an agent: the model gets
+shell and file tools scoped to that folder. File tools are contained — they
+cannot reach outside the workspace — while every bash command is shown to you
+verbatim and waits for run / always / deny, over a blocklist floor that
+refuses the catastrophic ones outright. The workspace is per-conversation
+state, set from the chat header; nothing about it lives in the config file.
+
 ## Install
 
 macOS on Apple Silicon:

@@ -1,13 +1,18 @@
 import type { Conversation } from "./api";
 import { renderBrain } from "./brain";
-import { renderChat } from "./chat";
+import { refreshLedger, renderChat } from "./chat";
 import { renderConfig } from "./config";
 import { renderConversations } from "./conversations";
 import { el } from "./dom";
 import { renderHome } from "./home";
 import { renderProviders } from "./providers";
 import { renderReminders } from "./reminders";
-import { state } from "./state";
+import {
+  closeWorkspacePopover,
+  commitWorkspace,
+  state,
+  toggleWorkspacePopover,
+} from "./state";
 
 export function renderView(root: HTMLElement): void {
   const parts: HTMLElement[] = [topbar()];
@@ -36,7 +41,60 @@ function topbar(): HTMLElement {
   if (crumbs !== "") left.append(el("div", "crumbs", crumbs));
 
   bar.append(left);
+  if (state.view === "chat" && current !== undefined) {
+    bar.append(workspaceControl(current));
+  }
   return bar;
+}
+
+// The popover input outlives redraws, so typing survives the 30s rerender.
+const wsInput = el("input", "workspace-input");
+wsInput.placeholder = "~/path/to/folder";
+wsInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    void commitWorkspace(wsInput.value).then(refreshLedger);
+  }
+  if (event.key === "Escape") closeWorkspacePopover();
+});
+let popWasOpen = false;
+
+// `⚒ notes ✕` when set; empty conversations without one get a quiet
+// affordance instead. The popover takes a typed path — no dialogs.
+function workspaceControl(current: Conversation): HTMLElement {
+  const box = el("div", "workspace");
+  if (current.workspace !== null) {
+    const chip = el("button", "workspace-chip");
+    chip.title = current.workspace;
+    chip.append(el("span", "workspace-mark", "⚒ "), shortPath(current.workspace));
+    chip.addEventListener("click", toggleWorkspacePopover);
+    const clear = el("button", "workspace-clear", "✕");
+    clear.title = "clear the workspace";
+    clear.addEventListener("click", () => void commitWorkspace("").then(refreshLedger));
+    box.append(chip, clear);
+  } else if (state.messages.length === 0) {
+    const set = el("button", "workspace-set", "⚒ set a workspace");
+    set.addEventListener("click", toggleWorkspacePopover);
+    box.append(set);
+  }
+  if (state.workspacePopover) {
+    if (!popWasOpen) {
+      wsInput.value = current.workspace ?? "";
+      queueMicrotask(() => wsInput.focus());
+    }
+    const pop = el("div", "workspace-pop");
+    pop.append(
+      wsInput,
+      el("div", "workspace-hint", "a folder the agent may work in · ⏎ set · empty clears"),
+    );
+    box.append(pop);
+  }
+  popWasOpen = state.workspacePopover;
+  return box;
+}
+
+function shortPath(path: string): string {
+  const parts = path.split("/").filter((part) => part !== "");
+  return parts[parts.length - 1] ?? path;
 }
 
 function body(): HTMLElement {

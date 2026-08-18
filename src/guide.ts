@@ -256,6 +256,52 @@ bun run tauri dev`),
     ],
   },
   {
+    id: "agent",
+    title: "agent mode",
+    body: () => [
+      p(
+        "Give a conversation a workspace — a folder on your machine — and it becomes an " +
+          "agent conversation: every message offers the model shell and file tools scoped " +
+          "to that folder. Set it from the `⚒` control in the chat header; a typed path, " +
+          "`~` expands, and it must already exist. Clearing the chip (`✕`) turns the " +
+          "conversation back into a normal one.",
+      ),
+      sub("contained, gated, floored"),
+      p("The security model is three honest layers, not a sandbox:"),
+      rows([
+        [
+          "contained",
+          "the file tools — `read_file`, `write_file`, `edit_file`, `ls`, `glob`, `grep` — run " +
+            "immediately but physically cannot leave the workspace: every path is resolved " +
+            "and checked, which also kills `..` traversal and symlink escapes.",
+        ],
+        [
+          "gated",
+          "`bash` cannot be contained, so nothing runs until you see the exact command and " +
+            "answer `run`, `always` or `deny`. `always` remembers that exact command for " +
+            "this conversation only; a denied command is fed back to the model as guidance.",
+        ],
+        [
+          "floored",
+          "a small blocklist — sudo, `rm -rf /`, disk formatting, shutdowns, fork bombs, " +
+            "piping downloads into a shell — is refused before you are even asked. It is a " +
+            "floor under your own approvals, not a guarantee about everything else.",
+        ],
+      ]),
+      sub("the budget"),
+      p(
+        "An agent turn runs up to 30 tool rounds, counted in the `⚙` chip as it works. At " +
+          "exhaustion — or when the model repeats the same call enough times to be stuck — " +
+          "it gets one final request with no tools: say what happened and what remains. " +
+          "The live call log is stream-only; the stored turn keeps the final answer.",
+      ),
+      p(
+        "Honest note on models: 3B models fumble long tool chains. Agent mode works best " +
+          "with a tool-capable 7B+ — the picker marks models that cannot call tools at all.",
+      ),
+    ],
+  },
+  {
     id: "spotlight",
     title: "spotlight",
     body: () => [

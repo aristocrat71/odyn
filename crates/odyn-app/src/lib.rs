@@ -39,6 +39,8 @@ pub fn run() {
             commands::search_messages,
             commands::send_message,
             commands::context_preview,
+            commands::set_workspace,
+            commands::approve_command,
             brain::brain_overview,
             brain::brain_memories,
             brain::brain_search,

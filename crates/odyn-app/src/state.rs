@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use odyn_core::config::{Config, ProviderRegistry};
 use odyn_core::storage::Storage;
+use odyn_core::tools::Verdict;
 use tauri::async_runtime::JoinHandle;
 
 pub struct AppState {
@@ -17,6 +18,8 @@ pub struct AppState {
     /// Beside `ready`, not inside it: a reply streaming through a reload
     /// still has to be reachable by the cancel that ends it.
     pub streams: Streams,
+    /// Bash approvals waiting for the user's run / always / deny.
+    pub approvals: Approvals,
 }
 
 pub struct Ready {
@@ -32,6 +35,7 @@ impl AppState {
         Self {
             ready: RwLock::new(Self::open()),
             streams: Streams::default(),
+            approvals: Approvals::default(),
         }
     }
 
@@ -87,6 +91,52 @@ impl Ready {
     /// state lives in the file, not in the guard — so poisoning is ignored.
     pub fn storage(&self) -> MutexGuard<'_, Storage> {
         lock(&self.storage)
+    }
+}
+
+/// One command waiting on the user; the sender resolves the tool loop.
+pub struct Pending {
+    pub request_id: u64,
+    pub conversation_id: i64,
+    pub command: String,
+    pub sender: tokio::sync::oneshot::Sender<Verdict>,
+}
+
+#[derive(Default)]
+pub struct Approvals {
+    next: AtomicU64,
+    pending: Mutex<HashMap<u64, Pending>>,
+}
+
+impl Approvals {
+    pub fn open(
+        &self,
+        request_id: u64,
+        conversation_id: i64,
+        command: String,
+        sender: tokio::sync::oneshot::Sender<Verdict>,
+    ) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        lock(&self.pending).insert(
+            id,
+            Pending {
+                request_id,
+                conversation_id,
+                command,
+                sender,
+            },
+        );
+        id
+    }
+
+    pub fn close(&self, id: u64) -> Option<Pending> {
+        lock(&self.pending).remove(&id)
+    }
+
+    /// A cancelled turn's questions are moot; dropping the senders answers
+    /// any listener with Deny.
+    pub fn abandon(&self, request_id: u64) {
+        lock(&self.pending).retain(|_, pending| pending.request_id != request_id);
     }
 }
 
