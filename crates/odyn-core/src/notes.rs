@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 const BRAIN_DIR_NAME: &str = "brain";
 /// Model-trashed notes live here; a subfolder is invisible to `is_note`.
 const TRASH_DIR_NAME: &str = ".trash";
+/// Standing instructions, injected on every turn; never a memory, so it is
+/// invisible to reading, recall, the graph and the name index.
+pub const SOUL_SLUG: &str = "soul";
 /// A derived slug stays short enough to read as an id in the ledger.
 const SLUG_MAX_CHARS: usize = 48;
 /// The line `link_note` keeps a note's added links on.
@@ -94,6 +97,9 @@ pub fn read_notes(dir: &Path) -> Result<Vec<NoteFile>, NotesError> {
         let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
+        if slug.eq_ignore_ascii_case(SOUL_SLUG) {
+            continue;
+        }
         let raw = std::fs::read_to_string(&path).map_err(|source| NotesError::Read {
             path: path.clone(),
             source,
@@ -130,11 +136,25 @@ pub fn list_slugs(dir: &Path) -> Result<Vec<String>, NotesError> {
             continue;
         }
         if let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) {
-            slugs.push(slug.to_string());
+            if !slug.eq_ignore_ascii_case(SOUL_SLUG) {
+                slugs.push(slug.to_string());
+            }
         }
     }
     slugs.sort();
     Ok(slugs)
+}
+
+/// The soul note's body — frontmatter stripped, edge-trimmed — or `None` when
+/// the file is missing or empty. A missing folder is simply no soul.
+pub fn read_soul(dir: &Path) -> Result<Option<NoteFile>, NotesError> {
+    let path = note_path(dir, SOUL_SLUG);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(NotesError::Read { path, source }),
+    };
+    Ok(parse_note(SOUL_SLUG, &raw))
 }
 
 /// Writes a new note, deriving a slug from the content unless one is given. A
@@ -155,7 +175,7 @@ pub fn write_note(dir: &Path, name: Option<&str>, content: &str) -> Result<Strin
             if slug.is_empty() {
                 return Err(NotesError::EmptyNote);
             }
-            if note_path(dir, &slug).exists() {
+            if slug == SOUL_SLUG || note_path(dir, &slug).exists() {
                 return Err(NotesError::Exists(slug));
             }
             slug
@@ -468,7 +488,7 @@ fn slugify(text: &str) -> String {
 }
 
 fn free_slug(dir: &Path, base: &str) -> String {
-    if !note_path(dir, base).exists() {
+    if base != SOUL_SLUG && !note_path(dir, base).exists() {
         return base.to_string();
     }
     for suffix in 2.. {

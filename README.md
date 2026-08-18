@@ -176,6 +176,12 @@ every memory's name, because its job is finding the right note rather than
 answering from the best few. One tool per mention — the choice between them is yours, not the model's. A stale `[memory]` section from brain v1 still
 parses and is ignored.
 
+One filename is special: `soul.md` in the brain folder holds standing
+instructions and is injected on every turn, mention or not — the one exception
+to "nothing is injected unless asked", which is why the ledger prices it as
+`● soul N` on every surface. It is not a memory: never recalled, indexed,
+graphed or listed, and the model cannot write it.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | data dir | Where the note files live. `~` expands; point it at an Obsidian vault if you like. |
@@ -184,6 +190,7 @@ parses and is ignored.
 | `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
 | `min_relevance` | `0.3` | Only notes scoring at least this share of the best match are injected. `0` keeps everything the cap allows. Applies to `/brain`; a turn with a memory tool ignores it. |
 | `save_temperature` | `0.3` | Sampling temperature for `/memory` save turns; lower is more literal. Between 0 and 2. |
+| `soul_cap_tokens` | `400` | Soft budget for `soul.md` — standing instructions injected on every turn. Going over turns its ledger chip red; nothing is truncated. |
 | `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
 Token counts are a chars/4 approximation, in the config and in every ledger

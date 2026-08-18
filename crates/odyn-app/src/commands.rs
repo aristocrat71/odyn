@@ -6,7 +6,7 @@ use std::sync::Arc;
 use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
 use odyn_core::chat::{ChatError, ChatProvider, Message, Role, ToolDef, Usage};
-use odyn_core::config::ProviderConfig;
+use odyn_core::config::{BrainConfig, ProviderConfig};
 use odyn_core::embed::{self, load_embedder};
 use odyn_core::notes;
 use odyn_core::providers::ollama::OllamaProvider;
@@ -69,6 +69,9 @@ pub struct ContextPreview {
     memories: Vec<LedgerItem>,
     tokens: i64,
     cap_tokens: u32,
+    /// soul.md's standing cost, on every turn; 0 when there is none.
+    soul_tokens: i64,
+    soul_over: bool,
     system_message: String,
 }
 
@@ -108,6 +111,7 @@ pub(crate) enum Body {
     Context {
         used: Vec<String>,
         tokens: i64,
+        soul: i64,
     },
     Delta {
         text: String,
@@ -611,6 +615,7 @@ pub(crate) fn context_body(context: &InjectedContext) -> Body {
             .map(|memory| memory.slug.clone())
             .collect(),
         tokens: context.tokens,
+        soul: context.soul_tokens,
     }
 }
 
@@ -676,8 +681,9 @@ pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
     Ok(())
 }
 
-/// Memory is opt-in and additive here too: no `/brain`, no injection, and a
-/// brain failure means an uninjected turn rather than a failed one.
+/// Memory is opt-in and additive here too: no `/brain`, no injection. The
+/// soul note rides every turn; a brain failure falls back to a soulless,
+/// uninjected turn rather than a failed one.
 pub(crate) async fn build_context(
     app: &AppHandle,
     prior: Vec<Message>,
@@ -687,24 +693,31 @@ pub(crate) async fn build_context(
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
-        if !ask.any() {
-            return Some(brain::empty_context(brevity, &ask));
-        }
         // The folder is the truth: recall reads the files as they are now.
-        if let Err(err) = sync_index(&ready) {
-            eprintln!("odyn: brain folder not synced: {err}");
+        if ask.any() {
+            if let Err(err) = sync_index(&ready) {
+                eprintln!("odyn: brain folder not synced: {err}");
+            }
         }
-        // One lock per statement — see `sync_index`.
-        let storage = ready.storage();
-        let context = brain::build_context(
-            Some(&storage),
-            &ready.config.brain,
-            &prior,
-            &ask,
-            brevity,
-            || load_embedder(&ready.config, &ready.config.brain.model),
-        );
-        context.ok()
+        let context = if ask.any() {
+            // One lock per statement — see `sync_index`.
+            let storage = ready.storage();
+            brain::build_context(
+                Some(&storage),
+                &ready.config.brain,
+                &prior,
+                &ask,
+                brevity,
+                || load_embedder(&ready.config, &ready.config.brain.model),
+            )
+        } else {
+            brain::build_context(None, &ready.config.brain, &prior, &ask, brevity, || {
+                Err(embed::EmbedError::Load(
+                    "no trigger, no embedder".to_string(),
+                ))
+            })
+        };
+        Some(context.unwrap_or_else(|_| brain::empty_context(brevity, &ask)))
     })
     .await
     .ok()
@@ -755,34 +768,32 @@ pub async fn context_preview(
             None => (Vec::new(), None),
         };
         let brevity = chosen.unwrap_or(ready.config.style.brevity);
-        let cap_tokens = ready.config.brain.cap_tokens;
-        // A draft without triggers previews what it would send: nothing.
+        let brain_config = ready.config.brain.clone();
+        // A draft without triggers previews what it would send: the soul alone.
         if !ask.any() {
-            return Ok(preview(
-                brain::empty_context(brevity, &ask),
-                cap_tokens,
-                false,
-            ));
+            let context = brain::build_context(None, &brain_config, &prior, &ask, brevity, || {
+                Err(embed::EmbedError::Load(
+                    "no trigger, no embedder".to_string(),
+                ))
+            })
+            .map_err(|err| err.to_string())?;
+            return Ok(preview(context, &brain_config, false));
         }
         sync_index(&ready)?;
         // One lock per statement — see `sync_index`.
         let storage = ready.storage();
-        let context = brain::build_context(
-            Some(&storage),
-            &ready.config.brain,
-            &prior,
-            &ask,
-            brevity,
-            || load_embedder(&ready.config, &ready.config.brain.model),
-        )
-        .map_err(|err| err.to_string())?;
-        Ok(preview(context, cap_tokens, true))
+        let context =
+            brain::build_context(Some(&storage), &brain_config, &prior, &ask, brevity, || {
+                load_embedder(&ready.config, &brain_config.model)
+            })
+            .map_err(|err| err.to_string())?;
+        Ok(preview(context, &brain_config, true))
     })
     .await
     .map_err(|err| err.to_string())?
 }
 
-fn preview(context: InjectedContext, cap_tokens: u32, active: bool) -> ContextPreview {
+fn preview(context: InjectedContext, config: &BrainConfig, active: bool) -> ContextPreview {
     ContextPreview {
         active,
         memories: context
@@ -795,7 +806,9 @@ fn preview(context: InjectedContext, cap_tokens: u32, active: bool) -> ContextPr
             })
             .collect(),
         tokens: context.tokens,
-        cap_tokens,
+        cap_tokens: config.cap_tokens,
+        soul_tokens: context.soul_tokens,
+        soul_over: context.soul_tokens > i64::from(config.soul_cap_tokens),
         system_message: context.system_message,
     }
 }

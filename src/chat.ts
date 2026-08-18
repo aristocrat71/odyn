@@ -198,6 +198,15 @@ function ledger(): HTMLElement {
   }
   const preview = state.ledger.preview;
   if (preview === null) return line;
+  if (preview.soul_tokens > 0) {
+    const soul = el(
+      "span",
+      preview.soul_over ? "ledger-soul over" : "ledger-soul",
+      `● soul ${count(preview.soul_tokens)}`,
+    );
+    if (preview.soul_over) soul.title = "soul.md is over its budget — consolidate it";
+    line.append(soul);
+  }
   if (!preview.active) {
     line.append(
       el(

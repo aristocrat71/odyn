@@ -250,6 +250,10 @@ button {
   color: var(--epi);
 }
 
+.ledger-soul {
+  color: var(--core);
+}
+
 .spot-ledger-total {
   margin-left: auto;
   color: var(--faint);

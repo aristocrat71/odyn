@@ -718,6 +718,14 @@ button {
   color: var(--epi);
 }
 
+.ledger-soul {
+  color: var(--core);
+}
+
+.ledger-soul.over {
+  color: var(--danger);
+}
+
 .ledger-total {
   margin-left: auto;
   color: var(--faint);

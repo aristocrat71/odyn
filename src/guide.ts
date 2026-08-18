@@ -125,6 +125,7 @@ cap_tokens = 1200
 similarity_edge_threshold = 0.78
 min_relevance = 0.3
 save_temperature = 0.3
+soul_cap_tokens = 400
 
 [style]
 brevity = "off"
@@ -313,6 +314,16 @@ bun run tauri dev`),
           "editor or agent; Odyn re-reads the folder on every recall and re-embeds " +
           "only what changed. Deleting a file deletes the memory. The database is " +
           "just an index derived from the folder — the files never lie.",
+      ),
+      sub("soul.md — standing instructions"),
+      p(
+        "One filename is special: `soul.md` in the brain folder is injected on " +
+          "every turn, on every surface — no mention needed. It is where " +
+          "\"always answer in metric\" or \"you are talking to a Rust programmer\" " +
+          "lives. It is not a memory: never recalled, never in the graph, never " +
+          "listed. Its standing cost shows in the ledger as `● soul N`; past " +
+          "`soul_cap_tokens` (default 400) the chip turns red — consolidate, " +
+          "nothing is ever truncated. Delete the file and nothing is injected.",
       ),
       sub("links"),
       p(

@@ -19,6 +19,7 @@ type SpotEvent =
       kind: "context";
       used: string[];
       tokens: number;
+      soul: number;
     }
   | { request_id: number; kind: "delta"; text: string }
   | { request_id: number; kind: "saved"; slug: string }
@@ -155,13 +156,17 @@ function keyCard(): void {
   results.replaceChildren(card);
 }
 
-// DESIGN.md §7: one line between field and answer, filled only on a /brain ask.
+// DESIGN.md §7: one line between field and answer, filled when anything is
+// injected — recalled notes, the soul note, or both.
 function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.replaceChildren();
-  if (event.tokens === 0) return;
-  // Which notes came back is named by the `◈ used` trace under the answer.
-  ledger.append(el("span", "ledger-reading", "◈ reading the brain"));
-  ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
+  if (event.tokens === 0 && event.soul === 0) return;
+  if (event.soul > 0) ledger.append(el("span", "ledger-soul", `● soul ${event.soul}`));
+  if (event.tokens > 0) {
+    // Which notes came back is named by the `◈ used` trace under the answer.
+    ledger.append(el("span", "ledger-reading", "◈ reading the brain"));
+    ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
+  }
   ledger.hidden = commandMode;
 }
 

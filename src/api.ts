@@ -29,7 +29,7 @@ export type Message = {
 export type Usage = { input_tokens: number; output_tokens: number };
 
 export type ChatEvent = { request_id: number } & (
-  | { kind: "context"; used: string[]; tokens: number }
+  | { kind: "context"; used: string[]; tokens: number; soul: number }
   | { kind: "delta"; text: string }
   | { kind: "saved"; slug: string }
   | { kind: "updated"; slug: string }
@@ -49,6 +49,9 @@ export type ContextPreview = {
   memories: LedgerItem[];
   tokens: number;
   cap_tokens: number;
+  // soul.md's standing cost, injected on every turn; 0 when there is none.
+  soul_tokens: number;
+  soul_over: boolean;
   system_message: string;
 };
 
