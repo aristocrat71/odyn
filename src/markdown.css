@@ -1,0 +1,96 @@
+/* Markdown blocks beyond paragraphs and code, shared by chat and spotlight. */
+
+.md-h {
+  margin: 14px 0 4px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+h1.md-h {
+  font-size: 1.3em;
+}
+
+h2.md-h {
+  font-size: 1.15em;
+}
+
+h3.md-h {
+  font-size: 1.05em;
+}
+
+h4.md-h,
+h5.md-h,
+h6.md-h {
+  font-size: 1em;
+  color: var(--muted);
+}
+
+.md-h:first-child {
+  margin-top: 0;
+}
+
+.md-list {
+  margin: 6px 0;
+  padding-left: 24px;
+}
+
+.md-list .md-list {
+  margin: 2px 0;
+}
+
+.md-item {
+  margin: 2px 0;
+  white-space: pre-wrap;
+}
+
+.md-item::marker {
+  color: var(--dim);
+}
+
+.md-quote {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--faint);
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.md-table-wrap {
+  margin: 8px 0;
+  overflow-x: auto;
+}
+
+.md-table {
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.md-table th,
+.md-table td {
+  padding: 4px 18px 4px 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-table th {
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--faint);
+}
+
+.md-hr {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--faint);
+}
+
+.md-link {
+  color: var(--epi);
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 3px;
+}
+
+.md-link:hover {
+  text-decoration-color: var(--epi);
+}

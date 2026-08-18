@@ -2,7 +2,7 @@ import type { Conversation, Message } from "./api";
 import { renderBrevity } from "./brevctl";
 import { accept, ghost } from "./complete";
 import { el, forgetTraces, trace, waiting } from "./dom";
-import { renderMarkdown } from "./markdown";
+import { renderInto } from "./markdown";
 import { MENTIONS } from "./mentions";
 import { renderPickers } from "./picker";
 import {
@@ -91,6 +91,16 @@ export function renderChat(): HTMLElement {
   if (opened) void refreshPreview(input.value);
   // Scrolling needs the transcript to be in the document and laid out.
   queueMicrotask(() => {
+    const jump = state.jump;
+    if (jump !== null) {
+      state.jump = null;
+      const target = rolled.querySelector(`[data-mid="${jump}"]`);
+      if (target !== null) {
+        target.scrollIntoView({ block: "center" });
+        target.classList.add("jumped");
+        return;
+      }
+    }
     rolled.scrollTop = follow ? rolled.scrollHeight : offset;
   });
   return column;
@@ -119,6 +129,7 @@ function patch(): void {
 
 function said(message: Message, index: number): HTMLElement {
   const block = el("div", `message ${message.role}`);
+  block.dataset.mid = String(message.id);
   const text = el("div", "text");
   fill(text, message.content, false);
   block.append(speaker(message.role), text);
@@ -154,6 +165,9 @@ function streamed(stream: Stream): HTMLElement {
   if (stream.reminders.length > 0) {
     block.append(trace("◔", "reminder", stream.reminders, "stream-reminded"));
   }
+  if (stream.scheduled.length > 0) {
+    block.append(trace("⟳", "scheduled", stream.scheduled, "stream-scheduled"));
+  }
   return block;
 }
 
@@ -169,12 +183,11 @@ function fill(node: HTMLElement, content: string, cursor: boolean): void {
     return;
   }
   const interrupted = content.endsWith(INTERRUPTED);
-  const blocks = renderMarkdown(
-    interrupted ? content.slice(0, -INTERRUPTED.length) : content,
-  );
-  node.replaceChildren(...blocks);
+  renderInto(node, interrupted ? content.slice(0, -INTERRUPTED.length) : content);
+  // The marks live inside re-rendered blocks, so stale ones are swept first.
+  for (const mark of node.querySelectorAll(".cursor, .interrupted")) mark.remove();
   // Both marks belong at the end of the last line, unless that line is code.
-  const last = blocks[blocks.length - 1];
+  const last = node.lastElementChild;
   const tail = last instanceof HTMLParagraphElement ? last : node;
   if (interrupted) tail.append(" ", el("span", "interrupted", "(interrupted)"));
   if (cursor) tail.append(el("span", "cursor"));
@@ -198,12 +211,21 @@ function ledger(): HTMLElement {
   }
   const preview = state.ledger.preview;
   if (preview === null) return line;
+  if (preview.soul_tokens > 0) {
+    const soul = el(
+      "span",
+      preview.soul_over ? "ledger-soul over" : "ledger-soul",
+      `● soul ${count(preview.soul_tokens)}`,
+    );
+    if (preview.soul_over) soul.title = "soul.md is over its budget — consolidate it";
+    line.append(soul);
+  }
   if (!preview.active) {
     line.append(
       el(
         "span",
         "ledger-note",
-        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects · /unlink-memory disconnects · /reminder sets one",
+        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects · /unlink-memory disconnects · /reminder sets one · /schedule repeats an ask",
       ),
     );
     return line;

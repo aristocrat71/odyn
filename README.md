@@ -168,13 +168,26 @@ so "this changed" rewrites the note it belongs to; `/delete-memory` hands it
 note pointing at another; and `/unlink-memory` hands it `unlink_memory`,
 which takes that edge back out. `/reminder` is the one mention that reads
 nothing: it hands the model `set_reminder`, which writes a row rather than a
-note, so the turn never loads the embedder. Due reminders take over the
+note, so the turn never loads the embedder. A recurring ask ("every day at 9",
+"every monday 9:30", "every 45 minutes") re-arms itself after each firing;
+one missed while the machine slept fires once and re-arms from now, never as
+a backlog. Due reminders take over the
 spotlight panel until dismissed; `/view-reminders` lists what is waiting and
-what has already been shown, and cancels any of the former. A turn with a memory tool recalls wider than `/brain` does
+what has already been shown, and cancels any of the former. `/schedule` hands
+the model `schedule_ask`: a prompt odyn runs on that schedule, each run
+landing as a normal conversation announced in spotlight — the morning brief.
+Scheduled runs are unattended, so they are handed no tools; a prompt carrying
+tool mentions is refused, while `/brain` recall works. A turn with a memory tool recalls wider than `/brain` does
 — no relevance floor, no `top_k` limit, just the token cap — and is also given
 every memory's name, because its job is finding the right note rather than
 answering from the best few. One tool per mention — the choice between them is yours, not the model's. A stale `[memory]` section from brain v1 still
 parses and is ignored.
+
+One filename is special: `soul.md` in the brain folder holds standing
+instructions and is injected on every turn, mention or not — the one exception
+to "nothing is injected unless asked", which is why the ledger prices it as
+`● soul N` on every surface. It is not a memory: never recalled, indexed,
+graphed or listed, and the model cannot write it.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -184,6 +197,7 @@ parses and is ignored.
 | `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
 | `min_relevance` | `0.3` | Only notes scoring at least this share of the best match are injected. `0` keeps everything the cap allows. Applies to `/brain`; a turn with a memory tool ignores it. |
 | `save_temperature` | `0.3` | Sampling temperature for `/memory` save turns; lower is more literal. Between 0 and 2. |
+| `soul_cap_tokens` | `400` | Soft budget for `soul.md` — standing instructions injected on every turn. Going over turns its ledger chip red; nothing is truncated. |
 | `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
 Token counts are a chars/4 approximation, in the config and in every ledger

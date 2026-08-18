@@ -125,6 +125,7 @@ cap_tokens = 1200
 similarity_edge_threshold = 0.78
 min_relevance = 0.3
 save_temperature = 0.3
+soul_cap_tokens = 400
 
 [style]
 brevity = "off"
@@ -214,7 +215,7 @@ bun run tauri dev`),
         ["delete", "the `✕` on a conversation row, revealed on hover or focus."],
         [
           "find one",
-          "the sidebar lists the seven most recently answered and puts the total beside the `CONVERSATIONS` heading; the heading opens all of them with a search on top. The search is fuzzy — letters have to appear in a title in order, not next to each other — and the letters that earned each hit are marked in teal. Arrows move, Enter opens, Esc clears. An older conversation you open takes the sidebar's last slot until something newer pushes it out.",
+          "the sidebar lists the seven most recently answered and puts the total beside the `CONVERSATIONS` heading; the heading opens all of them with a search on top. The search is fuzzy over titles — letters have to appear in order, not next to each other, and the letters that earned each hit are marked in teal — and full-text over every message: content hits appear below the titles under `in messages`, best match first, and opening one lands the chat scrolled to that exact message. Arrows move, Enter opens, Esc clears. An older conversation you open takes the sidebar's last slot until something newer pushes it out.",
         ],
       ]),
       p(
@@ -314,6 +315,16 @@ bun run tauri dev`),
           "only what changed. Deleting a file deletes the memory. The database is " +
           "just an index derived from the folder — the files never lie.",
       ),
+      sub("soul.md — standing instructions"),
+      p(
+        "One filename is special: `soul.md` in the brain folder is injected on " +
+          "every turn, on every surface — no mention needed. It is where " +
+          "\"always answer in metric\" or \"you are talking to a Rust programmer\" " +
+          "lives. It is not a memory: never recalled, never in the graph, never " +
+          "listed. Its standing cost shows in the ledger as `● soul N`; past " +
+          "`soul_cap_tokens` (default 400) the chip turns red — consolidate, " +
+          "nothing is ever truncated. Delete the file and nothing is injected.",
+      ),
       sub("links"),
       p(
         "`[[another-note]]` inside a note is a deliberate edge in the brain graph, " +
@@ -366,7 +377,10 @@ bun run tauri dev`),
           "other. A call that succeeds ends the turn on odyn's own one-line " +
           "confirmation — the model does not get to talk over your notes after a " +
           "write. It never touches the brain without these mentions, and all of " +
-          "them need a model that supports tool calls (llama3.2 does).",
+          "them need a model that supports tool calls (llama3.2 does). Ollama " +
+          "reports which models can; the picker marks the rest `no tools`, and " +
+          "sending a memory mention at one is refused up front with that reason " +
+          "instead of failing strangely mid-turn.",
       ),
       sub("reminders"),
       p(
@@ -379,7 +393,23 @@ bun run tauri dev`),
           "they need no reference clock and so cannot land on the wrong day, and " +
           "the current local time is stated in the prompt for when they do not " +
           "fit. A time already past, or one years away, comes back as an error " +
-          "the model can read and correct rather than a reminder set wrong.",
+          "the model can read and correct rather than a reminder set wrong. " +
+          "Asking for a recurring one — \"every day at 9\", \"every monday at " +
+          "9:30\", \"every 45 minutes\" — sets a repeating reminder that re-arms " +
+          "itself after each firing instead of burning out. One slept through " +
+          "fires once on wake and re-arms from now, never as a backlog.",
+      ),
+      p(
+        "`/schedule` goes one step further: instead of showing you a note, odyn " +
+          "runs a prompt — \"/schedule brief me on my notes every morning at 9\" " +
+          "becomes a scheduled ask. Each run is a normal conversation, " +
+          "created with the scheduling conversation's provider and model, usage " +
+          "recorded, nothing hidden; when it finishes, the spotlight panel " +
+          "announces it and clicking the row opens the conversation. A scheduled " +
+          "run is unattended, so it is handed no tools — a prompt carrying " +
+          "tool mentions is refused at creation — though `/brain` recall works. " +
+          "Scheduled asks live in the reminders view with their next run time; a " +
+          "failed run shows its error there and the next tick retries.",
       ),
       p(
         "The reminders view — `/view-reminders`, or the sidebar — lists what is " +

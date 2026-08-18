@@ -9,7 +9,7 @@ import { listen } from "@tauri-apps/api/event";
 import { accept, ghost } from "./complete";
 import { el, forgetTraces, trace, waiting } from "./dom";
 import { closeOpenDropdown, dropdown } from "./dropdown";
-import { renderMarkdown } from "./markdown";
+import { renderInto } from "./markdown";
 import { dueLabel } from "./due";
 import { mentionAsk } from "./mentions";
 
@@ -19,6 +19,7 @@ type SpotEvent =
       kind: "context";
       used: string[];
       tokens: number;
+      soul: number;
     }
   | { request_id: number; kind: "delta"; text: string }
   | { request_id: number; kind: "saved"; slug: string }
@@ -27,6 +28,7 @@ type SpotEvent =
   | { request_id: number; kind: "linked"; from: string; to: string }
   | { request_id: number; kind: "unlinked"; from: string; to: string }
   | { request_id: number; kind: "reminded"; text: string; due_at: number }
+  | { request_id: number; kind: "scheduled"; prompt: string; next_at: number }
   | { request_id: number; kind: "done" }
   // `detail` present means `message` stands in for the provider's own words.
   | { request_id: number; kind: "error"; message: string; detail?: string };
@@ -60,7 +62,8 @@ const modelDrop = dropdown({
 });
 picks.append(providerDrop.root, modelDrop.root);
 
-type Due = { text: string; due_at: number };
+// A row with a conversation_id is a finished scheduled run; clicking opens it.
+type Due = { text: string; due_at: number; conversation_id: number | null };
 
 const chime = new Audio("/odyn-notif.wav");
 chime.loop = true;
@@ -84,6 +87,7 @@ const COMMANDS: Command[] = [
   { cmd: "/link-memory", view: null, hint: "connect two memories" },
   { cmd: "/unlink-memory", view: null, hint: "disconnect two memories" },
   { cmd: "/reminder", view: null, hint: "set a reminder" },
+  { cmd: "/schedule", view: null, hint: "run a prompt on a schedule" },
 ];
 
 let current: number | null = null;
@@ -96,6 +100,7 @@ let deleted: string[] = [];
 let linked: string[] = [];
 let unlinked: string[] = [];
 let reminders: string[] = [];
+let scheduled: string[] = [];
 let dueNow: Due[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
@@ -155,15 +160,22 @@ function keyCard(): void {
   results.replaceChildren(card);
 }
 
-// DESIGN.md §7: one line between field and answer, filled only on a /brain ask.
+// DESIGN.md §7: one line between field and answer, filled when anything is
+// injected — recalled notes, the soul note, or both.
 function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.replaceChildren();
-  if (event.tokens === 0) return;
-  // Which notes came back is named by the `◈ used` trace under the answer.
-  ledger.append(el("span", "ledger-reading", "◈ reading the brain"));
-  ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
+  if (event.tokens === 0 && event.soul === 0) return;
+  if (event.soul > 0) ledger.append(el("span", "ledger-soul", `● soul ${event.soul}`));
+  if (event.tokens > 0) {
+    // Which notes came back is named by the `◈ used` trace under the answer.
+    ledger.append(el("span", "ledger-reading", "◈ reading the brain"));
+    ledger.append(el("span", "spot-ledger-total", `${event.tokens} tk`));
+  }
   ledger.hidden = commandMode;
 }
+
+// Holds the streamed answer so frozen markdown blocks survive each delta.
+const answerBox = el("div", "spot-answer");
 
 function draw(): void {
   if (commandMode) return;
@@ -172,13 +184,13 @@ function draw(): void {
     results.replaceChildren(waiting());
     return;
   }
-  const body = renderMarkdown(answer);
+  renderInto(answerBox, answer);
+  for (const mark of answerBox.querySelectorAll(".cursor")) mark.remove();
   if (streaming) {
-    const last = body[body.length - 1] ?? el("p");
+    const last = answerBox.lastElementChild ?? answerBox.appendChild(el("p", "para"));
     last.append(el("span", "cursor"));
-    if (body.length === 0) body.push(last);
   }
-  results.replaceChildren(...body);
+  results.replaceChildren(answerBox);
   if (!streaming && used.length > 0) {
     results.append(trace("◈", "used", used, "used"));
   }
@@ -200,6 +212,9 @@ function draw(): void {
   if (!streaming && reminders.length > 0) {
     results.append(trace("◔", "reminder", reminders, "reminded"));
   }
+  if (!streaming && scheduled.length > 0) {
+    results.append(trace("⟳", "scheduled", scheduled, "scheduled"));
+  }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
 
@@ -217,18 +232,29 @@ function drawDue(): void {
   input.blur();
   void chime.play().catch(() => {});
   for (const due of dueNow) {
-    const row = el("div", "spot-due-row");
+    const run = due.conversation_id;
+    const row = el(run === null ? "div" : "button", "spot-due-row");
     row.append(
-      el("span", "spot-due-mark", "◔"),
+      el("span", "spot-due-mark", run === null ? "◔" : "⟳"),
       el("span", "spot-due-text", due.text),
       el("span", "spot-due-at", dueLabel(due.due_at)),
     );
+    if (run !== null) {
+      row.classList.add("run");
+      row.title = "open the conversation";
+      row.addEventListener("click", () => void openRun(run));
+    }
     dueBox.append(row);
   }
   const dismiss = el("button", "spot-due-clear", "dismiss");
   dismiss.addEventListener("click", clearDue);
   dueBox.append(dismiss);
   dueBox.hidden = false;
+}
+
+async function openRun(id: number): Promise<void> {
+  clearDue();
+  await invoke("spotlight_open_conversation", { id }).catch(() => {});
 }
 
 function clearDue(): void {
@@ -266,6 +292,7 @@ function clearScreen(): void {
   linked = [];
   unlinked = [];
   reminders = [];
+  scheduled = [];
   clearDue();
   forgetTraces();
   commandMode = false;
@@ -372,6 +399,7 @@ async function ask(): Promise<void> {
   linked = [];
   unlinked = [];
   reminders = [];
+  scheduled = [];
   clearDue();
   forgetTraces();
   ledger.hidden = true;
@@ -529,6 +557,8 @@ void listen<SpotEvent>("spotlight-event", (event) => {
     unlinked.push(`${data.from} ⇢ ${data.to}`);
   } else if (data.kind === "reminded") {
     reminders.push(`${data.text} · ${dueLabel(data.due_at)}`);
+  } else if (data.kind === "scheduled") {
+    scheduled.push(`${data.prompt} · ${dueLabel(data.next_at)}`);
   } else if (data.kind === "done") {
     streaming = false;
     draw();

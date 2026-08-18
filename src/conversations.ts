@@ -1,4 +1,4 @@
-import type { Conversation } from "./api";
+import { searchMessages, type Conversation, type SearchHit } from "./api";
 import { el } from "./dom";
 import { deleteConversation, selectConversation, state } from "./state";
 
@@ -15,10 +15,37 @@ const list = el("div", "conv-list");
 
 let active = 0;
 
+// Message-content hits from the backend index; titles stay client-side.
+let found: SearchHit[] = [];
+let foundTimer: number | null = null;
+let foundSeq = 0;
+
 search.addEventListener("input", () => {
   active = 0;
+  scheduleContentSearch();
   fill();
 });
+
+function scheduleContentSearch(): void {
+  const query = search.value.trim();
+  if (foundTimer !== null) clearTimeout(foundTimer);
+  if (query === "") {
+    found = [];
+    return;
+  }
+  foundTimer = window.setTimeout(() => {
+    foundTimer = null;
+    const seq = ++foundSeq;
+    searchMessages(query).then(
+      (hits) => {
+        if (seq !== foundSeq) return;
+        found = hits;
+        fill();
+      },
+      () => {},
+    );
+  }, 250);
+}
 
 search.addEventListener("keydown", (event) => {
   const hits = matches();
@@ -34,6 +61,7 @@ search.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     search.value = "";
     active = 0;
+    found = [];
     fill();
     return;
   }
@@ -58,10 +86,50 @@ function fill(): void {
   const hits = matches();
   if (active >= hits.length) active = 0;
   count.textContent = summary(hits.length);
-  list.replaceChildren(...hits.map(line));
-  if (hits.length > 0) return;
+  const content = contentHits();
+  list.replaceChildren(...hits.map(line), ...content);
+  if (hits.length > 0 || content.length > 0) return;
   const empty = state.conversations.length === 0 ? "no conversations yet" : "nothing matches";
   list.append(el("div", "conv-none", empty));
+}
+
+// Backend hits arrive ranked; grouping keeps that order per conversation.
+function contentHits(): HTMLElement[] {
+  if (search.value.trim() === "" || found.length === 0) return [];
+  const groups = new Map<number, SearchHit[]>();
+  for (const hit of found) {
+    const grouped = groups.get(hit.conversation_id) ?? [];
+    grouped.push(hit);
+    groups.set(hit.conversation_id, grouped);
+  }
+  const box = el("div", "conv-hits");
+  box.append(el("div", "hit-head", "in messages"));
+  for (const grouped of groups.values()) {
+    const group = el("div", "hit-group");
+    group.append(el("div", "hit-title", grouped[0]?.title ?? ""));
+    for (const hit of grouped) {
+      const row = el("button", "hit-row");
+      row.append(el("span", "hit-role", hit.role === "user" ? "you" : "odyn"));
+      const snippet = el("span", "hit-snippet");
+      snippet.append(...marked(hit.snippet));
+      row.append(snippet);
+      row.addEventListener(
+        "click",
+        () => void selectConversation(hit.conversation_id, hit.message_id),
+      );
+      group.append(row);
+    }
+    box.append(group);
+  }
+  return [box];
+}
+
+function marked(text: string): (string | HTMLElement)[] {
+  return text.split("\u0001").flatMap((part) => {
+    const close = part.indexOf("\u0002");
+    if (close === -1) return [part];
+    return [el("span", "conv-mark", part.slice(0, close)), part.slice(close + 1)];
+  });
 }
 
 function line(hit: Hit, index: number): HTMLElement {

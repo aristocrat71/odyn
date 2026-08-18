@@ -2,6 +2,7 @@ mod brain;
 mod commands;
 mod config;
 mod reminders;
+mod schedules;
 mod spotlight;
 mod state;
 mod tray;
@@ -35,6 +36,7 @@ pub fn run() {
             commands::set_conversation_brevity,
             commands::get_conversation,
             commands::messages,
+            commands::search_messages,
             commands::send_message,
             commands::context_preview,
             brain::brain_overview,
@@ -51,6 +53,7 @@ pub fn run() {
             brain::brain_set_min_relevance,
             config::config_file,
             config::open_config,
+            config::open_url,
             config::providers_config,
             config::provider_catalog,
             config::provider_connect,
@@ -61,6 +64,7 @@ pub fn run() {
             config::reload_config,
             reminders::reminders_list,
             reminders::reminder_delete,
+            reminders::schedule_delete,
             commands::cancel_message,
             commands::status,
             commands::providers_overview,
@@ -73,6 +77,7 @@ pub fn run() {
             spotlight::spotlight_set_target,
             spotlight::spotlight_save_key,
             spotlight::spotlight_open_view,
+            spotlight::spotlight_open_conversation,
         ])
         .build(tauri::generate_context!());
     match app {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use odyn_core::brain::{self, Ask, InjectedContext};
 use odyn_core::brevity::Brevity;
 use odyn_core::chat::{ChatError, ChatProvider, Message, Role, ToolDef, Usage};
-use odyn_core::config::ProviderConfig;
+use odyn_core::config::{BrainConfig, ProviderConfig};
 use odyn_core::embed::{self, load_embedder};
 use odyn_core::notes;
 use odyn_core::providers::ollama::OllamaProvider;
@@ -48,10 +48,21 @@ pub struct ConversationView {
 
 #[derive(serde::Serialize)]
 pub struct MessageView {
+    id: i64,
     role: Role,
     content: String,
     /// Assistant rows only: the slugs injected for the question this answers.
     used: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SearchHit {
+    conversation_id: i64,
+    title: String,
+    message_id: i64,
+    role: Role,
+    /// Matched terms sit between `\u{1}` and `\u{2}`; the view marks them.
+    snippet: String,
 }
 
 #[derive(serde::Serialize)]
@@ -69,6 +80,9 @@ pub struct ContextPreview {
     memories: Vec<LedgerItem>,
     tokens: i64,
     cap_tokens: u32,
+    /// soul.md's standing cost, on every turn; 0 when there is none.
+    soul_tokens: i64,
+    soul_over: bool,
     system_message: String,
 }
 
@@ -85,6 +99,8 @@ pub struct Model {
     pub(crate) name: String,
     /// On-disk size; only Ollama reports it, and it is never invented.
     size_bytes: Option<u64>,
+    /// Whether the model can call tools; `None` when nothing reported it.
+    tools: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -108,6 +124,7 @@ pub(crate) enum Body {
     Context {
         used: Vec<String>,
         tokens: i64,
+        soul: i64,
     },
     Delta {
         text: String,
@@ -132,6 +149,10 @@ pub(crate) enum Body {
     Reminded {
         text: String,
         due_at: i64,
+    },
+    Scheduled {
+        prompt: String,
+        next_at: i64,
     },
     Done {
         usage: Option<Usage>,
@@ -319,10 +340,31 @@ pub async fn messages(
                 Role::System | Role::Tool => Vec::new(),
             };
             MessageView {
+                id: row.id,
                 role: row.role,
                 content: row.content,
                 used,
             }
+        })
+        .collect())
+}
+
+/// Full-text search across every conversation's messages, best match first.
+#[tauri::command]
+pub async fn search_messages(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<SearchHit>, String> {
+    let ready = state.ready()?;
+    let hits = ready.storage().search_messages(&query, 40).map_err(say)?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| SearchHit {
+            conversation_id: hit.conversation_id,
+            title: hit.title,
+            message_id: hit.message_id,
+            role: hit.role,
+            snippet: hit.snippet,
         })
         .collect())
 }
@@ -389,11 +431,14 @@ pub async fn send_message(
     };
     let brevity = row.brevity.unwrap_or(ready.config.style.brevity);
     let save_temperature = ready.config.brain.save_temperature;
+    let provider_config = ready.config.providers.get(&row.provider).cloned();
     let task = tauri::async_runtime::spawn(run(
         app.clone(),
         request_id,
         Arc::clone(&stream),
         provider,
+        provider_config,
+        row.provider,
         row.model,
         prior,
         ask,
@@ -490,6 +535,7 @@ pub(crate) async fn served(
             .map(|name| Model {
                 name,
                 size_bytes: None,
+                tools: None,
             })
             .collect()
     };
@@ -519,11 +565,36 @@ pub(crate) async fn installed(base_url: &str, keep_alive: Option<String>) -> (bo
     let models = models
         .into_iter()
         .map(|model| Model {
+            tools: model.calls_tools(),
             name: model.name,
             size_bytes: Some(model.size_bytes),
         })
         .collect();
     (true, models)
+}
+
+/// The one failure every small-Ollama user hits: a tool-earning mention sent
+/// at a model that cannot call tools. Known only when the daemon says so;
+/// anything unknown lets the attempt proceed.
+pub(crate) const NO_TOOLS: &str = "this model cannot call tools — the mention needs one that can";
+
+pub(crate) async fn lacks_tools(config: &ProviderConfig, model: &str) -> bool {
+    let ProviderConfig::Ollama {
+        base_url,
+        keep_alive,
+    } = config
+    else {
+        return false;
+    };
+    let (reachable, models) = installed(base_url, keep_alive.clone()).await;
+    if !reachable {
+        return false;
+    }
+    models
+        .into_iter()
+        .find(|served| served.name == model)
+        .and_then(|served| served.tools)
+        == Some(false)
 }
 
 /// Owns one reply from the first token to the stored row.
@@ -533,6 +604,8 @@ async fn run(
     request_id: u64,
     stream: Arc<Stream>,
     provider: Box<dyn ChatProvider>,
+    provider_config: Option<ProviderConfig>,
+    provider_name: String,
     model: String,
     prior: Vec<Message>,
     ask: Ask,
@@ -541,6 +614,15 @@ async fn run(
     brain_dir: std::path::PathBuf,
     save_temperature: f32,
 ) {
+    // Refused before recall runs: an embed plus a doomed request helps no one.
+    let earns_tools = ask.writes() || ask.remind || ask.schedule;
+    if let Some(config) = provider_config.filter(|_| earns_tools) {
+        if lacks_tools(&config, &model).await {
+            app.state::<AppState>().streams.close(request_id);
+            emit(&app, request_id, Body::error(NO_TOOLS));
+            return;
+        }
+    }
     let context = build_context(&app, prior.clone(), ask.clone(), brevity).await;
     if let Some(context) = &context {
         record(&app, &stream, question_id, context);
@@ -560,6 +642,7 @@ async fn run(
         ask.link,
         ask.unlink,
         ask.remind,
+        ask.schedule,
     );
 
     let outcome = drive(
@@ -567,6 +650,7 @@ async fn run(
         request_id,
         &stream,
         provider.as_ref(),
+        &provider_name,
         &model,
         history,
         &tools,
@@ -593,12 +677,38 @@ async fn run(
 /// lock per statement, and nothing held across the loop's awaits.
 pub(crate) fn reminder_sink(
     app: &AppHandle,
-) -> impl FnMut(&str, i64) -> Result<i64, String> + Send + '_ {
-    move |text, due_at| {
+) -> impl FnMut(&str, i64, Option<&str>) -> Result<i64, String> + Send + '_ {
+    move |text, due_at, repeat| {
         let ready = app.state::<AppState>().inner().ready()?;
-        let stored = ready.storage().add_reminder(text, due_at);
+        let stored = ready.storage().add_reminder(text, due_at, repeat);
         stored
             .map(|reminder| reminder.id)
+            .map_err(|err| err.to_string())
+    }
+}
+
+/// The schedule writer for a turn. Provider and model are the sending
+/// conversation's, frozen into the row. A prompt that would earn tools is
+/// refused: a scheduled run is unattended, and unattended turns write nothing.
+pub(crate) fn schedule_sink<'a>(
+    app: &'a AppHandle,
+    provider: &'a str,
+    model: &'a str,
+) -> impl FnMut(&str, &str, i64) -> Result<i64, String> + Send + 'a {
+    move |prompt, every, next_at| {
+        let asks = brain::parse_ask(prompt);
+        if asks.writes() || asks.remind || asks.schedule {
+            return Err(
+                "a scheduled ask cannot carry tool mentions — drop them from the prompt"
+                    .to_string(),
+            );
+        }
+        let ready = app.state::<AppState>().inner().ready()?;
+        let stored = ready
+            .storage()
+            .add_schedule(prompt, provider, model, every, next_at);
+        stored
+            .map(|schedule| schedule.id)
             .map_err(|err| err.to_string())
     }
 }
@@ -611,6 +721,7 @@ pub(crate) fn context_body(context: &InjectedContext) -> Body {
             .map(|memory| memory.slug.clone())
             .collect(),
         tokens: context.tokens,
+        soul: context.soul_tokens,
     }
 }
 
@@ -676,8 +787,9 @@ pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
     Ok(())
 }
 
-/// Memory is opt-in and additive here too: no `/brain`, no injection, and a
-/// brain failure means an uninjected turn rather than a failed one.
+/// Memory is opt-in and additive here too: no `/brain`, no injection. The
+/// soul note rides every turn; a brain failure falls back to a soulless,
+/// uninjected turn rather than a failed one.
 pub(crate) async fn build_context(
     app: &AppHandle,
     prior: Vec<Message>,
@@ -687,24 +799,31 @@ pub(crate) async fn build_context(
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ready = handle.state::<AppState>().inner().ready().ok()?;
-        if !ask.any() {
-            return Some(brain::empty_context(brevity, &ask));
-        }
         // The folder is the truth: recall reads the files as they are now.
-        if let Err(err) = sync_index(&ready) {
-            eprintln!("odyn: brain folder not synced: {err}");
+        if ask.any() {
+            if let Err(err) = sync_index(&ready) {
+                eprintln!("odyn: brain folder not synced: {err}");
+            }
         }
-        // One lock per statement — see `sync_index`.
-        let storage = ready.storage();
-        let context = brain::build_context(
-            Some(&storage),
-            &ready.config.brain,
-            &prior,
-            &ask,
-            brevity,
-            || load_embedder(&ready.config, &ready.config.brain.model),
-        );
-        context.ok()
+        let context = if ask.any() {
+            // One lock per statement — see `sync_index`.
+            let storage = ready.storage();
+            brain::build_context(
+                Some(&storage),
+                &ready.config.brain,
+                &prior,
+                &ask,
+                brevity,
+                || load_embedder(&ready.config, &ready.config.brain.model),
+            )
+        } else {
+            brain::build_context(None, &ready.config.brain, &prior, &ask, brevity, || {
+                Err(embed::EmbedError::Load(
+                    "no trigger, no embedder".to_string(),
+                ))
+            })
+        };
+        Some(context.unwrap_or_else(|_| brain::empty_context(brevity, &ask)))
     })
     .await
     .ok()
@@ -755,34 +874,32 @@ pub async fn context_preview(
             None => (Vec::new(), None),
         };
         let brevity = chosen.unwrap_or(ready.config.style.brevity);
-        let cap_tokens = ready.config.brain.cap_tokens;
-        // A draft without triggers previews what it would send: nothing.
+        let brain_config = ready.config.brain.clone();
+        // A draft without triggers previews what it would send: the soul alone.
         if !ask.any() {
-            return Ok(preview(
-                brain::empty_context(brevity, &ask),
-                cap_tokens,
-                false,
-            ));
+            let context = brain::build_context(None, &brain_config, &prior, &ask, brevity, || {
+                Err(embed::EmbedError::Load(
+                    "no trigger, no embedder".to_string(),
+                ))
+            })
+            .map_err(|err| err.to_string())?;
+            return Ok(preview(context, &brain_config, false));
         }
         sync_index(&ready)?;
         // One lock per statement — see `sync_index`.
         let storage = ready.storage();
-        let context = brain::build_context(
-            Some(&storage),
-            &ready.config.brain,
-            &prior,
-            &ask,
-            brevity,
-            || load_embedder(&ready.config, &ready.config.brain.model),
-        )
-        .map_err(|err| err.to_string())?;
-        Ok(preview(context, cap_tokens, true))
+        let context =
+            brain::build_context(Some(&storage), &brain_config, &prior, &ask, brevity, || {
+                load_embedder(&ready.config, &brain_config.model)
+            })
+            .map_err(|err| err.to_string())?;
+        Ok(preview(context, &brain_config, true))
     })
     .await
     .map_err(|err| err.to_string())?
 }
 
-fn preview(context: InjectedContext, cap_tokens: u32, active: bool) -> ContextPreview {
+fn preview(context: InjectedContext, config: &BrainConfig, active: bool) -> ContextPreview {
     ContextPreview {
         active,
         memories: context
@@ -795,7 +912,9 @@ fn preview(context: InjectedContext, cap_tokens: u32, active: bool) -> ContextPr
             })
             .collect(),
         tokens: context.tokens,
-        cap_tokens,
+        cap_tokens: config.cap_tokens,
+        soul_tokens: context.soul_tokens,
+        soul_over: context.soul_tokens > i64::from(config.soul_cap_tokens),
         system_message: context.system_message,
     }
 }
@@ -806,6 +925,7 @@ async fn drive(
     request_id: u64,
     stream: &Stream,
     provider: &dyn ChatProvider,
+    provider_name: &str,
     model: &str,
     history: Vec<Message>,
     tools: &[ToolDef],
@@ -813,9 +933,11 @@ async fn drive(
     save_temperature: f32,
 ) -> Outcome {
     let mut sink = reminder_sink(app);
+    let mut plans = schedule_sink(app, provider_name, model);
     let mut effects = tools::Effects {
         brain_dir,
         set_reminder: &mut sink,
+        set_schedule: &mut plans,
     };
     let driven = tools::run_turn(
         provider,
@@ -879,6 +1001,14 @@ async fn drive(
                     Body::Reminded {
                         text: text.to_string(),
                         due_at,
+                    },
+                ),
+                TurnEvent::Scheduled { prompt, next_at } => emit(
+                    app,
+                    request_id,
+                    Body::Scheduled {
+                        prompt: prompt.to_string(),
+                        next_at,
                     },
                 ),
             }

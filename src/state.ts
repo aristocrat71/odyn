@@ -36,6 +36,8 @@ export type Stream = {
   unlinked: string[];
   // Reminders set this reply, already rendered as local time.
   reminders: string[];
+  // Asks scheduled this reply, with their first run time.
+  scheduled: string[];
 };
 
 // The backend's refusal when a conversation has no model; picking one clears it.
@@ -46,6 +48,8 @@ export const state = {
   view: "home" as View,
   conversations: [] as api.Conversation[],
   selected: null as number | null,
+  // A message to scroll to when the chat next renders; a search result set it.
+  jump: null as number | null,
   messages: [] as api.Message[],
   turns: 0,
   tokens: null as number | null,
@@ -126,8 +130,9 @@ export const refreshStatus = (): Promise<void> =>
     state.hotkeyError = await api.spotlightStatus();
   });
 
-export const selectConversation = (id: number): Promise<void> =>
+export const selectConversation = (id: number, message?: number): Promise<void> =>
   guard(async () => {
+    state.jump = message ?? null;
     await open(id);
     state.view = "chat";
   });
@@ -307,7 +312,8 @@ async function start(prompt: string, retry: boolean): Promise<void> {
   const conversation = state.selected;
   if (conversation === null) return;
   // A retry answers a question that is already stored, and already shown.
-  if (!retry) state.messages.push({ role: "user", content: prompt, used: [] });
+  // The optimistic row has no stored id yet; -1 is never a jump target.
+  if (!retry) state.messages.push({ id: -1, role: "user", content: prompt, used: [] });
   const stream: Stream = {
     conversation,
     requestId: null,
@@ -321,6 +327,7 @@ async function start(prompt: string, retry: boolean): Promise<void> {
     linked: [],
     unlinked: [],
     reminders: [],
+    scheduled: [],
   };
   state.stream = stream;
   render();
@@ -386,6 +393,11 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   if (event.kind === "reminded") {
     stream.reminders.push(`${event.text} · ${dueLabel(event.due_at)}`);
+    render();
+    return;
+  }
+  if (event.kind === "scheduled") {
+    stream.scheduled.push(`${event.prompt} · ${dueLabel(event.next_at)}`);
     render();
     return;
   }
@@ -559,6 +571,12 @@ export const loadReminders = (): Promise<void> =>
 export const cancelReminder = (id: number): Promise<void> =>
   guard(async () => {
     await api.reminderDelete(id);
+    await loadReminders();
+  });
+
+export const cancelSchedule = (id: number): Promise<void> =>
+  guard(async () => {
+    await api.scheduleDelete(id);
     await loadReminders();
   });
 

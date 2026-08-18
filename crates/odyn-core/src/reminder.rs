@@ -4,7 +4,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 /// Further out than this is a hallucinated year, not a plan.
 const MAX_HORIZON_SECS: i64 = 5 * 365 * 24 * 60 * 60;
@@ -110,6 +110,100 @@ fn parse_local(spec: &str) -> Option<i64> {
         .flatten()
 }
 
+/// A parsed `every`-phrase. Stored as its canonical text and re-parsed to
+/// re-arm, so the row stays readable in the database and the view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Repeat {
+    Minutes(i64),
+    /// `HH:MM`, zero-padded.
+    Daily(String),
+    /// strftime `%w` weekday and `HH:MM`.
+    Weekly(usize, String),
+}
+
+impl Repeat {
+    pub fn canonical(&self) -> String {
+        match self {
+            Self::Minutes(minutes) => format!("every {minutes}m"),
+            Self::Daily(clock) => format!("every day {clock}"),
+            Self::Weekly(day, clock) => format!("every {} {clock}", DAYS[*day].to_lowercase()),
+        }
+    }
+}
+
+const REPEAT_SHAPES: &str =
+    "a repeat reads as `every day 09:00`, `every monday 9:30`, or `every 45m`";
+
+pub fn parse_repeat(spec: &str) -> Result<Repeat, String> {
+    let spec = spec.trim().to_lowercase();
+    let rest = spec.strip_prefix("every ").ok_or(REPEAT_SHAPES)?;
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    match words.as_slice() {
+        [interval] => interval
+            .strip_suffix('m')
+            .and_then(|count| count.parse().ok())
+            .filter(|minutes: &i64| {
+                *minutes > 0
+                    && minutes
+                        .checked_mul(60)
+                        .is_some_and(|secs| secs <= MAX_HORIZON_SECS)
+            })
+            .map(Repeat::Minutes)
+            .ok_or_else(|| REPEAT_SHAPES.to_string()),
+        [day, time] => {
+            let clock = clock(time).ok_or(REPEAT_SHAPES)?;
+            if *day == "day" {
+                return Ok(Repeat::Daily(clock));
+            }
+            DAYS.iter()
+                .position(|name| name.eq_ignore_ascii_case(day))
+                .map(|index| Repeat::Weekly(index, clock))
+                .ok_or_else(|| REPEAT_SHAPES.to_string())
+        }
+        _ => Err(REPEAT_SHAPES.to_string()),
+    }
+}
+
+/// `9:30` and `09:30` both read; anything off the clock face does not.
+fn clock(time: &str) -> Option<String> {
+    let (hour, minute) = time.split_once(':')?;
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok().filter(|_| minute.len() == 2)?;
+    (hour <= 23 && minute <= 59).then(|| format!("{hour:02}:{minute:02}"))
+}
+
+/// The next firing strictly after `now`. Always measured from now, so a
+/// reminder slept through fires once and re-arms without a backlog.
+pub fn next_fire(repeat: &Repeat, now: i64) -> Option<i64> {
+    match repeat {
+        Repeat::Minutes(minutes) => now.checked_add(minutes.checked_mul(60)?),
+        Repeat::Daily(clock) => at_clock(now, clock, None),
+        Repeat::Weekly(day, clock) => at_clock(now, clock, Some(*day)),
+    }
+}
+
+/// The first local `clock` ahead of `now`, on the wanted weekday when one is
+/// given. SQLite does the calendar work, as everywhere in this module.
+fn at_clock(now: i64, clock: &str, day: Option<usize>) -> Option<i64> {
+    let conn = Connection::open_in_memory().ok()?;
+    for offset in 0..=7 {
+        let read = conn.query_row(
+            "SELECT CAST(strftime('%s', date(?1, 'unixepoch', 'localtime', ?2 || ' days')
+                                       || ' ' || ?3, 'utc') AS INTEGER),
+                    CAST(strftime('%w', ?1, 'unixepoch', 'localtime', ?2 || ' days') AS INTEGER)",
+            params![now, offset, clock],
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+        );
+        let Ok((Some(at), weekday)) = read else {
+            return None;
+        };
+        if at > now && day.is_none_or(|day| day as i64 == weekday) {
+            return Some(at);
+        }
+    }
+    None
+}
+
 /// Reinterpreting an offset-bearing string as local would shift it twice.
 fn zoned(spec: &str) -> bool {
     if spec.ends_with('Z') || spec.ends_with('z') {
@@ -161,6 +255,62 @@ mod tests {
     fn a_hallucinated_year_is_refused() {
         assert!(resolve_due(NOW, None, Some("9999-01-01 09:00")).is_err());
         assert!(resolve_due(NOW, Some(i64::MAX), None).is_err());
+    }
+
+    #[test]
+    fn an_every_phrase_parses_into_its_canonical_shape() {
+        assert_eq!(parse_repeat("every 45m"), Ok(Repeat::Minutes(45)));
+        assert_eq!(
+            parse_repeat("  Every Day 9:00 "),
+            Ok(Repeat::Daily("09:00".to_string()))
+        );
+        assert_eq!(
+            parse_repeat("every Monday 9:30"),
+            Ok(Repeat::Weekly(1, "09:30".to_string()))
+        );
+        assert_eq!(
+            parse_repeat("every monday 9:30").unwrap().canonical(),
+            "every monday 09:30"
+        );
+        for bad in [
+            "every",
+            "daily",
+            "every day",
+            "every fortnight 09:00",
+            "every day 25:00",
+            "every day 9:3",
+            "every 0m",
+            "every 99999999999m",
+        ] {
+            assert!(parse_repeat(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_next_firing_is_always_measured_from_now() {
+        let by_minutes = next_fire(&Repeat::Minutes(45), NOW);
+        assert_eq!(by_minutes, Some(NOW + 45 * 60));
+
+        let now = now_secs();
+        let daily = next_fire(&Repeat::Daily("09:00".to_string()), now).expect("daily");
+        assert!(daily > now && daily <= now + 2 * 86_400, "{daily}");
+        assert!(
+            local_stamp(daily).ends_with("09:00"),
+            "{}",
+            local_stamp(daily)
+        );
+
+        let weekly = next_fire(&Repeat::Weekly(1, "09:30".to_string()), now).expect("weekly");
+        assert!(weekly > now && weekly <= now + 8 * 86_400, "{weekly}");
+        let weekday: i64 = Connection::open_in_memory()
+            .expect("conn")
+            .query_row(
+                "SELECT CAST(strftime('%w', ?1, 'unixepoch', 'localtime') AS INTEGER)",
+                [weekly],
+                |row| row.get(0),
+            )
+            .expect("weekday");
+        assert_eq!(weekday, 1);
     }
 
     #[test]

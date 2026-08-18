@@ -205,6 +205,19 @@ async fn probe(
     }
 }
 
+/// A link the model wrote, leaving for the default browser. Only http(s) is
+/// ever opened: anything else could name a local scheme handler.
+#[tauri::command]
+pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    let lowered = url.trim().to_ascii_lowercase();
+    if !lowered.starts_with("http://") && !lowered.starts_with("https://") {
+        return Err("only http(s) links open".to_string());
+    }
+    app.opener()
+        .open_url(url.trim(), None::<&str>)
+        .map_err(|err| err.to_string())
+}
+
 /// The url is a build constant, so the frontend cannot redirect the browser.
 #[tauri::command]
 pub fn open_keys_page(app: AppHandle, id: String) -> Result<(), String> {

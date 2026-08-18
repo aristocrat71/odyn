@@ -20,16 +20,26 @@ export type ConversationView = Conversation & {
 };
 
 export type Message = {
+  id: number;
   role: "system" | "user" | "assistant";
   content: string;
   // Assistant rows: the slugs injected for the question this answers.
   used: string[];
 };
 
+export type SearchHit = {
+  conversation_id: number;
+  title: string;
+  message_id: number;
+  role: "user" | "assistant";
+  // Matched terms sit between the U+0001 and U+0002 markers.
+  snippet: string;
+};
+
 export type Usage = { input_tokens: number; output_tokens: number };
 
 export type ChatEvent = { request_id: number } & (
-  | { kind: "context"; used: string[]; tokens: number }
+  | { kind: "context"; used: string[]; tokens: number; soul: number }
   | { kind: "delta"; text: string }
   | { kind: "saved"; slug: string }
   | { kind: "updated"; slug: string }
@@ -37,6 +47,7 @@ export type ChatEvent = { request_id: number } & (
   | { kind: "linked"; from: string; to: string }
   | { kind: "unlinked"; from: string; to: string }
   | { kind: "reminded"; text: string; due_at: number }
+  | { kind: "scheduled"; prompt: string; next_at: number }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );
@@ -49,6 +60,9 @@ export type ContextPreview = {
   memories: LedgerItem[];
   tokens: number;
   cap_tokens: number;
+  // soul.md's standing cost, injected on every turn; 0 when there is none.
+  soul_tokens: number;
+  soul_over: boolean;
   system_message: string;
 };
 
@@ -56,6 +70,8 @@ export type Model = {
   name: string;
   // On-disk size, which only Ollama reports.
   size_bytes: number | null;
+  // Whether the model can call tools; null when nothing reported it.
+  tools: boolean | null;
 };
 
 export type ProviderGroup = {
@@ -99,6 +115,9 @@ export const getConversation = (id: number): Promise<ConversationView> =>
 
 export const messages = (conversationId: number): Promise<Message[]> =>
   invoke("messages", { conversationId });
+
+export const searchMessages = (query: string): Promise<SearchHit[]> =>
+  invoke("search_messages", { query });
 
 export const sendMessage = (
   conversationId: number,
@@ -216,14 +235,33 @@ export type ReminderRow = {
   due_at: number;
   // Null while it is still waiting.
   fired_at: number | null;
+  // The every-phrase of a repeating reminder; null is one-shot.
+  repeat: string | null;
 };
 
-export type ReminderList = { pending: ReminderRow[]; past: ReminderRow[] };
+export type ScheduleRow = {
+  id: number;
+  prompt: string;
+  repeat: string;
+  next_at: number;
+  last_run_at: number | null;
+  // What the last run failed with; null after a clean one.
+  last_error: string | null;
+};
+
+export type ReminderList = {
+  pending: ReminderRow[];
+  past: ReminderRow[];
+  schedules: ScheduleRow[];
+};
 
 export const remindersList = (): Promise<ReminderList> => invoke("reminders_list");
 
 export const reminderDelete = (id: number): Promise<void> =>
   invoke("reminder_delete", { id });
+
+export const scheduleDelete = (id: number): Promise<void> =>
+  invoke("schedule_delete", { id });
 
 export const configFile = (): Promise<ConfigFile> => invoke("config_file");
 
