@@ -56,7 +56,7 @@ pub struct MessageView {
     content: String,
     /// Assistant rows only: the slugs injected for the question this answers.
     used: Vec<String>,
-    /// Assistant rows only: the bash commands this reply ran, in run order.
+    /// Assistant rows only: the tool actions this reply ran, in run order.
     commands: Vec<String>,
 }
 
@@ -820,9 +820,10 @@ fn approver<'a>(
                 // A dropped sender is a cancelled turn: deny.
                 receiver.await.unwrap_or(tools::Verdict::Deny)
             };
-            // What actually ran is remembered with the reply's row.
+            // Logged only once it is allowed to run, and in the same
+            // `tool detail` shape the file tools use.
             if verdict == tools::Verdict::Run {
-                stream.ran(&command);
+                stream.ran(&format!("{} {command}", agent::BASH));
             }
             verdict
         })
@@ -1190,14 +1191,22 @@ async fn drive(
                         next_at,
                     },
                 ),
-                TurnEvent::AgentCall { tool, detail } => emit(
-                    app,
-                    request_id,
-                    Body::AgentCall {
-                        tool: tool.to_string(),
-                        detail: detail.to_string(),
-                    },
-                ),
+                TurnEvent::AgentCall { tool, detail } => {
+                    // File tools always run, so they are logged the moment
+                    // they are called; bash is logged by the approver, but
+                    // only once it is actually allowed to run.
+                    if tool != agent::BASH {
+                        stream.ran(&format!("{tool} {detail}"));
+                    }
+                    emit(
+                        app,
+                        request_id,
+                        Body::AgentCall {
+                            tool: tool.to_string(),
+                            detail: detail.to_string(),
+                        },
+                    );
+                }
                 TurnEvent::AgentOut { text, truncated } => emit(
                     app,
                     request_id,

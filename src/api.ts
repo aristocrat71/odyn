@@ -27,7 +27,7 @@ export type Message = {
   content: string;
   // Assistant rows: the slugs injected for the question this answers.
   used: string[];
-  // Assistant rows: the bash commands this reply ran, kept for five days.
+  // Assistant rows: the tool actions this reply ran, kept for five days.
   commands: string[];
 };
 

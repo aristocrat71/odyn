@@ -150,7 +150,7 @@ pub struct Streams {
 pub struct Stream {
     pub conversation_id: i64,
     partial: Mutex<String>,
-    /// The bash commands approved to run this reply, in run order.
+    /// The tool actions this reply ran, in run order.
     commands: Mutex<Vec<String>>,
     task: Mutex<Option<JoinHandle<()>>>,
 }

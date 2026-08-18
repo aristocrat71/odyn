@@ -149,15 +149,14 @@ function said(message: Message, index: number): HTMLElement {
 // Message ids are globally unique, so the open set never needs clearing.
 const shownCommands = new Set<number>();
 
-// `show commands ▾` above a stored reply: what the agent actually ran, kept
-// after the live log is gone.
+// `show commands ▾` above a stored reply: every tool action the agent ran —
+// file operations and approved shell commands — kept after the live log goes.
 function commandLog(message: Message): HTMLElement {
   const box = el("div", "agent-cmds");
   const open = shownCommands.has(message.id);
-  const count = message.commands.length;
   const label = open
     ? "hide commands ▴"
-    : `show commands${count > 1 ? ` (${count})` : ""} ▾`;
+    : `show commands (${message.commands.length}) ▾`;
   const toggle = el("button", "agent-cmds-toggle", label);
   toggle.addEventListener("click", () => {
     if (open) shownCommands.delete(message.id);
@@ -168,7 +167,7 @@ function commandLog(message: Message): HTMLElement {
   if (open) {
     const list = el("div", "agent-cmds-list");
     for (const command of message.commands) {
-      list.append(el("div", "agent-cmds-line", `$ ${command}`));
+      list.append(el("div", "agent-cmds-line", command));
     }
     box.append(list);
   }

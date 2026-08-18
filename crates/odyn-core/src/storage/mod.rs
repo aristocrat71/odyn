@@ -393,7 +393,7 @@ impl Storage {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// The bash commands a reply ran, in run order, against its message row.
+    /// The tool actions a reply ran, in run order, against its message row.
     /// Each write also sweeps expired rows, so the log cannot outgrow its
     /// retention while it is the thing growing.
     pub fn record_commands(
@@ -412,7 +412,7 @@ impl Storage {
         Ok(tx.commit()?)
     }
 
-    /// Every recorded command in the conversation, as `(message_id, command)`.
+    /// Every recorded action in the conversation, as `(message_id, command)`.
     /// The retention window filters here too, so an expired row is invisible
     /// even before a write has swept it — opening must never take the write
     /// lock, a reader never blocks the writer.

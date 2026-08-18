@@ -293,9 +293,10 @@ bun run tauri dev`),
         "An agent turn runs up to 30 tool rounds, counted in the `⚙` chip as it works. At " +
           "exhaustion — or when the model repeats the same call enough times to be stuck — " +
           "it gets one final request with no tools: say what happened and what remains. " +
-          "The live call log is stream-only; the stored turn keeps the final answer plus " +
-          "the commands it ran, behind `show commands ▾` above the reply. That command " +
-          "history is kept for five days, then swept.",
+          "The live call log streams as it happens; the stored turn keeps the final answer " +
+          "plus every tool action it ran — file operations and approved shell commands — " +
+          "behind `show commands ▾` above the reply. That log is kept for five days, then " +
+          "swept.",
       ),
       p(
         "Honest note on models: 3B models fumble long tool chains. Agent mode works best " +
