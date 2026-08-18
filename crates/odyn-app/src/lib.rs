@@ -2,6 +2,7 @@ mod brain;
 mod commands;
 mod config;
 mod reminders;
+mod schedules;
 mod spotlight;
 mod state;
 mod tray;
@@ -63,6 +64,7 @@ pub fn run() {
             config::reload_config,
             reminders::reminders_list,
             reminders::reminder_delete,
+            reminders::schedule_delete,
             commands::cancel_message,
             commands::status,
             commands::providers_overview,
@@ -75,6 +77,7 @@ pub fn run() {
             spotlight::spotlight_set_target,
             spotlight::spotlight_save_key,
             spotlight::spotlight_open_view,
+            spotlight::spotlight_open_conversation,
         ])
         .build(tauri::generate_context!());
     match app {

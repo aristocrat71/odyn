@@ -373,6 +373,7 @@ pub fn spotlight_ask(
                     shared,
                     built,
                     config,
+                    provider,
                     model,
                     parsed,
                 )));
@@ -459,6 +460,14 @@ pub fn spotlight_open_view(app: AppHandle, view: String) {
     dismiss(&app);
 }
 
+/// A due row that came from a scheduled run opens its conversation.
+#[tauri::command]
+pub fn spotlight_open_conversation(app: AppHandle, id: i64) {
+    let _ = app.emit_to(MAIN, "open-conversation", id);
+    crate::tray::open_dashboard(&app);
+    dismiss(&app);
+}
+
 /// The spotlight target: its own config keys first, the app defaults after.
 fn target(ready: &crate::state::Ready) -> Result<(String, String), String> {
     let provider = ready
@@ -485,17 +494,20 @@ fn abort(ask: &Ask) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     app: AppHandle,
     request_id: u64,
     shared: Arc<Shared>,
     provider: Box<dyn ChatProvider>,
     provider_config: Option<ProviderConfig>,
+    provider_name: String,
     model: String,
     ask: odyn_core::brain::Ask,
 ) {
     // Refused before recall runs — same gate as a chat send.
-    if let Some(config) = provider_config.filter(|_| ask.writes() || ask.remind) {
+    let earns_tools = ask.writes() || ask.remind || ask.schedule;
+    if let Some(config) = provider_config.filter(|_| earns_tools) {
         if crate::commands::lacks_tools(&config, &model).await {
             emit(&app, request_id, Body::error(crate::commands::NO_TOOLS));
             return;
@@ -521,6 +533,7 @@ async fn run(
     let link = ask.link;
     let unlink = ask.unlink;
     let remind = ask.remind;
+    let schedule = ask.schedule;
     let mut history = vec![Message::new(Role::User, ask.message.clone())];
     if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
         *lock(&shared.injected) = context.memory_ids();
@@ -545,13 +558,15 @@ async fn run(
             history.insert(0, Message::new(Role::System, context.system_message));
         }
     }
-    let tools = odyn_core::tools::offered(memorize, update, delete, link, unlink, remind);
+    let tools = odyn_core::tools::offered(memorize, update, delete, link, unlink, remind, schedule);
     // A model that says nothing is as unusable as one that errored.
     let mut spoke = false;
     let mut sink = crate::commands::reminder_sink(&app);
+    let mut plans = crate::commands::schedule_sink(&app, &provider_name, &model);
     let mut effects = odyn_core::tools::Effects {
         brain_dir: &brain_dir,
         set_reminder: &mut sink,
+        set_schedule: &mut plans,
     };
     let driven = odyn_core::tools::run_turn(
         provider.as_ref(),
@@ -616,6 +631,14 @@ async fn run(
                     Body::Reminded {
                         text: text.to_string(),
                         due_at,
+                    },
+                ),
+                TurnEvent::Scheduled { prompt, next_at } => emit(
+                    &app,
+                    request_id,
+                    Body::Scheduled {
+                        prompt: prompt.to_string(),
+                        next_at,
                     },
                 ),
             }

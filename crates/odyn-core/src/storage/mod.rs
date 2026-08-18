@@ -14,9 +14,11 @@ use crate::chat::{Role, Usage};
 
 mod memory;
 mod reminder;
+mod schedule;
 
 pub use memory::{Injection, Memory, MemorySort, MemoryStats, NotePlan};
 pub use reminder::Reminder;
+pub use schedule::Schedule;
 
 #[cfg(test)]
 pub(crate) use memory::tests as memory_tests;
@@ -165,6 +167,22 @@ INSERT INTO messages_fts (rowid, content) SELECT id, content FROM messages;
     r"
 ALTER TABLE reminders ADD COLUMN repeat TEXT;
 ",
+    // Scheduled asks: prompts the clock runs as normal conversations. The
+    // provider and model are frozen at creation, like a conversation's.
+    r"
+CREATE TABLE schedules (
+    id          INTEGER PRIMARY KEY,
+    prompt      TEXT    NOT NULL,
+    provider    TEXT    NOT NULL,
+    model       TEXT    NOT NULL,
+    repeat      TEXT    NOT NULL,
+    next_at     INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL,
+    last_run_at INTEGER,
+    last_error  TEXT
+);
+CREATE INDEX schedules_next ON schedules(next_at);
+",
 ];
 
 /// Marks a matched term in a search snippet; its closer is `SNIPPET_END`.
@@ -194,6 +212,8 @@ pub enum StorageError {
     MissingEmbedding(String),
     #[error("a reminder needs something to say")]
     EmptyReminder,
+    #[error("a scheduled ask needs a prompt")]
+    EmptySchedule,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

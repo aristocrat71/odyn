@@ -30,6 +30,9 @@ pub const UNLINK: &str = "/unlink-memory";
 /// The mention that asks the model to set a reminder this turn. Alone among
 /// the triggers it reads nothing from the brain.
 pub const REMIND: &str = "/reminder";
+/// The mention that asks the model to schedule a recurring ask. Like
+/// `/reminder`, it reads nothing from the brain.
+pub const SCHEDULE: &str = "/schedule";
 
 /// Two turns of history join the retrieval query.
 const QUERY_MESSAGES: usize = 4;
@@ -76,6 +79,8 @@ pub struct Ask {
     pub unlink: bool,
     /// Whether the model is handed `set_reminder` this turn.
     pub remind: bool,
+    /// Whether the model is handed `schedule_ask` this turn.
+    pub schedule: bool,
 }
 
 impl Ask {
@@ -102,6 +107,7 @@ struct Mentions {
     link: bool,
     unlink: bool,
     remind: bool,
+    schedule: bool,
 }
 
 impl Mentions {
@@ -113,13 +119,15 @@ impl Mentions {
             || self.link
             || self.unlink
             || self.remind
+            || self.schedule
     }
 }
 
 /// Finds a whitespace-delimited `/brain`, `/memory`, `/update-memory`,
-/// `/delete-memory`, `/link-memory`, `/unlink-memory` or `/reminder` anywhere in
-/// the message, case insensitively, tolerating trailing punctuation. Each token
-/// and the whitespace after it are removed; everything else stays byte-for-byte.
+/// `/delete-memory`, `/link-memory`, `/unlink-memory`, `/reminder` or
+/// `/schedule` anywhere in the message, case insensitively, tolerating trailing
+/// punctuation. Each token and the whitespace after it are removed; everything
+/// else stays byte-for-byte.
 pub fn parse_ask(text: &str) -> Ask {
     let mut cleaned = String::with_capacity(text.len());
     let mut token = String::new();
@@ -144,6 +152,8 @@ pub fn parse_ask(text: &str) -> Ask {
             Some(&mut found.unlink)
         } else if trailer.eq_ignore_ascii_case(REMIND) {
             Some(&mut found.remind)
+        } else if trailer.eq_ignore_ascii_case(SCHEDULE) {
+            Some(&mut found.schedule)
         } else {
             None
         };
@@ -185,6 +195,7 @@ pub fn parse_ask(text: &str) -> Ask {
             link: found.link,
             unlink: found.unlink,
             remind: found.remind,
+            schedule: found.schedule,
         };
     }
     Ask {
@@ -201,6 +212,7 @@ pub fn parse_ask(text: &str) -> Ask {
         link: found.link,
         unlink: found.unlink,
         remind: found.remind,
+        schedule: found.schedule,
     }
 }
 
@@ -418,6 +430,7 @@ struct Tasks {
     linking: bool,
     unlinking: bool,
     reminding: bool,
+    scheduling: bool,
 }
 
 impl From<&Ask> for Tasks {
@@ -429,6 +442,7 @@ impl From<&Ask> for Tasks {
             linking: ask.link,
             unlinking: ask.unlink,
             reminding: ask.remind,
+            scheduling: ask.schedule,
         }
     }
 }
@@ -625,6 +639,14 @@ when the user asked for a recurring reminder, pass `every` instead — \
 \"every day 09:00\", \"every monday 9:30\", or \"every 45m\" — and omit the \
 one-off times. Then confirm in one line.";
 
+const SCHEDULING: &str = "The user asked odyn to run a prompt on a schedule. \
+Call schedule_ask with `prompt` — the question to ask each time, in the \
+user's own words — and `every`: \"every day 09:00\", \"every monday 9:30\", \
+or \"every 45m\". For \"brief me every morning at 9 on my calendar\", prompt \
+is \"brief me on my calendar\" and every is \"every day 09:00\". If the user \
+asked it to use their memory, begin the prompt with /brain. Then confirm in \
+one line.";
+
 /// The injected system message, golden-tested byte for byte: `## Instructions`
 /// (soul.md, when present), `## Memories` (omitted when empty), `## Memory
 /// names` on a write turn, a task section per mentioned trigger, then
@@ -682,6 +704,9 @@ fn render(
             section.push_str(&format!("\nThe current local time is {now}."));
         }
         sections.push(section);
+    }
+    if tasks.scheduling {
+        sections.push(format!("## Scheduling\n{SCHEDULING}"));
     }
     if let Some(directive) = brevity.directive() {
         sections.push(format!("## Style\n{directive}"));
@@ -778,6 +803,7 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
+            schedule: false,
         }
     }
 
@@ -805,6 +831,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
         // Only the trigger: recall runs on history alone, message stays non-empty.
@@ -820,6 +847,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
     }
@@ -838,6 +866,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
         assert_eq!(
@@ -852,6 +881,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
         assert_eq!(
@@ -866,6 +896,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
     }
@@ -884,6 +915,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
     }
@@ -905,6 +937,7 @@ mod tests {
                 link: true,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
         assert!(ask.any(), "a link turn touches the brain");
@@ -962,6 +995,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
         assert_eq!(
@@ -976,6 +1010,7 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
+                schedule: false,
             }
         );
     }
@@ -1003,6 +1038,7 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
+            schedule: false,
         };
         let context =
             build_context(Some(&storage), &config, &[], &ask, Brevity::Off, never).expect("build");
@@ -1132,6 +1168,7 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
+            schedule: false,
         };
         let context = build_context(None, &config, &[], &ask, Brevity::Off, never).expect("build");
         assert!(context.system_message.contains("note-000, note-001"));
@@ -1154,6 +1191,7 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
+            schedule: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1189,6 +1227,7 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
+            schedule: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1230,6 +1269,7 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
+            schedule: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1279,6 +1319,26 @@ mod tests {
             !context.system_message.contains("## Memory names"),
             "a reminder is not a write turn and gets no folder listing"
         );
+    }
+
+    #[test]
+    fn the_schedule_trigger_parses_and_earns_its_section() {
+        let ask = parse_ask("/schedule brief me every morning at 9");
+        assert!(ask.schedule);
+        assert_eq!(ask.message, "brief me every morning at 9");
+        assert!(!ask.any(), "a schedule turn must not touch the brain");
+        assert!(!parse_ask("/scheduled for later").schedule);
+
+        let context = build_context(
+            None,
+            &config(6, 900),
+            &[],
+            &parse_ask("/schedule brief me every morning at 9"),
+            Brevity::Off,
+            never,
+        )
+        .expect("a schedule turn builds without the embedder");
+        assert!(context.system_message.contains("## Scheduling"));
     }
 
     #[test]

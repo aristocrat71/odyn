@@ -2195,6 +2195,13 @@ g.labeled .gnode-epi text {
   color: var(--dim);
 }
 
+.rem-error {
+  margin: 4px 0 0 21px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--danger);
+}
+
 .rem-actions {
   flex: none;
   opacity: 0;

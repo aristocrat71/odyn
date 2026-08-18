@@ -173,7 +173,11 @@ note, so the turn never loads the embedder. A recurring ask ("every day at 9",
 one missed while the machine slept fires once and re-arms from now, never as
 a backlog. Due reminders take over the
 spotlight panel until dismissed; `/view-reminders` lists what is waiting and
-what has already been shown, and cancels any of the former. A turn with a memory tool recalls wider than `/brain` does
+what has already been shown, and cancels any of the former. `/schedule` hands
+the model `schedule_ask`: a prompt odyn runs on that schedule, each run
+landing as a normal conversation announced in spotlight — the morning brief.
+Scheduled runs are unattended, so they are handed no tools; a prompt carrying
+tool mentions is refused, while `/brain` recall works. A turn with a memory tool recalls wider than `/brain` does
 — no relevance floor, no `top_k` limit, just the token cap — and is also given
 every memory's name, because its job is finding the right note rather than
 answering from the best few. One tool per mention — the choice between them is yours, not the model's. A stale `[memory]` section from brain v1 still

@@ -47,6 +47,7 @@ export type ChatEvent = { request_id: number } & (
   | { kind: "linked"; from: string; to: string }
   | { kind: "unlinked"; from: string; to: string }
   | { kind: "reminded"; text: string; due_at: number }
+  | { kind: "scheduled"; prompt: string; next_at: number }
   | { kind: "done"; usage: Usage | null; interrupted: boolean }
   | { kind: "error"; message: string }
 );
@@ -238,12 +239,29 @@ export type ReminderRow = {
   repeat: string | null;
 };
 
-export type ReminderList = { pending: ReminderRow[]; past: ReminderRow[] };
+export type ScheduleRow = {
+  id: number;
+  prompt: string;
+  repeat: string;
+  next_at: number;
+  last_run_at: number | null;
+  // What the last run failed with; null after a clean one.
+  last_error: string | null;
+};
+
+export type ReminderList = {
+  pending: ReminderRow[];
+  past: ReminderRow[];
+  schedules: ScheduleRow[];
+};
 
 export const remindersList = (): Promise<ReminderList> => invoke("reminders_list");
 
 export const reminderDelete = (id: number): Promise<void> =>
   invoke("reminder_delete", { id });
+
+export const scheduleDelete = (id: number): Promise<void> =>
+  invoke("schedule_delete", { id });
 
 export const configFile = (): Promise<ConfigFile> => invoke("config_file");
 

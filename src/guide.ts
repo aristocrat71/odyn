@@ -400,6 +400,18 @@ bun run tauri dev`),
           "fires once on wake and re-arms from now, never as a backlog.",
       ),
       p(
+        "`/schedule` goes one step further: instead of showing you a note, odyn " +
+          "runs a prompt — \"/schedule brief me on my notes every morning at 9\" " +
+          "becomes a scheduled ask. Each run is a normal conversation, " +
+          "created with the scheduling conversation's provider and model, usage " +
+          "recorded, nothing hidden; when it finishes, the spotlight panel " +
+          "announces it and clicking the row opens the conversation. A scheduled " +
+          "run is unattended, so it is handed no tools — a prompt carrying " +
+          "tool mentions is refused at creation — though `/brain` recall works. " +
+          "Scheduled asks live in the reminders view with their next run time; a " +
+          "failed run shows its error there and the next tick retries.",
+      ),
+      p(
         "The reminders view — `/view-reminders`, or the sidebar — lists what is " +
           "still waiting, soonest first, with how far off each one is, and the " +
           "last fifty already shown below that. Hovering a waiting row gives you " +

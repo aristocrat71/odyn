@@ -36,6 +36,8 @@ export type Stream = {
   unlinked: string[];
   // Reminders set this reply, already rendered as local time.
   reminders: string[];
+  // Asks scheduled this reply, with their first run time.
+  scheduled: string[];
 };
 
 // The backend's refusal when a conversation has no model; picking one clears it.
@@ -325,6 +327,7 @@ async function start(prompt: string, retry: boolean): Promise<void> {
     linked: [],
     unlinked: [],
     reminders: [],
+    scheduled: [],
   };
   state.stream = stream;
   render();
@@ -390,6 +393,11 @@ function apply(event: api.ChatEvent, stream: Stream): void {
   }
   if (event.kind === "reminded") {
     stream.reminders.push(`${event.text} · ${dueLabel(event.due_at)}`);
+    render();
+    return;
+  }
+  if (event.kind === "scheduled") {
+    stream.scheduled.push(`${event.prompt} · ${dueLabel(event.next_at)}`);
     render();
     return;
   }
@@ -563,6 +571,12 @@ export const loadReminders = (): Promise<void> =>
 export const cancelReminder = (id: number): Promise<void> =>
   guard(async () => {
     await api.reminderDelete(id);
+    await loadReminders();
+  });
+
+export const cancelSchedule = (id: number): Promise<void> =>
+  guard(async () => {
+    await api.scheduleDelete(id);
     await loadReminders();
   });
 

@@ -150,6 +150,10 @@ pub(crate) enum Body {
         text: String,
         due_at: i64,
     },
+    Scheduled {
+        prompt: String,
+        next_at: i64,
+    },
     Done {
         usage: Option<Usage>,
         interrupted: bool,
@@ -434,6 +438,7 @@ pub async fn send_message(
         Arc::clone(&stream),
         provider,
         provider_config,
+        row.provider,
         row.model,
         prior,
         ask,
@@ -600,6 +605,7 @@ async fn run(
     stream: Arc<Stream>,
     provider: Box<dyn ChatProvider>,
     provider_config: Option<ProviderConfig>,
+    provider_name: String,
     model: String,
     prior: Vec<Message>,
     ask: Ask,
@@ -609,7 +615,7 @@ async fn run(
     save_temperature: f32,
 ) {
     // Refused before recall runs: an embed plus a doomed request helps no one.
-    let earns_tools = ask.writes() || ask.remind;
+    let earns_tools = ask.writes() || ask.remind || ask.schedule;
     if let Some(config) = provider_config.filter(|_| earns_tools) {
         if lacks_tools(&config, &model).await {
             app.state::<AppState>().streams.close(request_id);
@@ -636,6 +642,7 @@ async fn run(
         ask.link,
         ask.unlink,
         ask.remind,
+        ask.schedule,
     );
 
     let outcome = drive(
@@ -643,6 +650,7 @@ async fn run(
         request_id,
         &stream,
         provider.as_ref(),
+        &provider_name,
         &model,
         history,
         &tools,
@@ -675,6 +683,32 @@ pub(crate) fn reminder_sink(
         let stored = ready.storage().add_reminder(text, due_at, repeat);
         stored
             .map(|reminder| reminder.id)
+            .map_err(|err| err.to_string())
+    }
+}
+
+/// The schedule writer for a turn. Provider and model are the sending
+/// conversation's, frozen into the row. A prompt that would earn tools is
+/// refused: a scheduled run is unattended, and unattended turns write nothing.
+pub(crate) fn schedule_sink<'a>(
+    app: &'a AppHandle,
+    provider: &'a str,
+    model: &'a str,
+) -> impl FnMut(&str, &str, i64) -> Result<i64, String> + Send + 'a {
+    move |prompt, every, next_at| {
+        let asks = brain::parse_ask(prompt);
+        if asks.writes() || asks.remind || asks.schedule {
+            return Err(
+                "a scheduled ask cannot carry tool mentions — drop them from the prompt"
+                    .to_string(),
+            );
+        }
+        let ready = app.state::<AppState>().inner().ready()?;
+        let stored = ready
+            .storage()
+            .add_schedule(prompt, provider, model, every, next_at);
+        stored
+            .map(|schedule| schedule.id)
             .map_err(|err| err.to_string())
     }
 }
@@ -891,6 +925,7 @@ async fn drive(
     request_id: u64,
     stream: &Stream,
     provider: &dyn ChatProvider,
+    provider_name: &str,
     model: &str,
     history: Vec<Message>,
     tools: &[ToolDef],
@@ -898,9 +933,11 @@ async fn drive(
     save_temperature: f32,
 ) -> Outcome {
     let mut sink = reminder_sink(app);
+    let mut plans = schedule_sink(app, provider_name, model);
     let mut effects = tools::Effects {
         brain_dir,
         set_reminder: &mut sink,
+        set_schedule: &mut plans,
     };
     let driven = tools::run_turn(
         provider,
@@ -964,6 +1001,14 @@ async fn drive(
                     Body::Reminded {
                         text: text.to_string(),
                         due_at,
+                    },
+                ),
+                TurnEvent::Scheduled { prompt, next_at } => emit(
+                    app,
+                    request_id,
+                    Body::Scheduled {
+                        prompt: prompt.to_string(),
+                        next_at,
                     },
                 ),
             }

@@ -396,6 +396,18 @@ button {
   gap: 8px;
 }
 
+/* A finished scheduled run: the row is a button that opens its conversation. */
+.spot-due-row.run {
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.spot-due-row.run:hover .spot-due-text {
+  color: var(--core);
+}
+
 .spot-due-mark {
   color: var(--epi);
   font-size: 17px;
