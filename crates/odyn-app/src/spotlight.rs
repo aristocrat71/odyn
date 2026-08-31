@@ -1,6 +1,7 @@
 //! Spotlight window: summoned by a global hotkey, hidden by Esc or a second
 //! press. Hotkey registration failure is surfaced as status, never a crash.
-//! Asks are ephemeral: nothing of an exchange is ever stored.
+//! Asks are ephemeral: the thread lives in memory and dies with the panel,
+//! never on disk.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -104,12 +105,17 @@ mod panel {
 /// `None` while the hotkey works; the reason when it does not.
 pub struct HotkeyStatus(Mutex<Option<String>>);
 
-/// At most one ask lives at a time; a new question replaces the last.
+/// At most one ask lives at a time; a new question replaces the last. The
+/// thread is what a follow-up reads: answered turns, oldest first.
 #[derive(Default)]
 pub struct AskState {
     next: AtomicU64,
     current: Mutex<Option<Ask>>,
+    thread: Mutex<Vec<Message>>,
 }
+
+/// Six exchanges: a small local model pays for every message it re-reads.
+const THREAD: usize = 12;
 
 struct Ask {
     shared: Arc<Shared>,
@@ -205,11 +211,17 @@ fn conceal(app: &AppHandle) {
 
 /// Esc semantics: the exchange is dropped, spotlight keeps nothing.
 fn dismiss(app: &AppHandle) {
-    if let Some(ask) = lock(&app.state::<AskState>().current).take() {
-        abort(&ask);
-    }
+    end(app);
     cleared(app);
     conceal(app);
+}
+
+fn end(app: &AppHandle) {
+    let asks = app.state::<AskState>();
+    if let Some(ask) = lock(&asks.current).take() {
+        abort(&ask);
+    }
+    lock(&asks.thread).clear();
 }
 
 fn cleared(app: &AppHandle) {
@@ -326,7 +338,7 @@ pub fn spotlight_hide(app: AppHandle) {
     dismiss(&app);
 }
 
-/// Streams an ephemeral answer; a new question replaces the last.
+/// Streams an answer onto the thread; a question asked mid-stream replaces it.
 #[tauri::command]
 pub fn spotlight_ask(
     app: AppHandle,
@@ -339,6 +351,7 @@ pub fn spotlight_ask(
     if let Some(previous) = lock(&asks.current).take() {
         abort(&previous);
     }
+    let prior = lock(&asks.thread).clone();
 
     // The same `/brain` rule as everywhere: neither the model nor a stored
     // transcript sees the mention.
@@ -361,6 +374,7 @@ pub fn spotlight_ask(
                     config,
                     model,
                     parsed,
+                    prior,
                 )));
             }
             Err(err) => emit(&app, request_id, Body::error(err.to_string())),
@@ -370,6 +384,11 @@ pub fn spotlight_ask(
 
     *lock(&asks.current) = Some(ask);
     Ok(request_id)
+}
+
+#[tauri::command]
+pub fn spotlight_forget(app: AppHandle) {
+    end(&app);
 }
 
 #[tauri::command]
@@ -414,6 +433,7 @@ async fn run(
     provider_config: Option<ProviderConfig>,
     model: String,
     ask: odyn_core::brain::Ask,
+    prior: Vec<Message>,
 ) {
     // Refused before recall runs — same gate as a chat send.
     let earns_tools = ask.writes() || ask.remind;
@@ -423,7 +443,6 @@ async fn run(
             return;
         }
     }
-    // A spotlight ask has no history: the question alone drives retrieval.
     // Brevity comes from `[spotlight]`, never from any conversation.
     let (brevity, brain_dir, save_temperature) = match app.state::<AppState>().ready() {
         Ok(ready) => (
@@ -443,8 +462,10 @@ async fn run(
     let link = ask.link;
     let unlink = ask.unlink;
     let remind = ask.remind;
-    let mut history = vec![Message::new(Role::User, ask.message.clone())];
-    if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
+    let asked = ask.message.clone();
+    let mut history = prior.clone();
+    history.push(Message::new(Role::User, asked.clone()));
+    if let Some(context) = crate::commands::build_context(&app, prior, ask, brevity).await {
         // The ask is not stored, but the recall still counts: hits and co-use
         // edges accrue from it.
         if !context.is_empty() {
@@ -537,12 +558,25 @@ async fn run(
     match driven {
         Ok(reply) => {
             shared.finished.store(true, Ordering::Release);
+            if spoke {
+                remember(&app, asked, reply.text);
+            }
             emit(&app, request_id, finished(spoke, reply.usage));
         }
         Err(TurnError::Chat(ChatError::Cancelled)) => {}
         Err(TurnError::Chat(err)) => emit(&app, request_id, unavailable(describe(&err))),
         Err(TurnError::Write(err)) => emit(&app, request_id, unavailable(err.to_string())),
     }
+}
+
+/// Only answered turns land; an unanswered one would leave a gap to read back.
+fn remember(app: &AppHandle, asked: String, answered: String) {
+    let asks = app.state::<AskState>();
+    let mut thread = lock(&asks.thread);
+    thread.push(Message::new(Role::User, asked));
+    thread.push(Message::new(Role::Assistant, answered));
+    let over = thread.len().saturating_sub(THREAD);
+    thread.drain(..over);
 }
 
 fn finished(spoke: bool, usage: Option<Usage>) -> Body {

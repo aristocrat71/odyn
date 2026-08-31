@@ -127,6 +127,32 @@ button {
   padding: 0;
 }
 
+/* The thread, top to bottom: each question in quiet mono above what it got
+   back. */
+
+.spot-turn + .spot-turn {
+  margin-top: 20px;
+}
+
+.spot-turn-ask {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0 7px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.spot-turn-mark {
+  color: var(--epi);
+}
+
+.spot-turn-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .spot-error {
   font-family: var(--mono);
   font-size: 12px;

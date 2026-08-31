@@ -82,16 +82,28 @@ const COMMANDS: Command[] = [
   { cmd: "/reminder", view: null, hint: "set a reminder" },
 ];
 
-let current: number | null = null;
-let answer = "";
+type Turn = {
+  id: number;
+  // Known once the ask is accepted; until then an event belongs to whatever
+  // ask this one replaced, and is dropped.
+  request: number | null;
+  answer: string;
+  used: string[];
+  saved: string[];
+  updated: string[];
+  deleted: string[];
+  linked: string[];
+  unlinked: string[];
+  reminders: string[];
+  node: HTMLDivElement;
+  body: HTMLDivElement;
+};
+
 let streaming = false;
-let used: string[] = [];
-let saved: string[] = [];
-let updated: string[] = [];
-let deleted: string[] = [];
-let linked: string[] = [];
-let unlinked: string[] = [];
-let reminders: string[] = [];
+let turns: Turn[] = [];
+// The turn the stream is filling; nothing else is ever redrawn.
+let live: Turn | null = null;
+let seq = 0;
 let dueNow: Due[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
@@ -164,43 +176,56 @@ function drawLedger(event: SpotEvent & { kind: "context" }): void {
   ledger.hidden = commandMode;
 }
 
-// Holds the streamed answer so frozen markdown blocks survive each delta.
-const answerBox = el("div", "spot-answer");
+// A turn owns its body, so frozen markdown survives each delta and the turns
+// above it are never re-parsed.
+function newTurn(question: string): Turn {
+  seq += 1;
+  const node = el("div", "spot-turn");
+  const asked = el("div", "spot-turn-ask");
+  asked.append(el("span", "spot-turn-mark", "›"), el("span", "spot-turn-text", question));
+  const body = el("div", "spot-answer");
+  node.append(asked, body);
+  return {
+    id: seq,
+    request: null,
+    answer: "",
+    used: [],
+    saved: [],
+    updated: [],
+    deleted: [],
+    linked: [],
+    unlinked: [],
+    reminders: [],
+    node,
+    body,
+  };
+}
 
-function draw(): void {
-  if (commandMode) return;
-  results.hidden = false;
-  if (streaming && answer === "") {
-    results.replaceChildren(waiting());
+function draw(turn: Turn): void {
+  const flowing = streaming && turn === live;
+  while (turn.body.nextSibling !== null) turn.body.nextSibling.remove();
+  renderInto(turn.body, turn.answer);
+  for (const mark of turn.body.querySelectorAll(".cursor")) mark.remove();
+  if (flowing) {
+    if (turn.answer === "") {
+      turn.node.append(waiting());
+      return;
+    }
+    const last = turn.body.lastElementChild ?? turn.body.appendChild(el("p", "para"));
+    last.append(el("span", "cursor"));
     return;
   }
-  renderInto(answerBox, answer);
-  for (const mark of answerBox.querySelectorAll(".cursor")) mark.remove();
-  if (streaming) {
-    const last = answerBox.lastElementChild ?? answerBox.appendChild(el("p", "para"));
-    last.append(el("span", "cursor"));
-  }
-  results.replaceChildren(answerBox);
-  if (!streaming && used.length > 0) {
-    results.append(trace("◈", "used", used, "used"));
-  }
-  if (!streaming && saved.length > 0) {
-    results.append(trace("✎", "saved", saved, "saved"));
-  }
-  if (!streaming && updated.length > 0) {
-    results.append(trace("✎", "updated", updated, "updated"));
-  }
-  if (!streaming && deleted.length > 0) {
-    results.append(trace("✕", "deleted", deleted, "deleted"));
-  }
-  if (!streaming && linked.length > 0) {
-    results.append(trace("⌇", "linked", linked, "linked"));
-  }
-  if (!streaming && unlinked.length > 0) {
-    results.append(trace("⌇", "unlinked", unlinked, "unlinked"));
-  }
-  if (!streaming && reminders.length > 0) {
-    results.append(trace("◔", "reminder", reminders, "reminded"));
+  const traces: [string, string, string[], string][] = [
+    ["◈", "used", turn.used, "used"],
+    ["✎", "saved", turn.saved, "saved"],
+    ["✎", "updated", turn.updated, "updated"],
+    ["✕", "deleted", turn.deleted, "deleted"],
+    ["⌇", "linked", turn.linked, "linked"],
+    ["⌇", "unlinked", turn.unlinked, "unlinked"],
+    ["◔", "reminder", turn.reminders, "reminded"],
+  ];
+  for (const [mark, label, ids, key] of traces) {
+    if (ids.length > 0) turn.node.append(trace(mark, label, ids, `${turn.id}:${key}`));
   }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
@@ -246,28 +271,23 @@ function clearDue(): void {
 
 function fail(message: string, detail?: string): void {
   streaming = false;
-  results.querySelector(".waiting")?.remove();
+  const failed = live;
+  live = null;
   // Whatever streamed before the failure is kept, minus the cursor.
-  if (answer !== "") draw();
+  if (failed !== null) draw(failed);
+  const box = failed?.node ?? results;
   results.hidden = false;
-  results.append(el("div", "spot-error", message));
+  box.append(el("div", "spot-error", message));
   if (detail !== undefined) {
     console.error(`[odyn] ${detail}`);
-    results.append(el("div", "spot-error-hint", "⌘K picks another model"));
+    box.append(el("div", "spot-error-hint", "⌘K picks another model"));
   }
 }
 
 function clearScreen(): void {
-  current = null;
-  answer = "";
+  live = null;
+  turns = [];
   streaming = false;
-  used = [];
-  saved = [];
-  updated = [];
-  deleted = [];
-  linked = [];
-  unlinked = [];
-  reminders = [];
   clearDue();
   forgetTraces();
   commandMode = false;
@@ -321,13 +341,9 @@ function drawCommands(): void {
 function drawAsk(): void {
   ledger.hidden = ledger.childElementCount === 0;
   hint.draw(undefined);
-  // An ask typed over mid-flight comes back to the answer so far.
-  if (answer !== "" || streaming) {
-    draw();
-    return;
-  }
-  results.hidden = true;
-  results.replaceChildren();
+  // The command list took the panel; the thread it covered comes back.
+  results.hidden = turns.length === 0;
+  results.replaceChildren(...turns.map((turn) => turn.node));
 }
 
 async function run(command: Command): Promise<void> {
@@ -365,22 +381,26 @@ async function ask(): Promise<void> {
     await saveKey(text);
     return;
   }
-  answer = "";
+  const turn = newTurn(text);
+  turns.push(turn);
+  live = turn;
   streaming = true;
-  used = [];
-  saved = [];
-  updated = [];
-  deleted = [];
-  linked = [];
-  unlinked = [];
-  reminders = [];
+  input.value = "";
+  hint.draw(undefined);
   clearDue();
-  forgetTraces();
   ledger.hidden = true;
   ledger.replaceChildren();
-  draw();
+  results.hidden = false;
+  results.append(turn.node);
+  draw(turn);
+  // The new question goes to the top of the panel, so its answer streams into
+  // view instead of below the fold.
+  results.scrollTop =
+    turn.node.getBoundingClientRect().top -
+    results.getBoundingClientRect().top +
+    results.scrollTop;
   try {
-    current = await invoke<number>("spotlight_ask", { text });
+    turn.request = await invoke<number>("spotlight_ask", { text });
   } catch (err) {
     fail(String(err));
   }
@@ -457,6 +477,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Backspace" && mod) {
     e.preventDefault();
     clearScreen();
+    void invoke("spotlight_forget");
     return;
   }
   if (mod && e.key.toLowerCase() === "k") {
@@ -499,28 +520,30 @@ document.addEventListener("keydown", (e) => {
 
 void listen<SpotEvent>("spotlight-event", (event) => {
   const data = event.payload;
-  if (data.request_id !== current) return;
+  const turn = live;
+  if (turn === null || data.request_id !== turn.request) return;
   if (data.kind === "context") {
-    used = data.used;
+    turn.used = data.used;
     drawLedger(data);
   } else if (data.kind === "delta") {
-    answer += data.text;
-    draw();
+    turn.answer += data.text;
+    draw(turn);
   } else if (data.kind === "saved") {
-    saved.push(data.slug);
+    turn.saved.push(data.slug);
   } else if (data.kind === "updated") {
-    updated.push(data.slug);
+    turn.updated.push(data.slug);
   } else if (data.kind === "deleted") {
-    deleted.push(data.slug);
+    turn.deleted.push(data.slug);
   } else if (data.kind === "linked") {
-    linked.push(`${data.from} → ${data.to}`);
+    turn.linked.push(`${data.from} → ${data.to}`);
   } else if (data.kind === "unlinked") {
-    unlinked.push(`${data.from} ⇢ ${data.to}`);
+    turn.unlinked.push(`${data.from} ⇢ ${data.to}`);
   } else if (data.kind === "reminded") {
-    reminders.push(`${data.text} · ${dueLabel(data.due_at)}`);
+    turn.reminders.push(`${data.text} · ${dueLabel(data.due_at)}`);
   } else if (data.kind === "done") {
     streaming = false;
-    draw();
+    live = null;
+    draw(turn);
   } else {
     fail(data.message, data.detail);
   }

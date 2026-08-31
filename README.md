@@ -10,9 +10,13 @@ of markdown notes that stays out of the context window until asked: mention
 shared use — for the notes that answer you, accounted for token by token
 before anything is sent. Every other ask reaches the model bare.
 
+Follow-ups chain inside the panel — the last six exchanges are what the next
+question is read against — and the thread dies with it: Esc, `⌘⌫` or quitting
+leaves nothing behind.
+
 The dashboard is a control panel, not a chat window: brain, reminders,
-providers and config. There is no transcript and no conversation history,
-because there are no conversations.
+providers and config. There is no transcript and no history to open, because
+no conversation is ever stored.
 
 ## Install
 
@@ -240,6 +244,13 @@ before embedding and cannot influence whether that note is recalled.
 | `brevity` | `"full"` | Answer style for spotlight asks: `off`, `lite`, `full` or `ultra`. Each level injects a fixed style directive; `off` injects nothing. |
 | `provider` | unset | Falls back to `default_provider`. Must name a configured provider. |
 | `model` | unset | Falls back to that provider's `default_model`. With neither, spotlight asks fail with `no spotlight model`. |
+
+An answered ask stays in the panel and the next one reads it, so `where is it
+used?` is a question the model can answer. Six exchanges are kept, in memory
+only. Esc ends the thread and clears the panel; `⌘⌫` does the same without
+hiding it; hiding the panel any other way keeps it. A question asked while an
+answer is still streaming replaces it, and an ask that never got an answer is
+not kept.
 
 When a model fails anyway — rate-limited, an unsupported request, a dropped
 connection, or a reply with no text in it — the panel says `model unavailable`
