@@ -12,6 +12,58 @@ copy of Odyn sees when it checks for updates. A tag with no matching section her
 fails the release before anything is built. Write the entry as you merge, not at
 tag time.
 
+## [0.3.0] - 2026-08-31
+
+Spotlight is the whole of Odyn now. Chat is gone, the dashboard is a control
+panel for the brain, reminders, providers and config, and the panel that used to
+be one question and one answer holds a thread for as long as you keep it.
+
+### Added
+
+- **Follow-ups in spotlight.** An answered ask stays in the panel and the next
+  one is read against it, so "where is it used?" is a question the model can
+  answer. The last six exchanges are kept, and recall reads them too: a `/brain`
+  follow-up that names nothing still retrieves against what was being talked
+  about. The thread lives in memory and is never written down — Esc ends it and
+  empties the panel, `⌘⌫` does the same without hiding it, and hiding the panel
+  any other way keeps it. A question asked while an answer is still streaming
+  replaces it, and an ask that never got an answer is not kept.
+- **Recurring reminders.** `every day 09:00`, `every monday 9:30`, `every 45m` —
+  the reminder re-arms itself after each firing instead of being marked shown.
+  One that came due while the machine slept fires once and re-arms from now,
+  never as a backlog. The reminders view shows the recurrence and the next time
+  it will fire; cancelling one works as it did.
+- **Answers render as markdown.** Headings, nested lists, tables, quotes, rules,
+  links and inline emphasis, on top of the fenced code that was already there —
+  parsed as the stream flows, with every block but the growing tail kept as it
+  was, so a long answer never re-parses whole. Nothing is ever set as HTML, so a
+  model cannot write into the panel; only `http(s)` is ever a link, and clicking
+  one leaves through the backend rather than by navigating the window.
+- **A model that cannot call tools is named before the turn runs.** A mention
+  that earns a tool — `/memory`, `/reminder` and the rest — aimed at an Ollama
+  model whose daemon reports no `tools` capability is refused with `this model
+  cannot call tools — the mention needs one that can`, instead of answering and
+  quietly saving nothing. Only when the daemon says so: one too old to report
+  capabilities lets the attempt proceed.
+
+### Removed
+
+- **Chat, conversations, the home view and the guide.** Asking happens in
+  spotlight; the dashboard keeps brain, reminders, providers and config. The
+  database drops its `conversations` and `messages` tables on first launch, and
+  any conversation 0.2.0 stored goes with them. Spotlight's `⌘⏎` goes too — it
+  promoted an answer into a conversation, and there is nothing to promote into.
+- **`[style]`.** Brevity is a spotlight setting now, so `[spotlight] brevity` is
+  the only one. A `[style]` section left in your `odyn.toml` parses and is
+  ignored, as `[memory]` already was: a stale section must not brick the app.
+
+### Fixed
+
+- **A delta from a replaced ask no longer lands in the next answer.** Asking
+  again while an answer was still streaming could leave the tail of the old
+  stream attached to the new one. Each ask now owns its own stream, and anything
+  from one that was replaced is dropped.
+
 ## [0.2.0] - 2026-08-12
 
 Odyn can hold a time for you now, and it says so out loud when the time comes.
