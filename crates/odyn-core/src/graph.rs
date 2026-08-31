@@ -270,22 +270,9 @@ mod tests {
     #[test]
     fn link_similarity_and_co_injection_edges_come_out_of_the_data() {
         let (_dir, storage) = seeded("edges");
-        let conversation = storage
-            .create_conversation("g", "ollama", "llama3.2:3b")
-            .expect("create");
-        for message in ["one", "two"] {
-            let row = storage
-                .append_message(
-                    conversation.id,
-                    crate::chat::Role::User,
-                    message,
-                    None,
-                    None,
-                )
-                .expect("message");
-            storage
-                .record_injections(Some(conversation.id), Some(row.id), &[1, 3])
-                .expect("inject");
+        // Two separate recalls of the same pair: one co-use edge, two hits.
+        for _ in 0..2 {
+            storage.record_injections(&[1, 3]).expect("inject");
         }
 
         let graph = brain_graph(&storage, 0.78).expect("graph");

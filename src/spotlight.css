@@ -250,10 +250,6 @@ button {
   color: var(--epi);
 }
 
-.ledger-soul {
-  color: var(--core);
-}
-
 .spot-ledger-total {
   margin-left: auto;
   color: var(--faint);
@@ -394,18 +390,6 @@ button {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-}
-
-/* A finished scheduled run: the row is a button that opens its conversation. */
-.spot-due-row.run {
-  border: 0;
-  background: none;
-  font: inherit;
-  cursor: pointer;
-}
-
-.spot-due-row.run:hover .spot-due-text {
-  color: var(--core);
 }
 
 .spot-due-mark {

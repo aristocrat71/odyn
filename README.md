@@ -3,18 +3,16 @@
 Odyn is a personal AI harness: a Tauri desktop app over a pure-Rust core.
 It talks only to open-weight models — any
 OpenAI-compatible endpoint and local Ollama — and never to closed-weight
-providers. The brain is a folder of markdown notes that stays out of the
-context window until asked: mention `/brain` in a message and Odyn walks its
-memory graph — wikilinks, embedding similarity, shared use — for the notes
-that answer you, accounted for token by token before anything is sent. Every
-other message reaches the model bare.
+providers. Asking happens in spotlight — a borderless panel on a global
+hotkey — and nothing an ask says is ever written down. The brain is a folder
+of markdown notes that stays out of the context window until asked: mention
+`/brain` and Odyn walks its memory graph — wikilinks, embedding similarity,
+shared use — for the notes that answer you, accounted for token by token
+before anything is sent. Every other ask reaches the model bare.
 
-Give a conversation a workspace folder and it becomes an agent: the model gets
-shell and file tools scoped to that folder. File tools are contained — they
-cannot reach outside the workspace — while every bash command is shown to you
-verbatim and waits for run / always / deny, over a blocklist floor that
-refuses the catastrophic ones outright. The workspace is per-conversation
-state, set from the chat header; nothing about it lives in the config file.
+The dashboard is a control panel, not a chat window: brain, reminders,
+providers and config. There is no transcript and no conversation history,
+because there are no conversations.
 
 ## Install
 
@@ -154,7 +152,7 @@ that is merely unreachable still connects, since being offline now says nothing
 about whether the key is good. `+ custom endpoint` writes the same table by
 hand for anything the catalog has never heard of.
 
-Every model menu — the chat picker and spotlight's — lists the free models
+Spotlight's model menu lists the free models
 first, then the rest, alphabetical within each half, and connecting starts you
 on a free model when the endpoint serves one. Free means the endpoint said so,
 in the id: OpenRouter suffixes `:free`, OpenCode Zen `-free`. Nothing else is
@@ -180,21 +178,11 @@ note, so the turn never loads the embedder. A recurring ask ("every day at 9",
 one missed while the machine slept fires once and re-arms from now, never as
 a backlog. Due reminders take over the
 spotlight panel until dismissed; `/view-reminders` lists what is waiting and
-what has already been shown, and cancels any of the former. `/schedule` hands
-the model `schedule_ask`: a prompt odyn runs on that schedule, each run
-landing as a normal conversation announced in spotlight — the morning brief.
-Scheduled runs are unattended, so they are handed no tools; a prompt carrying
-tool mentions is refused, while `/brain` recall works. A turn with a memory tool recalls wider than `/brain` does
+what has already been shown, and cancels any of the former. A turn with a memory tool recalls wider than `/brain` does
 — no relevance floor, no `top_k` limit, just the token cap — and is also given
 every memory's name, because its job is finding the right note rather than
-answering from the best few. One tool per mention — the choice between them is yours, not the model's. A stale `[memory]` section from brain v1 still
-parses and is ignored.
-
-One filename is special: `soul.md` in the brain folder holds standing
-instructions and is injected on every turn, mention or not — the one exception
-to "nothing is injected unless asked", which is why the ledger prices it as
-`● soul N` on every surface. It is not a memory: never recalled, indexed,
-graphed or listed, and the model cannot write it.
+answering from the best few. One tool per mention — the choice between them is yours, not the model's. Stale sections and keys from earlier versions — `[memory]`, `[style]`,
+`soul_cap_tokens` — still parse and are ignored.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -204,7 +192,6 @@ graphed or listed, and the model cannot write it.
 | `cap_tokens` | `1200` | Hard cap on injected tokens per recall. Ranked notes are kept until the next one would exceed it. |
 | `min_relevance` | `0.3` | Only notes scoring at least this share of the best match are injected. `0` keeps everything the cap allows. Applies to `/brain`; a turn with a memory tool ignores it. |
 | `save_temperature` | `0.3` | Sampling temperature for `/memory` save turns; lower is more literal. Between 0 and 2. |
-| `soul_cap_tokens` | `400` | Soft budget for `soul.md` — standing instructions injected on every turn. Going over turns its ledger chip red; nothing is truncated. |
 | `similarity_edge_threshold` | `0.78` | Cosine similarity at or above which the brain graph draws an edge between two notes. Greater than 0 and at most 1. |
 
 Token counts are a chars/4 approximation, in the config and in every ledger
@@ -245,18 +232,12 @@ to its own maximum, so a long-context model actually reads long notes while a
 512-token model still stops at 512. Text past a model's window is truncated
 before embedding and cannot influence whether that note is recalled.
 
-### `[style]`
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `brevity` | `"off"` | Default answer style for new conversations: `off`, `lite`, `full` or `ultra`. Each level injects a fixed style directive; `off` injects nothing. |
-
 ### `[spotlight]`
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `hotkey` | `"Alt+Space"` | Global shortcut, in Tauri accelerator syntax — `Alt` is Option on macOS. A shortcut that cannot be registered is reported as status, never a crash. |
-| `brevity` | `"full"` | Answer style for spotlight asks, independent of `[style]`. |
+| `brevity` | `"full"` | Answer style for spotlight asks: `off`, `lite`, `full` or `ultra`. Each level injects a fixed style directive; `off` injects nothing. |
 | `provider` | unset | Falls back to `default_provider`. Must name a configured provider. |
 | `model` | unset | Falls back to that provider's `default_model`. With neither, spotlight asks fail with `no spotlight model`. |
 
@@ -267,8 +248,7 @@ message goes to the webview console. Configuration mistakes are still named in
 full: those are yours to fix, not the model's.
 
 Reasoning is never part of an answer. Models that stream their thinking as a
-`<think>…</think>` block inside the text have it removed as the stream flows,
-on every surface — spotlight and chat alike.
+`<think>…</think>` block inside the text have it removed as the stream flows.
 
 ## Data locations
 

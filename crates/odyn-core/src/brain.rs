@@ -30,9 +30,6 @@ pub const UNLINK: &str = "/unlink-memory";
 /// The mention that asks the model to set a reminder this turn. Alone among
 /// the triggers it reads nothing from the brain.
 pub const REMIND: &str = "/reminder";
-/// The mention that asks the model to schedule a recurring ask. Like
-/// `/reminder`, it reads nothing from the brain.
-pub const SCHEDULE: &str = "/schedule";
 
 /// Two turns of history join the retrieval query.
 const QUERY_MESSAGES: usize = 4;
@@ -79,8 +76,6 @@ pub struct Ask {
     pub unlink: bool,
     /// Whether the model is handed `set_reminder` this turn.
     pub remind: bool,
-    /// Whether the model is handed `schedule_ask` this turn.
-    pub schedule: bool,
 }
 
 impl Ask {
@@ -107,7 +102,6 @@ struct Mentions {
     link: bool,
     unlink: bool,
     remind: bool,
-    schedule: bool,
 }
 
 impl Mentions {
@@ -119,15 +113,14 @@ impl Mentions {
             || self.link
             || self.unlink
             || self.remind
-            || self.schedule
     }
 }
 
 /// Finds a whitespace-delimited `/brain`, `/memory`, `/update-memory`,
-/// `/delete-memory`, `/link-memory`, `/unlink-memory`, `/reminder` or
-/// `/schedule` anywhere in the message, case insensitively, tolerating trailing
-/// punctuation. Each token and the whitespace after it are removed; everything
-/// else stays byte-for-byte.
+/// `/delete-memory`, `/link-memory`, `/unlink-memory` or `/reminder` anywhere
+/// in the message, case insensitively, tolerating trailing punctuation. Each
+/// token and the whitespace after it are removed; everything else stays
+/// byte-for-byte.
 pub fn parse_ask(text: &str) -> Ask {
     let mut cleaned = String::with_capacity(text.len());
     let mut token = String::new();
@@ -152,8 +145,6 @@ pub fn parse_ask(text: &str) -> Ask {
             Some(&mut found.unlink)
         } else if trailer.eq_ignore_ascii_case(REMIND) {
             Some(&mut found.remind)
-        } else if trailer.eq_ignore_ascii_case(SCHEDULE) {
-            Some(&mut found.schedule)
         } else {
             None
         };
@@ -195,7 +186,6 @@ pub fn parse_ask(text: &str) -> Ask {
             link: found.link,
             unlink: found.unlink,
             remind: found.remind,
-            schedule: found.schedule,
         };
     }
     Ask {
@@ -212,7 +202,6 @@ pub fn parse_ask(text: &str) -> Ask {
         link: found.link,
         unlink: found.unlink,
         remind: found.remind,
-        schedule: found.schedule,
     }
 }
 
@@ -224,8 +213,6 @@ pub struct InjectedContext {
     /// injected and no style directive applies.
     pub system_message: String,
     pub tokens: i64,
-    /// `soul.md`, injected on every turn; 0 when there is none.
-    pub soul_tokens: i64,
 }
 
 impl InjectedContext {
@@ -238,15 +225,14 @@ impl InjectedContext {
     }
 }
 
-/// The fallback when the brain cannot run at all: no soul, no recall, but the
-/// task sections and the style directive still reach the model.
+/// The fallback when the brain cannot run at all: no recall, but the task
+/// sections and the style directive still reach the model.
 pub fn empty_context(brevity: Brevity, ask: &Ask) -> InjectedContext {
     let tasks = Tasks::from(ask);
     InjectedContext {
         memories: Vec::new(),
-        system_message: render(None, &[], &[], brevity, tasks, &clock(tasks)),
+        system_message: render(&[], &[], brevity, tasks, &clock(tasks)),
         tokens: 0,
-        soul_tokens: 0,
     }
 }
 
@@ -367,7 +353,6 @@ where
     F: FnOnce() -> Result<Box<dyn Embedder>, EmbedError>,
 {
     let dir = notes::brain_dir(config.path.as_deref())?;
-    let soul = notes::read_soul(&dir)?;
     let mut kept = Vec::new();
     let mut tokens = 0;
     if let Some(storage) = storage.filter(|_| ask.any()) {
@@ -413,8 +398,7 @@ where
     };
     let tasks = Tasks::from(ask);
     Ok(InjectedContext {
-        system_message: render(soul.as_ref(), &kept, &names, brevity, tasks, &clock(tasks)),
-        soul_tokens: soul.map_or(0, |soul| soul.tokens),
+        system_message: render(&kept, &names, brevity, tasks, &clock(tasks)),
         memories: kept,
         tokens,
     })
@@ -430,7 +414,6 @@ struct Tasks {
     linking: bool,
     unlinking: bool,
     reminding: bool,
-    scheduling: bool,
 }
 
 impl From<&Ask> for Tasks {
@@ -442,7 +425,6 @@ impl From<&Ask> for Tasks {
             linking: ask.link,
             unlinking: ask.unlink,
             reminding: ask.remind,
-            scheduling: ask.schedule,
         }
     }
 }
@@ -580,9 +562,6 @@ fn query_text(history: &[Message], user_msg: &str) -> String {
     parts.join("\n")
 }
 
-const SOUL_PREAMBLE: &str =
-    "The user's standing instructions, from their soul.md note. Follow them in every reply.";
-
 /// Without this framing a small model reads the notes as a pasted document
 /// rather than background about the user.
 const PREAMBLE: &str = "The user's saved memories, recalled because they may \
@@ -639,20 +618,11 @@ when the user asked for a recurring reminder, pass `every` instead — \
 \"every day 09:00\", \"every monday 9:30\", or \"every 45m\" — and omit the \
 one-off times. Then confirm in one line.";
 
-const SCHEDULING: &str = "The user asked odyn to run a prompt on a schedule. \
-Call schedule_ask with `prompt` — the question to ask each time, in the \
-user's own words — and `every`: \"every day 09:00\", \"every monday 9:30\", \
-or \"every 45m\". For \"brief me every morning at 9 on my calendar\", prompt \
-is \"brief me on my calendar\" and every is \"every day 09:00\". If the user \
-asked it to use their memory, begin the prompt with /brain. Then confirm in \
-one line.";
-
-/// The injected system message, golden-tested byte for byte: `## Instructions`
-/// (soul.md, when present), `## Memories` (omitted when empty), `## Memory
-/// names` on a write turn, a task section per mentioned trigger, then
-/// `## Style`. `now` is the local wall clock the reminder section quotes.
+/// The injected system message, golden-tested byte for byte: `## Memories`
+/// (omitted when empty), `## Memory names` on a write turn, a task section per
+/// mentioned trigger, then `## Style`. `now` is the local wall clock the
+/// reminder section quotes.
 fn render(
-    soul: Option<&notes::NoteFile>,
     memories: &[Memory],
     names: &[String],
     brevity: Brevity,
@@ -660,12 +630,6 @@ fn render(
     now: &str,
 ) -> String {
     let mut sections = Vec::new();
-    if let Some(soul) = soul {
-        sections.push(format!(
-            "## Instructions\n{SOUL_PREAMBLE}\n{}",
-            soul.content
-        ));
-    }
     if !memories.is_empty() {
         let mut lines = vec![format!("## Memories\n{PREAMBLE}")];
         lines.extend(
@@ -704,9 +668,6 @@ fn render(
             section.push_str(&format!("\nThe current local time is {now}."));
         }
         sections.push(section);
-    }
-    if tasks.scheduling {
-        sections.push(format!("## Scheduling\n{SCHEDULING}"));
     }
     if let Some(directive) = brevity.directive() {
         sections.push(format!("## Style\n{directive}"));
@@ -803,7 +764,6 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
-            schedule: false,
         }
     }
 
@@ -831,7 +791,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
         // Only the trigger: recall runs on history alone, message stays non-empty.
@@ -847,7 +806,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
     }
@@ -866,7 +824,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
         assert_eq!(
@@ -881,7 +838,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
         assert_eq!(
@@ -896,7 +852,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
     }
@@ -915,7 +870,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
     }
@@ -937,7 +891,6 @@ mod tests {
                 link: true,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
         assert!(ask.any(), "a link turn touches the brain");
@@ -995,7 +948,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
         assert_eq!(
@@ -1010,7 +962,6 @@ mod tests {
                 link: false,
                 unlink: false,
                 remind: false,
-                schedule: false,
             }
         );
     }
@@ -1038,7 +989,6 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
-            schedule: false,
         };
         let context =
             build_context(Some(&storage), &config, &[], &ask, Brevity::Off, never).expect("build");
@@ -1168,7 +1118,6 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
-            schedule: false,
         };
         let context = build_context(None, &config, &[], &ask, Brevity::Off, never).expect("build");
         assert!(context.system_message.contains("note-000, note-001"));
@@ -1191,7 +1140,6 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
-            schedule: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1227,7 +1175,6 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
-            schedule: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1269,7 +1216,6 @@ mod tests {
             link: false,
             unlink: false,
             remind: false,
-            schedule: false,
         };
         let context = build_context(
             Some(&storage),
@@ -1322,47 +1268,20 @@ mod tests {
     }
 
     #[test]
-    fn the_schedule_trigger_parses_and_earns_its_section() {
-        let ask = parse_ask("/schedule brief me every morning at 9");
-        assert!(ask.schedule);
-        assert_eq!(ask.message, "brief me every morning at 9");
-        assert!(!ask.any(), "a schedule turn must not touch the brain");
-        assert!(!parse_ask("/scheduled for later").schedule);
-
-        let context = build_context(
-            None,
-            &config(6, 900),
-            &[],
-            &parse_ask("/schedule brief me every morning at 9"),
-            Brevity::Off,
-            never,
-        )
-        .expect("a schedule turn builds without the embedder");
-        assert!(context.system_message.contains("## Scheduling"));
-    }
-
-    #[test]
     fn the_reminder_section_states_the_clock() {
         let tasks = Tasks {
             reminding: true,
             ..Tasks::default()
         };
         assert_eq!(
-            render(
-                None,
-                &[],
-                &[],
-                Brevity::Off,
-                tasks,
-                "2026-08-10 14:32 (Monday)"
-            ),
+            render(&[], &[], Brevity::Off, tasks, "2026-08-10 14:32 (Monday)"),
             format!(
                 "## Reminders\n{REMINDING}\nThe current local time is 2026-08-10 14:32 (Monday)."
             )
         );
         // An unreadable clock drops the line rather than inventing a time.
         assert_eq!(
-            render(None, &[], &[], Brevity::Off, tasks, ""),
+            render(&[], &[], Brevity::Off, tasks, ""),
             format!("## Reminders\n{REMINDING}")
         );
     }
@@ -1555,48 +1474,6 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_turn_records_exactly_the_injections_that_built_its_context() {
-        let (_dir, storage) = seeded("record");
-        let context = build_context(
-            Some(&storage),
-            &config(6, 900),
-            &[],
-            &recalled("cern?"),
-            Brevity::Off,
-            at_axis_zero,
-        )
-        .expect("build");
-        let conversation = storage
-            .create_conversation("cern", "ollama", "llama3.2:3b")
-            .expect("create");
-        storage
-            .append_turn(
-                conversation.id,
-                "cern?",
-                "you visited in june",
-                None,
-                &context.memory_ids(),
-            )
-            .expect("save");
-
-        let user_message = storage.messages(conversation.id).expect("messages")[0].id;
-        let recorded: Vec<(Option<i64>, i64)> = storage
-            .injections(conversation.id)
-            .expect("injections")
-            .into_iter()
-            .map(|injection| (injection.message_id, injection.memory_id))
-            .collect();
-        assert_eq!(
-            recorded,
-            context
-                .memory_ids()
-                .iter()
-                .map(|memory| (Some(user_message), *memory))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     fn each_brevity_level_appends_exactly_its_style_section() {
         let (_dir, storage) = seeded("brevity");
         let base = build_context(
@@ -1632,90 +1509,6 @@ mod tests {
         assert_eq!(
             empty_context(Brevity::Off, &parse_ask("hello")).system_message,
             ""
-        );
-    }
-
-    /// soul.md rides every turn — triggers or none, database or none — and its
-    /// cost is counted separately from recall.
-    #[test]
-    fn the_soul_note_is_injected_on_every_turn_and_counted() {
-        let brain = TempDir::new("soul-brain");
-        std::fs::create_dir_all(&brain.0).expect("create brain dir");
-        std::fs::write(
-            brain.0.join("soul.md"),
-            "---\nkind: soul\n---\nAlways answer in metric.\n",
-        )
-        .expect("write soul");
-        let config = BrainConfig {
-            path: Some(brain.0.clone()),
-            ..config(6, 900)
-        };
-
-        let bare = build_context(None, &config, &[], &parse_ask("hello"), Brevity::Off, never)
-            .expect("build");
-        assert_eq!(
-            bare.system_message,
-            format!("## Instructions\n{SOUL_PREAMBLE}\nAlways answer in metric.")
-        );
-        assert_eq!(bare.soul_tokens, 6, "24 chars make 6 tokens");
-        assert_eq!(bare.tokens, 0);
-        assert!(bare.is_empty());
-
-        // With recall, the soul leads and the memories follow.
-        let (_dir, storage) = seeded("soul-recall");
-        let recalled = build_context(
-            Some(&storage),
-            &config,
-            &[],
-            &recalled("cern?"),
-            Brevity::Off,
-            at_axis_zero,
-        )
-        .expect("build");
-        assert!(recalled
-            .system_message
-            .starts_with(&format!("## Instructions\n{SOUL_PREAMBLE}\n")));
-        assert!(recalled.system_message.contains("\n\n## Memories\n"));
-        assert_eq!(recalled.soul_tokens, 6);
-        assert_eq!(
-            recalled.tokens, 9,
-            "recall's budget never pays for the soul"
-        );
-    }
-
-    /// The soul is not a memory: never indexed, recalled, named or overwritten
-    /// by a model-derived slug.
-    #[test]
-    fn the_soul_note_is_invisible_to_the_memory_pipeline() {
-        let brain = TempDir::new("soul-hidden");
-        std::fs::create_dir_all(&brain.0).expect("create brain dir");
-        std::fs::write(brain.0.join("soul.md"), "Standing orders.\n").expect("write soul");
-        crate::notes::write_note(&brain.0, Some("espresso"), "espresso notes").expect("write");
-
-        let notes = crate::notes::read_notes(&brain.0).expect("read");
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].slug, "espresso");
-        assert_eq!(
-            crate::notes::list_slugs(&brain.0).expect("slugs"),
-            vec!["espresso".to_string()]
-        );
-        let soul = crate::notes::read_soul(&brain.0)
-            .expect("soul")
-            .expect("some");
-        assert_eq!(soul.content, "Standing orders.");
-        assert_eq!(
-            crate::notes::read_soul(&brain.0.join("missing")).expect("missing dir"),
-            None
-        );
-
-        // A save can never claim the name: explicit errors, derived dodges.
-        assert!(matches!(
-            crate::notes::write_note(&brain.0, Some("soul"), "not instructions"),
-            Err(crate::notes::NotesError::Exists(_))
-        ));
-        assert_eq!(
-            crate::notes::write_note(&brain.0, None, "soul").expect("derived"),
-            "soul-2"
         );
     }
 

@@ -1,159 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
 export type BrevityLevel = "off" | "lite" | "full" | "ultra";
-
-export type Conversation = {
-  id: number;
-  title: string;
-  provider: string;
-  model: string;
-  // Unix epoch seconds.
-  updated_at: number;
-  // The conversation's explicit choice; null follows the [style] default.
-  brevity: BrevityLevel | null;
-  // The agent workspace folder; null is a normal conversation.
-  workspace: string | null;
-};
-
-export type ConversationView = Conversation & {
-  turns: number;
-  tokens: number | null;
-};
-
-export type Message = {
-  id: number;
-  role: "system" | "user" | "assistant";
-  content: string;
-  // Assistant rows: the slugs injected for the question this answers.
-  used: string[];
-  // Assistant rows: the tool actions this reply ran, kept for five days.
-  commands: string[];
-};
-
-export type SearchHit = {
-  conversation_id: number;
-  title: string;
-  message_id: number;
-  role: "user" | "assistant";
-  // Matched terms sit between the U+0001 and U+0002 markers.
-  snippet: string;
-};
-
-export type Usage = { input_tokens: number; output_tokens: number };
-
-export type ChatEvent = { request_id: number } & (
-  | { kind: "context"; used: string[]; tokens: number; soul: number }
-  | { kind: "delta"; text: string }
-  | { kind: "saved"; slug: string }
-  | { kind: "updated"; slug: string }
-  | { kind: "deleted"; slug: string }
-  | { kind: "linked"; from: string; to: string }
-  | { kind: "unlinked"; from: string; to: string }
-  | { kind: "reminded"; text: string; due_at: number }
-  | { kind: "scheduled"; prompt: string; next_at: number }
-  | { kind: "approval"; approval_id: number; command: string }
-  | { kind: "agentcall"; tool: string; detail: string }
-  | { kind: "agentout"; text: string; truncated: boolean }
-  | { kind: "round"; used: number; budget: number }
-  | { kind: "done"; usage: Usage | null; interrupted: boolean }
-  | { kind: "error"; message: string }
-);
-
-export type ApprovalVerdict = "run" | "always" | "deny";
-
-export type LedgerItem = { id: string; tokens: number; content: string };
-
-export type ContextPreview = {
-  // False when the draft has no /brain mention: the send would inject nothing.
-  active: boolean;
-  memories: LedgerItem[];
-  tokens: number;
-  cap_tokens: number;
-  // soul.md's standing cost, injected on every turn; 0 when there is none.
-  soul_tokens: number;
-  soul_over: boolean;
-  system_message: string;
-};
-
-export type Model = {
-  name: string;
-  // On-disk size, which only Ollama reports.
-  size_bytes: number | null;
-  // Whether the model can call tools; null when nothing reported it.
-  tools: boolean | null;
-};
-
-export type ProviderGroup = {
-  name: string;
-  kind: "openai_compat" | "ollama";
-  reachable: boolean;
-  models: Model[];
-};
-
-export type Status = {
-  brevity_default: BrevityLevel;
-};
-
-export const listConversations = (): Promise<Conversation[]> =>
-  invoke("list_conversations");
-
-export const createConversation = (): Promise<Conversation> =>
-  invoke("create_conversation");
-
-export const renameConversation = (id: number, title: string): Promise<void> =>
-  invoke("rename_conversation", { id, title });
-
-export const deleteConversation = (id: number): Promise<void> =>
-  invoke("delete_conversation", { id });
-
-export const setConversationBrevity = (
-  conversationId: number,
-  brevity: BrevityLevel,
-): Promise<void> =>
-  invoke("set_conversation_brevity", { conversationId, brevity });
-
-export const setConversationModel = (
-  conversationId: number,
-  provider: string,
-  model: string,
-): Promise<void> =>
-  invoke("set_conversation_model", { conversationId, provider, model });
-
-export const getConversation = (id: number): Promise<ConversationView> =>
-  invoke("get_conversation", { id });
-
-export const messages = (conversationId: number): Promise<Message[]> =>
-  invoke("messages", { conversationId });
-
-export const searchMessages = (query: string): Promise<SearchHit[]> =>
-  invoke("search_messages", { query });
-
-export const sendMessage = (
-  conversationId: number,
-  text: string,
-  retry: boolean,
-): Promise<number> => invoke("send_message", { conversationId, text, retry });
-
-export const cancelMessage = (requestId: number): Promise<void> =>
-  invoke("cancel_message", { requestId });
-
-// Empty path clears; anything else must be an existing folder.
-export const setWorkspace = (
-  conversationId: number,
-  path: string,
-): Promise<Conversation> => invoke("set_workspace", { conversationId, path });
-
-export const approveCommand = (
-  approvalId: number,
-  verdict: ApprovalVerdict,
-): Promise<void> => invoke("approve_command", { approvalId, verdict });
-
-export const contextPreview = (
-  conversationId: number | null,
-  draft: string,
-): Promise<ContextPreview> =>
-  invoke("context_preview", { conversationId, draft });
 
 export type MemorySort = "recent" | "hits" | "created";
 
@@ -260,29 +107,15 @@ export type ReminderRow = {
   repeat: string | null;
 };
 
-export type ScheduleRow = {
-  id: number;
-  prompt: string;
-  repeat: string;
-  next_at: number;
-  last_run_at: number | null;
-  // What the last run failed with; null after a clean one.
-  last_error: string | null;
-};
-
 export type ReminderList = {
   pending: ReminderRow[];
   past: ReminderRow[];
-  schedules: ScheduleRow[];
 };
 
 export const remindersList = (): Promise<ReminderList> => invoke("reminders_list");
 
 export const reminderDelete = (id: number): Promise<void> =>
   invoke("reminder_delete", { id });
-
-export const scheduleDelete = (id: number): Promise<void> =>
-  invoke("schedule_delete", { id });
 
 export const configFile = (): Promise<ConfigFile> => invoke("config_file");
 
@@ -362,16 +195,8 @@ export const setDefaultProvider = (name: string): Promise<ProviderEntry[]> =>
 
 export const reloadConfig = (): Promise<void> => invoke("reload_config");
 
-export const onChatEvent = (handle: (event: ChatEvent) => void): void => {
-  void listen<ChatEvent>("chat-event", (event) => handle(event.payload));
-};
-
-export const status = (): Promise<Status> => invoke("status");
-
 export const spotlightStatus = (): Promise<string | null> =>
   invoke("spotlight_status");
 
 export const spotlightToggle = (): Promise<void> => invoke("spotlight_toggle");
 
-export const providersOverview = (): Promise<ProviderGroup[]> =>
-  invoke("providers_overview");

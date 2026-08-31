@@ -2,7 +2,6 @@ mod brain;
 mod commands;
 mod config;
 mod reminders;
-mod schedules;
 mod spotlight;
 mod state;
 mod tray;
@@ -28,19 +27,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::list_conversations,
-            commands::create_conversation,
-            commands::rename_conversation,
-            commands::delete_conversation,
-            commands::set_conversation_model,
-            commands::set_conversation_brevity,
-            commands::get_conversation,
-            commands::messages,
-            commands::search_messages,
-            commands::send_message,
-            commands::context_preview,
-            commands::set_workspace,
-            commands::approve_command,
             brain::brain_overview,
             brain::brain_memories,
             brain::brain_search,
@@ -66,20 +52,14 @@ pub fn run() {
             config::reload_config,
             reminders::reminders_list,
             reminders::reminder_delete,
-            reminders::schedule_delete,
-            commands::cancel_message,
-            commands::status,
-            commands::providers_overview,
             spotlight::spotlight_hide,
             spotlight::spotlight_toggle,
             spotlight::spotlight_status,
             spotlight::spotlight_ask,
-            spotlight::spotlight_promote,
             spotlight::spotlight_target,
             spotlight::spotlight_set_target,
             spotlight::spotlight_save_key,
             spotlight::spotlight_open_view,
-            spotlight::spotlight_open_conversation,
         ])
         .build(tauri::generate_context!());
     match app {

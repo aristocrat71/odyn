@@ -1,6 +1,6 @@
 //! Spotlight window: summoned by a global hotkey, hidden by Esc or a second
 //! press. Hotkey registration failure is surfaced as status, never a crash.
-//! Asks are ephemeral — nothing is stored unless the exchange is promoted.
+//! Asks are ephemeral: nothing of an exchange is ever stored.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,14 +16,14 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 
-use crate::commands::{describe, title_from, Body, Event, INTERRUPTED};
+use crate::commands::{describe, Body, Event};
 use crate::state::AppState;
 
 const LABEL: &str = "spotlight";
 const MAIN: &str = "main";
 const EVENT: &str = "spotlight-event";
 /// Tells the panel to empty itself. Concealing deliberately does not send it:
-/// the exchange survives a click-away, and only Esc or a promotion ends one.
+/// the exchange survives a click-away, and only Esc ends one.
 const CLEARED: &str = "spotlight-clear";
 /// Every way a model fails to answer reads the same; the raw text rides `detail`.
 const UNAVAILABLE: &str = "model unavailable";
@@ -112,26 +112,13 @@ pub struct AskState {
 }
 
 struct Ask {
-    question: String,
     shared: Arc<Shared>,
     task: Option<JoinHandle<()>>,
 }
 
 #[derive(Default)]
 struct Shared {
-    answer: Mutex<String>,
-    usage: Mutex<Option<Usage>>,
-    /// The memories injected for this ask.
-    injected: Mutex<Vec<i64>>,
-    /// Their injection rows, recorded at ask time; promotion adopts them.
-    recorded: Mutex<Vec<i64>>,
     finished: AtomicBool,
-}
-
-impl Shared {
-    fn answer(&self) -> String {
-        lock(&self.answer).clone()
-    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -204,7 +191,7 @@ fn toggle(app: &AppHandle) {
 }
 
 /// Hides without dropping the ask: a stray click or a re-summon later still
-/// finds the answer. Only Esc and promotion end an exchange.
+/// finds the answer. Only Esc ends an exchange.
 fn conceal(app: &AppHandle) {
     let _ = app.global_shortcut().unregister(esc());
     #[cfg(target_os = "macos")]
@@ -353,12 +340,11 @@ pub fn spotlight_ask(
         abort(&previous);
     }
 
-    // The same `/brain` rule as everywhere: neither the model nor a promoted
+    // The same `/brain` rule as everywhere: neither the model nor a stored
     // transcript sees the mention.
     let parsed = odyn_core::brain::parse_ask(&text);
     let shared = Arc::new(Shared::default());
     let mut ask = Ask {
-        question: parsed.message.clone(),
         shared: Arc::clone(&shared),
         task: None,
     };
@@ -373,7 +359,6 @@ pub fn spotlight_ask(
                     shared,
                     built,
                     config,
-                    provider,
                     model,
                     parsed,
                 )));
@@ -387,83 +372,9 @@ pub fn spotlight_ask(
     Ok(request_id)
 }
 
-/// Saves the exchange as a real conversation; mid-stream, the answer is kept as
-/// an interrupted partial.
-#[tauri::command]
-pub async fn spotlight_promote(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    asks: State<'_, AskState>,
-) -> Result<i64, String> {
-    let ready = state.ready()?;
-    let Some(ask) = lock(&asks.current).take() else {
-        return Err("nothing to promote".to_string());
-    };
-    let finished = ask.shared.finished.load(Ordering::Acquire);
-    abort(&ask);
-    let mut answer = ask.shared.answer();
-    if answer.trim().is_empty() {
-        return Err("nothing to promote".to_string());
-    }
-    if !finished {
-        answer.push_str(INTERRUPTED);
-    }
-    let usage = *lock(&ask.shared.usage);
-
-    let (provider, model) = target(&ready)?;
-    let storage = ready.storage();
-    let row = storage
-        .create_conversation(&title_from(&ask.question), &provider, &model)
-        .map_err(|err| err.to_string())?;
-    let question = storage
-        .append_message(row.id, Role::User, &ask.question, None, None)
-        .map_err(|err| err.to_string())?;
-    let recorded = lock(&ask.shared.recorded).clone();
-    let injected = lock(&ask.shared.injected).clone();
-    if !recorded.is_empty() {
-        storage
-            .adopt_injections(&recorded, row.id, question.id)
-            .map_err(|err| err.to_string())?;
-    } else if !injected.is_empty() {
-        // Ask-time recording failed; the promoted turn still gets its record.
-        storage
-            .record_injections(Some(row.id), Some(question.id), &injected)
-            .map_err(|err| err.to_string())?;
-    }
-    storage
-        .append_message(
-            row.id,
-            Role::Assistant,
-            &answer,
-            usage.map(|usage| usage.input_tokens),
-            usage.map(|usage| usage.output_tokens),
-        )
-        .map_err(|err| err.to_string())?;
-    drop(storage);
-
-    let _ = app.emit_to(MAIN, "open-conversation", row.id);
-    // The exchange is a conversation now, so the panel starts empty next time.
-    cleared(&app);
-    // An async command runs off the main thread, where AppKit aborts the process.
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        crate::tray::open_dashboard(&handle);
-        conceal(&handle);
-    });
-    Ok(row.id)
-}
-
 #[tauri::command]
 pub fn spotlight_open_view(app: AppHandle, view: String) {
     let _ = app.emit_to(MAIN, "open-view", view);
-    crate::tray::open_dashboard(&app);
-    dismiss(&app);
-}
-
-/// A due row that came from a scheduled run opens its conversation.
-#[tauri::command]
-pub fn spotlight_open_conversation(app: AppHandle, id: i64) {
-    let _ = app.emit_to(MAIN, "open-conversation", id);
     crate::tray::open_dashboard(&app);
     dismiss(&app);
 }
@@ -501,12 +412,11 @@ async fn run(
     shared: Arc<Shared>,
     provider: Box<dyn ChatProvider>,
     provider_config: Option<ProviderConfig>,
-    provider_name: String,
     model: String,
     ask: odyn_core::brain::Ask,
 ) {
     // Refused before recall runs — same gate as a chat send.
-    let earns_tools = ask.writes() || ask.remind || ask.schedule;
+    let earns_tools = ask.writes() || ask.remind;
     if let Some(config) = provider_config.filter(|_| earns_tools) {
         if crate::commands::lacks_tools(&config, &model).await {
             emit(&app, request_id, Body::error(crate::commands::NO_TOOLS));
@@ -533,46 +443,27 @@ async fn run(
     let link = ask.link;
     let unlink = ask.unlink;
     let remind = ask.remind;
-    let schedule = ask.schedule;
     let mut history = vec![Message::new(Role::User, ask.message.clone())];
     if let Some(context) = crate::commands::build_context(&app, Vec::new(), ask, brevity).await {
-        *lock(&shared.injected) = context.memory_ids();
-        // An ephemeral ask still counts: hits and co-use edges accrue whether
-        // or not it is ever promoted.
+        // The ask is not stored, but the recall still counts: hits and co-use
+        // edges accrue from it.
         if !context.is_empty() {
-            let recorded = app
-                .state::<AppState>()
-                .ready()
-                .ok()
-                .and_then(|ready| {
-                    ready
-                        .storage()
-                        .record_injections(None, None, &context.memory_ids())
-                        .ok()
-                })
-                .unwrap_or_default();
-            *lock(&shared.recorded) = recorded;
+            if let Ok(ready) = app.state::<AppState>().ready() {
+                let _ = ready.storage().record_injections(&context.memory_ids());
+            }
         }
         emit(&app, request_id, crate::commands::context_body(&context));
         if !context.system_message.is_empty() {
             history.insert(0, Message::new(Role::System, context.system_message));
         }
     }
-    // Ephemeral asks have no conversation, so no workspace and no agent tools.
-    let tools = odyn_core::tools::offered(
-        memorize, update, delete, link, unlink, remind, schedule, false,
-    );
+    let tools = odyn_core::tools::offered(memorize, update, delete, link, unlink, remind);
     // A model that says nothing is as unusable as one that errored.
     let mut spoke = false;
     let mut sink = crate::commands::reminder_sink(&app);
-    let mut plans = crate::commands::schedule_sink(&app, &provider_name, &model);
-    let mut gate = crate::commands::deny_bash();
     let mut effects = odyn_core::tools::Effects {
         brain_dir: &brain_dir,
-        workspace: None,
         set_reminder: &mut sink,
-        set_schedule: &mut plans,
-        approve: &mut gate,
     };
     let driven = odyn_core::tools::run_turn(
         provider.as_ref(),
@@ -585,7 +476,6 @@ async fn run(
             match event {
                 TurnEvent::Delta(delta) => {
                     spoke = spoke || !delta.trim().is_empty();
-                    lock(&shared.answer).push_str(delta);
                     emit(
                         &app,
                         request_id,
@@ -639,18 +529,6 @@ async fn run(
                         due_at,
                     },
                 ),
-                TurnEvent::Scheduled { prompt, next_at } => emit(
-                    &app,
-                    request_id,
-                    Body::Scheduled {
-                        prompt: prompt.to_string(),
-                        next_at,
-                    },
-                ),
-                // No workspace here, so agent events cannot fire.
-                TurnEvent::AgentCall { .. }
-                | TurnEvent::AgentOut { .. }
-                | TurnEvent::Round { .. } => {}
             }
             Ok(())
         },
@@ -658,7 +536,6 @@ async fn run(
     .await;
     match driven {
         Ok(reply) => {
-            *lock(&shared.usage) = reply.usage;
             shared.finished.store(true, Ordering::Release);
             emit(&app, request_id, finished(spoke, reply.usage));
         }

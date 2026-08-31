@@ -7,20 +7,16 @@ import "./app.css";
 import { listen } from "@tauri-apps/api/event";
 
 import { spotlightToggle } from "./api";
-import { refreshLedger } from "./chat";
 import { el } from "./dom";
 import { renderSidebar } from "./sidebar";
 import {
   isView,
-  load,
+  loadBrain,
   loadReminders,
-  newConversation,
   onChange,
   refreshStatus,
-  selectConversation,
   setView,
   state,
-  watchStream,
 } from "./state";
 import { renderView } from "./view";
 
@@ -47,9 +43,7 @@ document.addEventListener("pointerdown", (event) => {
 const MAC = navigator.platform.startsWith("Mac");
 const SHORTCUTS: Record<string, () => void> = {
   k: () => void spotlightToggle(),
-  n: () => void newConversation(),
-  "1": () => setView("chat"),
-  "2": () => setView("brain"),
+  "1": () => setView("brain"),
 };
 
 window.addEventListener("keydown", (event) => {
@@ -72,20 +66,12 @@ onChange(() => {
 renderSidebar(sidebar);
 renderView(main);
 
-watchStream();
-void load();
+void loadBrain();
 void refreshStatus();
 
 window.addEventListener("focus", () => {
-  refreshLedger();
   // One may have fired or been set elsewhere while the window was away.
   if (state.view === "reminders") void loadReminders();
-});
-
-// A promoted spotlight exchange lands here as a ready-made conversation.
-void listen<number>("open-conversation", async (event) => {
-  await load();
-  await selectConversation(event.payload);
 });
 
 void listen<string>("open-view", (event) => {
