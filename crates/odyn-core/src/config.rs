@@ -55,9 +55,6 @@ similarity_edge_threshold = 0.78
 min_relevance = 0.3      # inject only notes scoring this share of the best match
 save_temperature = 0.3   # sampling on /memory save turns; lower = more literal
 
-[style]
-brevity = "off"        # off | lite | full | ultra — default for new conversations
-
 [spotlight]
 hotkey = "Ctrl+Space"  # Control+Space on every platform
 brevity = "full"       # spotlight answers should be terse
@@ -113,12 +110,12 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub brain: BrainConfig,
-    /// The brain v1 `[memory]` section, swallowed and ignored: a stale section
-    /// must not brick the app.
+    /// The brain v1 `[memory]` section and the removed `[style]` section, both
+    /// swallowed and ignored: a stale section must not brick the app.
     #[serde(default, rename = "memory")]
     legacy_memory: Option<toml::Value>,
-    #[serde(default)]
-    pub style: StyleConfig,
+    #[serde(default, rename = "style")]
+    legacy_style: Option<toml::Value>,
     #[serde(default)]
     pub spotlight: SpotlightConfig,
 }
@@ -166,13 +163,6 @@ pub struct BrainConfig {
     /// not brick the app.
     #[serde(default, rename = "soul_cap_tokens")]
     pub(crate) legacy_soul_cap: Option<toml::Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct StyleConfig {
-    /// The brevity every conversation starts with, unless it chose its own.
-    pub brevity: Brevity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -860,22 +850,21 @@ kind = "ollama"
     }
     #[test]
     fn brevity_levels_parse_and_bad_ones_name_the_key() {
+        // A stale `[style]` section parses and is ignored.
         let config = Config::parse(
             "default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\n\
              [style]\nbrevity = \"ultra\"\n[spotlight]\nbrevity = \"lite\"\n",
         )
         .expect("parse");
-        assert_eq!(config.style.brevity, crate::brevity::Brevity::Ultra);
         assert_eq!(config.spotlight.brevity, crate::brevity::Brevity::Lite);
 
         let config = Config::parse("default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\n")
             .expect("parse defaults");
-        assert_eq!(config.style.brevity, crate::brevity::Brevity::Off);
         assert_eq!(config.spotlight.brevity, crate::brevity::Brevity::Full);
 
         let error = Config::parse(
             "default_provider = \"x\"\n[providers.x]\nkind = \"ollama\"\n\
-             [style]\nbrevity = \"caveman\"\n",
+             [spotlight]\nbrevity = \"caveman\"\n",
         )
         .expect_err("a made-up level must fail");
         let message = error.to_string();

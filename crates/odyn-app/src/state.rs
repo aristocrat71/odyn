@@ -1,22 +1,16 @@
 //! What the commands share: the config, the providers built from it, the one
 //! database connection, and the replies streaming right now.
 
-use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use odyn_core::config::{Config, ProviderRegistry};
 use odyn_core::storage::Storage;
-use tauri::async_runtime::JoinHandle;
 
 pub struct AppState {
     /// Behind a lock so the providers view can swap in an edited config;
     /// a command that already holds a guard finishes on the state it saw.
     ready: RwLock<Result<Ready, String>>,
-    /// Beside `ready`, not inside it: a reply streaming through a reload
-    /// still has to be reachable by the cancel that ends it.
-    pub streams: Streams,
 }
 
 pub struct Ready {
@@ -31,7 +25,6 @@ impl AppState {
     pub fn load() -> Self {
         Self {
             ready: RwLock::new(Self::open()),
-            streams: Streams::default(),
         }
     }
 
@@ -87,60 +80,6 @@ impl Ready {
     /// state lives in the file, not in the guard — so poisoning is ignored.
     pub fn storage(&self) -> MutexGuard<'_, Storage> {
         lock(&self.storage)
-    }
-}
-
-/// The replies in flight, so a cancel can reach the task and its partial text.
-#[derive(Default)]
-pub struct Streams {
-    next: AtomicU64,
-    live: Mutex<HashMap<u64, Arc<Stream>>>,
-}
-
-pub struct Stream {
-    pub conversation_id: i64,
-    partial: Mutex<String>,
-    task: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl Streams {
-    /// The entry exists before the task does, so closing it is what decides who
-    /// finishes a reply — the stream itself or the cancel that beat it.
-    pub fn open(&self, conversation_id: i64) -> (u64, Arc<Stream>) {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let stream = Arc::new(Stream {
-            conversation_id,
-            partial: Mutex::new(String::new()),
-            task: Mutex::new(None),
-        });
-        lock(&self.live).insert(id, Arc::clone(&stream));
-        (id, stream)
-    }
-
-    pub fn close(&self, id: u64) -> Option<Arc<Stream>> {
-        lock(&self.live).remove(&id)
-    }
-}
-
-impl Stream {
-    pub fn attach(&self, task: JoinHandle<()>) {
-        *lock(&self.task) = Some(task);
-    }
-
-    pub fn push(&self, delta: &str) {
-        lock(&self.partial).push_str(delta);
-    }
-
-    pub fn text(&self) -> String {
-        lock(&self.partial).clone()
-    }
-
-    /// Abrupt on purpose: a stream waiting on a provider that stopped answering
-    /// has no await point left at which to notice a flag.
-    pub fn abort(&self) {
-        if let Some(task) = lock(&self.task).as_ref() {
-            task.abort();
-        }
     }
 }
 

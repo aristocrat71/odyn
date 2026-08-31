@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
-use rusqlite::{params, Connection, Row, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::brevity::Brevity;
-use crate::chat::{Role, Usage};
+use crate::chat::Role;
 
 mod memory;
 mod reminder;
@@ -210,18 +210,32 @@ ALTER TABLE conversations DROP COLUMN workspace;
     r"
 DROP TABLE IF EXISTS schedules;
 ",
+    // Chat is gone: spotlight asks are ephemeral, so nothing is transcribed.
+    // The injections log survives as recall accounting, keyed on `turn` alone.
+    r"
+DROP TRIGGER IF EXISTS messages_fts_insert;
+DROP TRIGGER IF EXISTS messages_fts_delete;
+DROP TABLE IF EXISTS messages_fts;
+CREATE TABLE injections_next (
+    id          INTEGER PRIMARY KEY,
+    turn        INTEGER NOT NULL,
+    memory_id   INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    injected_at INTEGER NOT NULL
+);
+INSERT INTO injections_next (id, turn, memory_id, injected_at)
+    SELECT id, turn, memory_id, injected_at FROM injections;
+DROP TABLE injections;
+ALTER TABLE injections_next RENAME TO injections;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS conversations;
+DELETE FROM graph_cache;
+",
 ];
-
-/// Marks a matched term in a search snippet; its closer is `SNIPPET_END`.
-pub const SNIPPET_START: char = '\u{1}';
-pub const SNIPPET_END: char = '\u{2}';
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("conversation {0} not found")]
-    ConversationNotFound(i64),
     #[error("could not create {}: {source}", path.display())]
     Directory {
         path: PathBuf,
@@ -239,43 +253,6 @@ pub enum StorageError {
     MissingEmbedding(String),
     #[error("a reminder needs something to say")]
     EmptyReminder,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Conversation {
-    pub id: i64,
-    pub title: String,
-    pub model: String,
-    pub provider: String,
-    /// Unix epoch seconds.
-    pub created_at: i64,
-    pub updated_at: i64,
-    /// `None` until the user explicitly picks a level for this conversation;
-    /// callers fall back to the `[style]` config default.
-    pub brevity: Option<Brevity>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchHit {
-    pub conversation_id: i64,
-    pub title: String,
-    pub message_id: i64,
-    pub role: Role,
-    pub snippet: String,
-    /// Unix epoch seconds.
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredMessage {
-    pub id: i64,
-    pub conversation_id: i64,
-    pub role: Role,
-    pub content: String,
-    /// Unix epoch seconds.
-    pub created_at: i64,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -319,215 +296,6 @@ impl Storage {
         }
         Ok(Some(Self::open(path)?))
     }
-
-    pub fn create_conversation(
-        &self,
-        title: &str,
-        provider: &str,
-        model: &str,
-    ) -> Result<Conversation, StorageError> {
-        let now = now_secs();
-        self.conn.execute(
-            "INSERT INTO conversations (title, model, provider, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![title, model, provider, now],
-        )?;
-        Ok(Conversation {
-            id: self.conn.last_insert_rowid(),
-            title: title.to_string(),
-            model: model.to_string(),
-            provider: provider.to_string(),
-            created_at: now,
-            updated_at: now,
-            brevity: None,
-        })
-    }
-
-    /// Most recently active first; ties broken by id so the order is stable.
-    pub fn list_conversations(&self) -> Result<Vec<Conversation>, StorageError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, provider, created_at, updated_at, brevity
-             FROM conversations ORDER BY updated_at DESC, id DESC",
-        )?;
-        let rows = stmt.query_map([], to_conversation)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    /// The head of `list_conversations`, read on its own so a new chat can open
-    /// on the last one's provider and model.
-    pub fn latest_conversation(&self) -> Result<Option<Conversation>, StorageError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, model, provider, created_at, updated_at, brevity
-             FROM conversations ORDER BY updated_at DESC, id DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query_map([], to_conversation)?;
-        Ok(rows.next().transpose()?)
-    }
-
-    /// Writes an explicit brevity choice; the column stays NULL until one.
-    pub fn set_conversation_brevity(&self, id: i64, brevity: Brevity) -> Result<(), StorageError> {
-        let changed = self.conn.execute(
-            "UPDATE conversations SET brevity = ?2 WHERE id = ?1",
-            params![id, brevity],
-        )?;
-        found(changed, id)
-    }
-
-    pub fn rename_conversation(&self, id: i64, title: &str) -> Result<(), StorageError> {
-        let changed = self.conn.execute(
-            "UPDATE conversations SET title = ?2 WHERE id = ?1",
-            params![id, title],
-        )?;
-        found(changed, id)
-    }
-
-    /// Messages are deleted explicitly rather than by cascade, so the search
-    /// index's delete trigger always sees them go.
-    pub fn delete_conversation(&self, id: i64) -> Result<(), StorageError> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM messages WHERE conversation_id = ?1",
-            params![id],
-        )?;
-        let changed = tx.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
-        found(changed, id)?;
-        Ok(tx.commit()?)
-    }
-
-    pub fn set_conversation_model(
-        &self,
-        id: i64,
-        provider: &str,
-        model: &str,
-    ) -> Result<(), StorageError> {
-        let changed = self.conn.execute(
-            "UPDATE conversations SET provider = ?2, model = ?3 WHERE id = ?1",
-            params![id, provider, model],
-        )?;
-        found(changed, id)
-    }
-
-    pub fn append_message(
-        &self,
-        conversation_id: i64,
-        role: Role,
-        content: &str,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-    ) -> Result<StoredMessage, StorageError> {
-        let now = now_secs();
-        let tx = self.conn.unchecked_transaction()?;
-        touch(&tx, conversation_id, now)?;
-        let id = insert(
-            &tx,
-            conversation_id,
-            role,
-            content,
-            now,
-            input_tokens,
-            output_tokens,
-        )?;
-        tx.commit()?;
-        Ok(StoredMessage {
-            id,
-            conversation_id,
-            role,
-            content: content.to_string(),
-            created_at: now,
-            input_tokens,
-            output_tokens,
-        })
-    }
-
-    /// A question, its answer and the memories injected for it are one write, so
-    /// a saved turn can never disagree with its recorded injections.
-    pub fn append_turn(
-        &self,
-        conversation_id: i64,
-        prompt: &str,
-        answer: &str,
-        usage: Option<Usage>,
-        injected: &[i64],
-    ) -> Result<(), StorageError> {
-        let now = now_secs();
-        let tx = self.conn.unchecked_transaction()?;
-        touch(&tx, conversation_id, now)?;
-        let prompt_id = insert(&tx, conversation_id, Role::User, prompt, now, None, None)?;
-        insert(
-            &tx,
-            conversation_id,
-            Role::Assistant,
-            answer,
-            now,
-            usage.map(|usage| usage.input_tokens),
-            usage.map(|usage| usage.output_tokens),
-        )?;
-        for memory_id in injected {
-            tx.execute(
-                "INSERT INTO injections (conversation_id, message_id, turn, memory_id, injected_at)
-                 VALUES (?1, ?2, ?2, ?3, ?4)",
-                params![conversation_id, prompt_id, memory_id, now],
-            )?;
-        }
-        Ok(tx.commit()?)
-    }
-
-    pub fn messages(&self, conversation_id: i64) -> Result<Vec<StoredMessage>, StorageError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, conversation_id, role, content, created_at, input_tokens, output_tokens
-             FROM messages WHERE conversation_id = ?1 ORDER BY id",
-        )?;
-        let rows = stmt.query_map(params![conversation_id], to_message)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    /// Full-text search over every message, best match first. Matched terms in
-    /// the snippet sit between `SNIPPET_START` and `SNIPPET_END`.
-    pub fn search_messages(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchHit>, StorageError> {
-        let terms = fts_query(query);
-        if terms.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT m.conversation_id, c.title, m.id, m.role,
-                    snippet(messages_fts, 0, char(1), char(2), ' … ', 12), m.created_at
-             FROM messages_fts
-             JOIN messages m ON m.id = messages_fts.rowid
-             JOIN conversations c ON c.id = m.conversation_id
-             WHERE messages_fts MATCH ?1
-             ORDER BY bm25(messages_fts), m.id DESC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![terms, limit as i64], |row| {
-            Ok(SearchHit {
-                conversation_id: row.get(0)?,
-                title: row.get(1)?,
-                message_id: row.get(2)?,
-                role: row.get(3)?,
-                snippet: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-}
-
-/// Every whitespace-separated term, quoted so FTS operators and stray quotes
-/// read as text, joined as an AND; the last term matches as a prefix so the
-/// search works while a word is still being typed.
-fn fts_query(text: &str) -> String {
-    let mut terms: Vec<String> = text
-        .split_whitespace()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect();
-    if let Some(last) = terms.last_mut() {
-        last.push('*');
-    }
-    terms.join(" ")
 }
 
 /// The deciding version is read under the write lock: two processes opening the
@@ -563,62 +331,8 @@ fn default_db_path() -> Result<PathBuf, StorageError> {
     Ok(dirs.data_dir().join(DB_FILE_NAME))
 }
 
-/// Bumping `updated_at` doubles as the existence check, with a clearer error
-/// than the foreign key would give.
-fn touch(conn: &Connection, conversation_id: i64, now: i64) -> Result<(), StorageError> {
-    let changed = conn.execute(
-        "UPDATE conversations SET updated_at = ?2 WHERE id = ?1",
-        params![conversation_id, now],
-    )?;
-    found(changed, conversation_id)
-}
-
-fn insert(
-    conn: &Connection,
-    conversation_id: i64,
-    role: Role,
-    content: &str,
-    now: i64,
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-) -> Result<i64, StorageError> {
-    conn.execute(
-        "INSERT INTO messages
-             (conversation_id, role, content, created_at, input_tokens, output_tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            conversation_id,
-            role,
-            content,
-            now,
-            input_tokens,
-            output_tokens
-        ],
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
-fn found(changed: usize, id: i64) -> Result<(), StorageError> {
-    if changed == 0 {
-        return Err(StorageError::ConversationNotFound(id));
-    }
-    Ok(())
-}
-
 pub(crate) fn now_secs() -> i64 {
     crate::reminder::now_secs()
-}
-
-fn to_conversation(row: &Row<'_>) -> rusqlite::Result<Conversation> {
-    Ok(Conversation {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        model: row.get(2)?,
-        provider: row.get(3)?,
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
-        brevity: row.get(6)?,
-    })
 }
 
 /// Stored under the same lowercase names the config file uses.
@@ -635,18 +349,6 @@ impl FromSql for Brevity {
             .parse()
             .map_err(|err: crate::brevity::BadBrevity| FromSqlError::Other(err.to_string().into()))
     }
-}
-
-fn to_message(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
-    Ok(StoredMessage {
-        id: row.get(0)?,
-        conversation_id: row.get(1)?,
-        role: row.get(2)?,
-        content: row.get(3)?,
-        created_at: row.get(4)?,
-        input_tokens: row.get(5)?,
-        output_tokens: row.get(6)?,
-    })
 }
 
 /// Stored as the names `Role`'s serde derive uses, so rows and wire payloads
@@ -728,12 +430,12 @@ pub(crate) mod tests {
             MIGRATIONS.len() as i64
         );
         let tables = table_names(&storage);
-        assert!(tables.contains(&"conversations".to_string()), "{tables:?}");
-        assert!(tables.contains(&"messages".to_string()), "{tables:?}");
+        assert!(tables.contains(&"memories".to_string()), "{tables:?}");
+        assert!(tables.contains(&"injections".to_string()), "{tables:?}");
+        assert!(!tables.contains(&"conversations".to_string()), "{tables:?}");
+        assert!(!tables.contains(&"messages".to_string()), "{tables:?}");
 
-        let created = storage
-            .create_conversation("first", "ollama", "llama3.2:3b")
-            .expect("create");
+        let created = storage.add_reminder("call mum", 900, None).expect("add");
         drop(storage);
 
         let reopened = Storage::open(dir.db()).expect("reopen");
@@ -741,11 +443,11 @@ pub(crate) mod tests {
             user_version(&reopened.conn).expect("user_version"),
             MIGRATIONS.len() as i64
         );
-        assert_eq!(reopened.list_conversations().expect("list"), vec![created]);
+        assert_eq!(reopened.pending_reminders().expect("list"), vec![created]);
     }
 
     #[test]
-    fn upgrading_a_tiered_database_wipes_memories_and_keeps_conversations() {
+    fn upgrading_a_tiered_database_wipes_memories_and_drops_the_chat_tables() {
         odyn_vec::register().expect("register sqlite-vec");
         let dir = TempDir::new("wipe");
         std::fs::create_dir_all(&dir.0).expect("create the directory");
@@ -756,12 +458,6 @@ pub(crate) mod tests {
                 conn.pragma_update(None, "user_version", index as i64 + 1)
                     .expect("set version");
             }
-            conn.execute(
-                "INSERT INTO conversations (title, model, provider, created_at, updated_at)
-                 VALUES ('kept', 'm', 'p', 5, 5)",
-                [],
-            )
-            .expect("insert conversation");
             conn.execute(
                 "INSERT INTO memories (tier, content, created_at, updated_at, tokens)
                  VALUES ('core', 'wiped', 5, 5, 2)",
@@ -775,7 +471,8 @@ pub(crate) mod tests {
             user_version(&storage.conn).expect("user_version"),
             MIGRATIONS.len() as i64
         );
-        assert_eq!(storage.list_conversations().expect("list")[0].title, "kept");
+        let tables = table_names(&storage);
+        assert!(!tables.contains(&"conversations".to_string()), "{tables:?}");
         assert_eq!(
             storage.count_memories().expect("count"),
             0,
@@ -822,274 +519,8 @@ pub(crate) mod tests {
             user_version(&storage.conn).expect("user_version"),
             MIGRATIONS.len() as i64
         );
-        assert!(table_names(&storage).contains(&"conversations".to_string()));
-        assert!(storage.list_conversations().expect("list").is_empty());
-    }
-
-    #[test]
-    fn conversation_and_message_round_trip() {
-        let dir = TempDir::new("crud");
-        let storage = Storage::open(dir.db()).expect("open");
-
-        let first = storage
-            .create_conversation("first", "ollama", "llama3.2:3b")
-            .expect("create first");
-        let second = storage
-            .create_conversation("second", "deepseek", "deepseek-chat")
-            .expect("create second");
-        touch(&storage.conn, first.id, 100).expect("backdate first");
-        touch(&storage.conn, second.id, 200).expect("backdate second");
-
-        let listed = storage.list_conversations().expect("list");
-        assert_eq!(
-            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![second.id, first.id]
-        );
-
-        storage
-            .rename_conversation(first.id, "renamed")
-            .expect("rename");
-        storage
-            .set_conversation_model(first.id, "deepseek", "deepseek-reasoner")
-            .expect("set model");
-        let reloaded = storage.list_conversations().expect("list after rename");
-        let updated = reloaded
-            .iter()
-            .find(|row| row.id == first.id)
-            .expect("renamed conversation");
-        assert_eq!(updated.title, "renamed");
-        assert_eq!(updated.provider, "deepseek");
-        assert_eq!(updated.model, "deepseek-reasoner");
-
-        let question = storage
-            .append_message(first.id, Role::User, "hi", None, None)
-            .expect("append user message");
-        let answer = storage
-            .append_message(first.id, Role::Assistant, "hello", Some(26), Some(7))
-            .expect("append assistant message");
-        assert_eq!(question.input_tokens, None);
-        assert_eq!(answer.input_tokens, Some(26));
-
-        let messages = storage.messages(first.id).expect("messages");
-        assert_eq!(messages, vec![question, answer]);
-        assert!(storage.messages(second.id).expect("messages").is_empty());
-
-        let listed = storage.list_conversations().expect("list after append");
-        assert_eq!(
-            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
-            vec![first.id, second.id]
-        );
-
-        storage.delete_conversation(first.id).expect("delete");
-        assert!(storage.messages(first.id).expect("messages").is_empty());
-        assert!(matches!(
-            storage.rename_conversation(first.id, "gone"),
-            Err(StorageError::ConversationNotFound(id)) if id == first.id
-        ));
-
-        storage.delete_conversation(second.id).expect("delete");
-        assert!(storage.list_conversations().expect("list").is_empty());
-    }
-
-    #[test]
-    fn the_latest_conversation_is_the_head_of_the_list() {
-        let dir = TempDir::new("latest");
-        let storage = Storage::open(dir.db()).expect("open");
-        assert!(storage.latest_conversation().expect("latest").is_none());
-
-        let older = storage
-            .create_conversation("older", "ollama", "llama3.2:3b")
-            .expect("create older");
-        let newer = storage
-            .create_conversation("newer", "deepseek", "deepseek-chat")
-            .expect("create newer");
-        touch(&storage.conn, older.id, 100).expect("backdate older");
-        touch(&storage.conn, newer.id, 200).expect("backdate newer");
-
-        let latest = storage.latest_conversation().expect("latest");
-        assert_eq!(
-            latest.map(|row| (row.provider, row.model)),
-            Some(("deepseek".to_string(), "deepseek-chat".to_string()))
-        );
-
-        storage
-            .append_message(older.id, Role::User, "hi", None, None)
-            .expect("append");
-        let latest = storage.latest_conversation().expect("latest after append");
-        assert_eq!(latest.map(|row| row.id), Some(older.id));
-    }
-
-    #[test]
-    fn a_turn_that_cannot_be_finished_stores_neither_of_its_messages() {
-        let dir = TempDir::new("turn");
-        let storage = Storage::open(dir.db()).expect("open");
-        let conversation = storage
-            .create_conversation("turn", "ollama", "llama3.2:3b")
-            .expect("create");
-
-        storage
-            .append_turn(
-                conversation.id,
-                "hi",
-                "hello",
-                Some(Usage {
-                    input_tokens: 26,
-                    output_tokens: 7,
-                }),
-                &[],
-            )
-            .expect("append a turn");
-        // A count SQLite cannot hold fails the answer, after its question row.
-        storage
-            .append_turn(
-                conversation.id,
-                "and again",
-                "never stored",
-                Some(Usage {
-                    input_tokens: u64::MAX,
-                    output_tokens: 0,
-                }),
-                &[],
-            )
-            .expect_err("an out-of-range token count must fail the turn");
-
-        let messages = storage.messages(conversation.id).expect("messages");
-        let stored: Vec<(Role, &str)> = messages
-            .iter()
-            .map(|message| (message.role, message.content.as_str()))
-            .collect();
-        assert_eq!(
-            stored,
-            vec![(Role::User, "hi"), (Role::Assistant, "hello")],
-            "the failed turn must have rolled back whole"
-        );
-        assert_eq!(messages[1].input_tokens, Some(26));
-    }
-
-    #[test]
-    fn a_second_connection_reads_while_a_write_is_open() {
-        let dir = TempDir::new("wal");
-        let writer = Storage::open(dir.db()).expect("open writer");
-        let committed = writer
-            .create_conversation("committed", "ollama", "llama3.2:3b")
-            .expect("create");
-
-        let tx = writer.conn.unchecked_transaction().expect("begin");
-        tx.execute(
-            "INSERT INTO conversations (title, model, provider, created_at, updated_at)
-             VALUES ('pending', 'm', 'p', 1, 1)",
-            [],
-        )
-        .expect("insert inside transaction");
-
-        let reader = Storage::open(dir.db()).expect("open reader");
-        assert_eq!(
-            reader.list_conversations().expect("read during write"),
-            vec![committed.clone()]
-        );
-
-        tx.commit().expect("commit");
-        let titles: Vec<String> = reader
-            .list_conversations()
-            .expect("read after commit")
-            .into_iter()
-            .map(|row| row.title)
-            .collect();
-        assert_eq!(titles, vec![committed.title, "pending".to_string()]);
-    }
-
-    #[test]
-    fn search_reads_message_contents_and_marks_the_match() {
-        let dir = TempDir::new("search");
-        let storage = Storage::open(dir.db()).expect("open");
-        let coffee = storage
-            .create_conversation("coffee talk", "ollama", "llama3.2:3b")
-            .expect("create");
-        let other = storage
-            .create_conversation("other", "ollama", "llama3.2:3b")
-            .expect("create");
-        storage
-            .append_message(coffee.id, Role::User, "how do I pull espresso?", None, None)
-            .expect("append");
-        storage
-            .append_message(other.id, Role::Assistant, "tokio spawns tasks", None, None)
-            .expect("append");
-
-        let hits = storage.search_messages("espresso", 40).expect("search");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].conversation_id, coffee.id);
-        assert_eq!(hits[0].title, "coffee talk");
-        assert_eq!(hits[0].role, Role::User);
-        assert!(hits[0]
-            .snippet
-            .contains(&format!("{SNIPPET_START}espresso{SNIPPET_END}")));
-
-        // As-you-type: the last term matches as a prefix.
-        assert_eq!(
-            storage.search_messages("espre", 40).expect("prefix").len(),
-            1
-        );
-        // Terms AND together across the message.
-        assert!(
-            storage
-                .search_messages("pull espresso", 40)
-                .expect("and")
-                .len()
-                == 1
-        );
-        assert!(storage
-            .search_messages("pull tokio", 40)
-            .expect("miss")
-            .is_empty());
-        // Operators and quotes are text, never syntax; blank finds nothing.
-        assert!(storage
-            .search_messages("\"espr AND (", 40)
-            .expect("quoted")
-            .is_empty());
-        assert!(storage
-            .search_messages("   ", 40)
-            .expect("blank")
-            .is_empty());
-
-        storage.delete_conversation(coffee.id).expect("delete");
-        assert!(storage
-            .search_messages("espresso", 40)
-            .expect("pruned")
-            .is_empty());
-    }
-
-    /// Messages stored before the search index existed are backfilled by the
-    /// migration that creates it.
-    #[test]
-    fn upgrading_backfills_the_search_index() {
-        odyn_vec::register().expect("register sqlite-vec");
-        let dir = TempDir::new("fts-upgrade");
-        std::fs::create_dir_all(&dir.0).expect("create the directory");
-        {
-            let conn = Connection::open(dir.db()).expect("open raw");
-            for (index, sql) in MIGRATIONS.iter().take(8).enumerate() {
-                conn.execute_batch(sql).expect("apply old schema");
-                conn.pragma_update(None, "user_version", index as i64 + 1)
-                    .expect("set version");
-            }
-            conn.execute(
-                "INSERT INTO conversations (title, model, provider, created_at, updated_at)
-                 VALUES ('old', 'm', 'p', 5, 5)",
-                [],
-            )
-            .expect("insert conversation");
-            conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, created_at)
-                 VALUES (1, 'assistant', 'rustls everywhere', 5)",
-                [],
-            )
-            .expect("insert message");
-        }
-
-        let storage = Storage::open(dir.db()).expect("open upgrades");
-        let hits = storage.search_messages("rustls", 40).expect("search");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].title, "old");
+        assert!(table_names(&storage).contains(&"memories".to_string()));
+        assert!(storage.pending_reminders().expect("list").is_empty());
     }
 
     #[test]
@@ -1101,9 +532,7 @@ pub(crate) mod tests {
         std::env::set_var(DB_PATH_ENV, &path);
 
         let storage = Storage::open_default().expect("open default");
-        let created = storage
-            .create_conversation("env", "ollama", "llama3.2:3b")
-            .expect("create");
+        let created = storage.add_reminder("call mum", 900, None).expect("add");
         drop(storage);
 
         match previous {
@@ -1113,7 +542,7 @@ pub(crate) mod tests {
 
         assert!(path.exists(), "database was not created at {path:?}");
         let reopened = Storage::open(&path).expect("reopen at the override path");
-        assert_eq!(reopened.list_conversations().expect("list"), vec![created]);
+        assert_eq!(reopened.pending_reminders().expect("list"), vec![created]);
     }
 
     #[test]
@@ -1132,31 +561,5 @@ pub(crate) mod tests {
                 role
             );
         }
-    }
-    #[test]
-    fn brevity_is_null_until_chosen_and_then_persists() {
-        let dir = TempDir::new("brevity");
-        let storage = Storage::open(dir.db()).expect("open");
-        let created = storage
-            .create_conversation("terse", "ollama", "llama3.2:3b")
-            .expect("create");
-        assert_eq!(created.brevity, None);
-
-        // The fallback chain: column first, then the config default.
-        let config = crate::config::StyleConfig::default();
-        assert_eq!(
-            created.brevity.unwrap_or(config.brevity),
-            crate::brevity::Brevity::Off
-        );
-
-        storage
-            .set_conversation_brevity(created.id, crate::brevity::Brevity::Ultra)
-            .expect("set");
-        let reloaded = storage.list_conversations().expect("list");
-        assert_eq!(reloaded[0].brevity, Some(crate::brevity::Brevity::Ultra));
-        assert!(matches!(
-            storage.set_conversation_brevity(9999, crate::brevity::Brevity::Lite),
-            Err(StorageError::ConversationNotFound(9999))
-        ));
     }
 }

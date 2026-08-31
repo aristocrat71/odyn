@@ -1474,48 +1474,6 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_turn_records_exactly_the_injections_that_built_its_context() {
-        let (_dir, storage) = seeded("record");
-        let context = build_context(
-            Some(&storage),
-            &config(6, 900),
-            &[],
-            &recalled("cern?"),
-            Brevity::Off,
-            at_axis_zero,
-        )
-        .expect("build");
-        let conversation = storage
-            .create_conversation("cern", "ollama", "llama3.2:3b")
-            .expect("create");
-        storage
-            .append_turn(
-                conversation.id,
-                "cern?",
-                "you visited in june",
-                None,
-                &context.memory_ids(),
-            )
-            .expect("save");
-
-        let user_message = storage.messages(conversation.id).expect("messages")[0].id;
-        let recorded: Vec<(Option<i64>, i64)> = storage
-            .injections(conversation.id)
-            .expect("injections")
-            .into_iter()
-            .map(|injection| (injection.message_id, injection.memory_id))
-            .collect();
-        assert_eq!(
-            recorded,
-            context
-                .memory_ids()
-                .iter()
-                .map(|memory| (Some(user_message), *memory))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     fn each_brevity_level_appends_exactly_its_style_section() {
         let (_dir, storage) = seeded("brevity");
         let base = build_context(
