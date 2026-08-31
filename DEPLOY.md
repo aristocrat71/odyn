@@ -116,7 +116,7 @@ extracts the section matching the tag and uses it as the release body, and fails
 the release outright if there isn't one. That body is also what `tauri-action`
 writes into `latest.json` as `notes`, so it's the text every installed copy of
 Odyn shows on its next update check. Write it for users, not for the commit log.
-The heading's date is never published, so `## [0.2.0] - Unreleased` is fine to
+The heading's date is never published, so `## [0.3.0] - Unreleased` is fine to
 merge and tidy up later.
 
 The updater compares the **semver in `crates/odyn-app/tauri.conf.json`** against
@@ -126,9 +126,9 @@ or with the tag:
 
 | File                             | Field                |
 | -------------------------------- | -------------------- |
-| `crates/odyn-app/tauri.conf.json` | `"version": "0.2.0"` |
-| `Cargo.toml`                     | `version = "0.2.0"` under `[workspace.package]` — every crate inherits it |
-| `package.json`                   | `"version": "0.2.0"` |
+| `crates/odyn-app/tauri.conf.json` | `"version": "0.3.0"` |
+| `Cargo.toml`                     | `version = "0.3.0"` under `[workspace.package]` — every crate inherits it |
+| `package.json`                   | `"version": "0.3.0"` |
 
 There's nothing to bump for the install one-liner. It tracks `main` rather than a
 tag, so the published command is identical every release and the script resolves
@@ -144,7 +144,7 @@ Then sync `Cargo.lock` (it records each crate's version) and land it:
 ```sh
 cargo check --workspace   # updates Cargo.lock
 git add Cargo.toml Cargo.lock crates/odyn-app/tauri.conf.json package.json CHANGELOG.md
-git commit -m "release: v0.2.0"
+git commit -m "release: v0.3.0"
 git push origin main
 ```
 
@@ -154,8 +154,8 @@ Tag the bump commit **after** it's on `main`, then push the tag. **This is what
 triggers the build.**
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 ### 4. Watch the build
@@ -176,8 +176,8 @@ updater bundle + `.sig`, and `latest.json`.
 ### 5. Verify
 
 ```sh
-ODYN_VERSION=v0.2.0 bash <(curl -fsSL --connect-timeout 10 https://raw.githubusercontent.com/aristocrat71/odyn/main/install.sh)
-gh attestation verify ~/Downloads/odyn_0.2.0_aarch64.dmg --repo aristocrat71/odyn
+ODYN_VERSION=v0.3.0 bash <(curl -fsSL --connect-timeout 10 https://raw.githubusercontent.com/aristocrat71/odyn/main/install.sh)
+gh attestation verify ~/Downloads/odyn_0.3.0_aarch64.dmg --repo aristocrat71/odyn
 ```
 
 ---
@@ -255,5 +255,5 @@ If a release is wrong, **cut a new patch version** rather than moving the tag.
 Installs that already fetched `latest.json` will have cached the old one, and a
 moved tag makes the published `.sha256` and the attestation disagree with what's
 actually on the release page. If you must, delete the release and its tag
-(`gh release delete v0.2.0 --cleanup-tag`) before anyone installs it, then
+(`gh release delete v0.3.0 --cleanup-tag`) before anyone installs it, then
 re-tag.
