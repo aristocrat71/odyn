@@ -18,27 +18,11 @@ export const isView = (name: string): name is View =>
 
 export type PickerMenu = "provider" | "model" | null;
 
-// One piece of a streaming reply, in arrival order: the model's own text and
-// the agent's calls, outputs and approvals interleave as they happened.
-export type AgentItem =
-  | { kind: "text"; text: string }
-  | { kind: "call"; tool: string; detail: string }
-  | { kind: "out"; text: string; truncated: boolean }
-  | {
-      kind: "approval";
-      approvalId: number;
-      command: string;
-      resolved: api.ApprovalVerdict | null;
-    };
-
 export type Stream = {
   conversation: number;
   requestId: number | null;
   prompt: string;
-  // The reply as it streams; the tail text item is what deltas extend.
-  agent: AgentItem[];
-  // The agent round counter; null until the first tool round.
-  rounds: { used: number; budget: number } | null;
+  text: string;
   error: string;
   // Note slugs the backend injected for this reply.
   used: string[];
@@ -73,7 +57,6 @@ export const state = {
     groups: [] as api.ProviderGroup[],
   },
   brevityMenu: false,
-  workspacePopover: false,
   status: null as api.Status | null,
   hotkeyError: null as string | null,
   ledger: {
@@ -225,49 +208,11 @@ let timer: number | null = null;
 function shut(): void {
   state.picker.open = null;
   state.brevityMenu = false;
-  state.workspacePopover = false;
   if (timer !== null) {
     clearInterval(timer);
     timer = null;
   }
 }
-
-export function toggleWorkspacePopover(): void {
-  state.workspacePopover = !state.workspacePopover;
-  render();
-}
-
-export function closeWorkspacePopover(): void {
-  if (!state.workspacePopover) return;
-  state.workspacePopover = false;
-  render();
-}
-
-// An empty path clears the workspace; the backend validates and canonicalizes.
-export const commitWorkspace = (path: string): Promise<void> =>
-  guard(async () => {
-    const id = state.selected;
-    if (id === null) return;
-    const updated = await api.setWorkspace(id, path);
-    const row = state.conversations.find((candidate) => candidate.id === id);
-    if (row !== undefined) row.workspace = updated.workspace;
-    state.workspacePopover = false;
-  });
-
-export const resolveApproval = (
-  approvalId: number,
-  verdict: api.ApprovalVerdict,
-): Promise<void> =>
-  guard(async () => {
-    await api.approveCommand(approvalId, verdict);
-    const stream = state.stream;
-    if (stream === null) return;
-    for (const item of stream.agent) {
-      if (item.kind === "approval" && item.approvalId === approvalId) {
-        item.resolved = verdict;
-      }
-    }
-  });
 
 export function toggleBrevityMenu(): void {
   state.brevityMenu = !state.brevityMenu;
@@ -325,14 +270,13 @@ async function start(prompt: string, retry: boolean): Promise<void> {
   if (conversation === null) return;
   // A retry answers a question that is already stored, and already shown.
   if (!retry) {
-    state.messages.push({ id: -1, role: "user", content: prompt, used: [], commands: [] });
+    state.messages.push({ id: -1, role: "user", content: prompt, used: [] });
   }
   const stream: Stream = {
     conversation,
     requestId: null,
     prompt,
-    agent: [],
-    rounds: null,
+    text: "",
     error: "",
     used: [],
     saved: [],
@@ -376,40 +320,8 @@ function apply(event: api.ChatEvent, stream: Stream): void {
     return;
   }
   if (event.kind === "delta") {
-    const last = stream.agent[stream.agent.length - 1];
-    // Extending the tail text patches one node; a new segment needs a redraw.
-    if (last !== undefined && last.kind === "text") {
-      last.text += event.text;
-      renderStream();
-    } else {
-      stream.agent.push({ kind: "text", text: event.text });
-      render();
-    }
-    return;
-  }
-  if (event.kind === "agentcall") {
-    stream.agent.push({ kind: "call", tool: event.tool, detail: event.detail });
-    render();
-    return;
-  }
-  if (event.kind === "agentout") {
-    stream.agent.push({ kind: "out", text: event.text, truncated: event.truncated });
-    render();
-    return;
-  }
-  if (event.kind === "approval") {
-    stream.agent.push({
-      kind: "approval",
-      approvalId: event.approval_id,
-      command: event.command,
-      resolved: null,
-    });
-    render();
-    return;
-  }
-  if (event.kind === "round") {
-    stream.rounds = { used: event.used, budget: event.budget };
-    render();
+    stream.text += event.text;
+    renderStream();
     return;
   }
   if (event.kind === "saved") {
