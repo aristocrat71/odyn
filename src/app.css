@@ -133,122 +133,15 @@ button {
   color: var(--faint);
 }
 
-.crumbs {
-  margin-top: 2px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--faint);
-}
-
 /* DESIGN.md §4. The trigger is plain text; the menu floats on shadow. */
 
-.picker-wrap {
-  position: relative;
-  flex: none;
-}
-
-.picker {
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--muted);
-  transition: color 150ms ease;
-}
-
-.picker:hover {
-  color: var(--ink);
-}
-
-.picker-provider {
-  color: var(--faint);
-}
-
 /* Opens upward: the triggers sit in the composer, at the foot of the window. */
-.picker-menu {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 0;
-  z-index: 1;
-  width: 280px;
-  max-height: 60vh;
-  padding: 12px 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--faint) transparent;
-  border-radius: var(--radius-menu);
-  background: var(--bg-soft);
-  box-shadow: var(--shadow-menu), var(--ring);
-}
-
-.picker-loading {
-  padding: 0 16px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--dim);
-}
-
 /* Provider names are short; the models they serve are not. */
 .provider-menu {
   width: 190px;
 }
 
-.picker-local {
-  flex: none;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  color: var(--epi);
-}
-
-.picker-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  padding: 3px 16px;
-  font-size: 13px;
-  color: var(--muted);
-  transition: color 150ms ease;
-}
-
-.picker-item:hover:not(:disabled) {
-  color: var(--ink);
-}
-
 /* Inside the edge: a 2px offset would be clipped by the menu's own scroll. */
-.picker-item:focus-visible {
-  outline: 2px solid var(--epi);
-  outline-offset: -2px;
-}
-
-.picker-item:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.picker-mark {
-  flex: none;
-  width: 9px;
-  font-family: var(--mono);
-  font-size: 9px;
-  color: var(--epi);
-}
-
-.picker-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.picker-meta {
-  flex: none;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--faint);
-}
-
 .error {
   margin-top: 18px;
   font-family: var(--mono);
@@ -271,41 +164,6 @@ button {
 }
 
 /* DESIGN.md §5. No avatars, no bubbles, no containers: a label and text. */
-
-.chat {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-  max-width: 660px;
-}
-
-.transcript {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-height: 0;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--faint) transparent;
-}
-
-.message {
-  flex: none;
-}
-
-.message + .message {
-  margin-top: 30px;
-}
-
-.speaker {
-  font-family: var(--mono);
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--dim);
-}
 
 .message.assistant .speaker {
   color: var(--epi);
@@ -351,10 +209,6 @@ button {
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--ink);
-}
-
-.interrupted {
-  color: var(--dim);
 }
 
 /* The wait before the first token: one quiet line, three breathing dots.
@@ -448,112 +302,12 @@ button {
   }
 }
 
-.stream-error {
-  margin-top: 10px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--danger);
-}
-
-.retry {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--epi);
-}
-
 /* DESIGN.md §5.2. The app's only elevated surface. */
 
 /* Spotlight's surface: ledger, field and footer in one box. */
-.composer {
-  display: flex;
-  flex-direction: column;
-  margin-top: 22px;
-  border-radius: var(--radius-composer);
-  background: var(--bg-soft);
-  box-shadow: var(--ring);
-  transition: box-shadow 200ms ease;
-}
-
-.composer:focus-within {
-  box-shadow: 0 0 0 1px var(--epi);
-}
-
-.composer-field {
-  display: flex;
-  align-items: flex-end;
-  gap: 12px;
-  padding: 10px 14px 12px;
-}
-
 /* The footer strip: what the next message is sent with, then the keys. */
-.composer-foot {
-  display: flex;
-  align-items: baseline;
-  gap: 20px;
-  padding: 0 14px 11px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--faint);
-}
-
-.composer-picks {
-  display: flex;
-  align-items: baseline;
-  gap: 20px;
-}
-
-.composer-foot .picker {
-  font-size: 10.5px;
-}
-
-.composer-hints {
-  margin-left: auto;
-  white-space: nowrap;
-}
-
 /* The wrap carries the typography, so the draft and the ghost over it wrap the
    same way, line for line. */
-.composer-ask {
-  flex: 1;
-  min-width: 0;
-  line-height: 23px;
-}
-
-.composer-input {
-  flex: 1;
-  min-width: 0;
-  /* One row, growing to six. */
-  max-height: 138px;
-  padding: 0;
-  border: 0;
-  outline: none;
-  resize: none;
-  background: none;
-  font: inherit;
-  color: var(--ink);
-  caret-color: var(--epi);
-}
-
-.composer-input::placeholder {
-  color: var(--dim);
-}
-
-.send {
-  flex: none;
-  font-family: var(--mono);
-  font-size: 14px;
-  line-height: 23px;
-  color: var(--epi);
-}
-
-.hint {
-  margin-top: 10px;
-  text-align: center;
-  font-family: var(--mono);
-  font-size: 9.5px;
-  color: var(--faint);
-}
-
 /* DESIGN.md §5. The memory trace under an answer that used memories. */
 
 .trace {
@@ -582,37 +336,6 @@ button {
 }
 
 /* DESIGN.md §5.1. The context ledger: a status line, not a boxed widget. */
-
-.ledger {
-  display: flex;
-  align-items: baseline;
-  gap: 16px;
-  padding: 11px 14px 0;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  white-space: nowrap;
-}
-
-.ledger-label {
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  color: var(--faint);
-}
-
-.ledger-note {
-  color: var(--dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ledger-reading {
-  color: var(--epi);
-}
-
-.ledger-total {
-  margin-left: auto;
-  color: var(--faint);
-}
 
 /* DESIGN.md §6. Brain view: one open column of notes, no panes. */
 
@@ -1107,11 +830,6 @@ g.labeled .gnode-epi text {
 
 .brevity-trigger.off {
   opacity: 0.6;
-}
-
-.brevity-menu {
-  width: 230px;
-  padding: 8px 0;
 }
 
 /* DESIGN.md §9. Under 900px the sidebar leaves the grid and comes back as a

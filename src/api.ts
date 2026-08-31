@@ -1,122 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
 export type BrevityLevel = "off" | "lite" | "full" | "ultra";
-
-export type Conversation = {
-  id: number;
-  title: string;
-  provider: string;
-  model: string;
-  // Unix epoch seconds.
-  updated_at: number;
-  // The conversation's explicit choice; null follows the [style] default.
-  brevity: BrevityLevel | null;
-};
-
-export type ConversationView = Conversation & {
-  turns: number;
-  tokens: number | null;
-};
-
-export type Message = {
-  id: number;
-  role: "system" | "user" | "assistant";
-  content: string;
-  // Assistant rows: the slugs injected for the question this answers.
-  used: string[];
-};
-
-export type Usage = { input_tokens: number; output_tokens: number };
-
-export type ChatEvent = { request_id: number } & (
-  | { kind: "context"; used: string[]; tokens: number }
-  | { kind: "delta"; text: string }
-  | { kind: "saved"; slug: string }
-  | { kind: "updated"; slug: string }
-  | { kind: "deleted"; slug: string }
-  | { kind: "linked"; from: string; to: string }
-  | { kind: "unlinked"; from: string; to: string }
-  | { kind: "reminded"; text: string; due_at: number }
-  | { kind: "done"; usage: Usage | null; interrupted: boolean }
-  | { kind: "error"; message: string }
-);
-
-export type LedgerItem = { id: string; tokens: number; content: string };
-
-export type ContextPreview = {
-  // False when the draft has no /brain mention: the send would inject nothing.
-  active: boolean;
-  memories: LedgerItem[];
-  tokens: number;
-  cap_tokens: number;
-  system_message: string;
-};
-
-export type Model = {
-  name: string;
-  // On-disk size, which only Ollama reports.
-  size_bytes: number | null;
-  // Whether the model can call tools; null when nothing reported it.
-  tools: boolean | null;
-};
-
-export type ProviderGroup = {
-  name: string;
-  kind: "openai_compat" | "ollama";
-  reachable: boolean;
-  models: Model[];
-};
-
-export type Status = {
-  brevity_default: BrevityLevel;
-};
-
-export const listConversations = (): Promise<Conversation[]> =>
-  invoke("list_conversations");
-
-export const createConversation = (): Promise<Conversation> =>
-  invoke("create_conversation");
-
-export const renameConversation = (id: number, title: string): Promise<void> =>
-  invoke("rename_conversation", { id, title });
-
-export const deleteConversation = (id: number): Promise<void> =>
-  invoke("delete_conversation", { id });
-
-export const setConversationBrevity = (
-  conversationId: number,
-  brevity: BrevityLevel,
-): Promise<void> =>
-  invoke("set_conversation_brevity", { conversationId, brevity });
-
-export const setConversationModel = (
-  conversationId: number,
-  provider: string,
-  model: string,
-): Promise<void> =>
-  invoke("set_conversation_model", { conversationId, provider, model });
-
-export const getConversation = (id: number): Promise<ConversationView> =>
-  invoke("get_conversation", { id });
-
-export const messages = (conversationId: number): Promise<Message[]> =>
-  invoke("messages", { conversationId });
-
-export const sendMessage = (
-  conversationId: number,
-  text: string,
-  retry: boolean,
-): Promise<number> => invoke("send_message", { conversationId, text, retry });
-
-export const cancelMessage = (requestId: number): Promise<void> =>
-  invoke("cancel_message", { requestId });
-
-export const contextPreview = (
-  conversationId: number | null,
-  draft: string,
-): Promise<ContextPreview> =>
-  invoke("context_preview", { conversationId, draft });
 
 export type MemorySort = "recent" | "hits" | "created";
 
@@ -311,16 +195,8 @@ export const setDefaultProvider = (name: string): Promise<ProviderEntry[]> =>
 
 export const reloadConfig = (): Promise<void> => invoke("reload_config");
 
-export const onChatEvent = (handle: (event: ChatEvent) => void): void => {
-  void listen<ChatEvent>("chat-event", (event) => handle(event.payload));
-};
-
-export const status = (): Promise<Status> => invoke("status");
-
 export const spotlightStatus = (): Promise<string | null> =>
   invoke("spotlight_status");
 
 export const spotlightToggle = (): Promise<void> => invoke("spotlight_toggle");
 
-export const providersOverview = (): Promise<ProviderGroup[]> =>
-  invoke("providers_overview");

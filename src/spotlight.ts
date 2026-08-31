@@ -401,14 +401,6 @@ async function saveKey(key: string): Promise<void> {
   input.focus();
 }
 
-async function promote(): Promise<void> {
-  try {
-    await invoke<number>("spotlight_promote");
-  } catch (err) {
-    fail(String(err));
-  }
-}
-
 // Written to `[spotlight]` in odyn.toml: it survives restarts, and the CLI too.
 async function pick(provider: string, model: string): Promise<void> {
   if (model === "") {
@@ -462,11 +454,6 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const mod = e.metaKey || e.ctrlKey;
-  if (e.key === "Enter" && mod) {
-    e.preventDefault();
-    void promote();
-    return;
-  }
   if (e.key === "Backspace" && mod) {
     e.preventDefault();
     clearScreen();
@@ -547,7 +534,7 @@ void listen<Due[]>("reminder-due", (event) => {
 });
 
 // Hiding keeps the exchange, so a re-summon refreshes the target and leaves
-// whatever is on screen alone. Esc and promotion are what empty the panel.
+// whatever is on screen alone. Esc is what empties the panel.
 void listen("spotlight-show", () => {
   void loadTarget();
   if (!input.disabled) input.focus();

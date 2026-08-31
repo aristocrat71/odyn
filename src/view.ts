@@ -1,6 +1,4 @@
-import type { Conversation } from "./api";
 import { renderBrain } from "./brain";
-import { renderChat } from "./chat";
 import { renderConfig } from "./config";
 import { el } from "./dom";
 import { renderProviders } from "./providers";
@@ -18,43 +16,21 @@ export function renderView(root: HTMLElement): void {
 function topbar(): HTMLElement {
   const bar = el("header", "topbar");
   const left = el("div", "topbar-left");
-  const current = selected();
-
-  const head = el(
-    "h1",
-    "title",
-    state.view === "chat" && current ? current.title : state.view,
-  );
+  const head = el("h1", "title", state.view);
   const count = state.brain.overview?.count;
   if (state.view === "brain" && count !== undefined) {
     head.append(" ", el("span", "title-note", `${count} memories`));
   }
   left.append(head);
-  const crumbs = crumbLine(current);
-  if (crumbs !== "") left.append(el("div", "crumbs", crumbs));
-
   bar.append(left);
   return bar;
 }
 
 function body(): HTMLElement {
   const view = el("section", "view");
-  if (state.view === "chat") view.append(renderChat());
   if (state.view === "brain") view.append(renderBrain());
   if (state.view === "reminders") view.append(renderReminders());
   if (state.view === "providers") view.append(renderProviders());
   if (state.view === "config") view.append(renderConfig());
   return view;
-}
-
-function selected(): Conversation | undefined {
-  return state.conversations.find((row) => row.id === state.selected);
-}
-
-// Token counts come from the provider, and not every provider reports them.
-function crumbLine(current: Conversation | undefined): string {
-  if (state.view !== "chat" || current === undefined || state.turns === 0) return "";
-  const turns = state.turns === 1 ? "1 turn" : `${state.turns} turns`;
-  if (state.tokens === null) return turns;
-  return `${turns} · ${(state.tokens / 1000).toFixed(1)}k tokens`;
 }

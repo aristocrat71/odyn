@@ -1,66 +1,15 @@
 import * as api from "./api";
-import { dueLabel } from "./due";
 
-// `chat` stays a valid view for spotlight-promoted conversations, but the GUI
-// no longer navigates to it — chatting lives in the TUI now.
-export const VIEWS = [
-  "chat",
-  "brain",
-  "reminders",
-  "providers",
-  "config",
-] as const;
+export const VIEWS = ["brain", "reminders", "providers", "config"] as const;
 
 export type View = (typeof VIEWS)[number];
 
 export const isView = (name: string): name is View =>
   (VIEWS as readonly string[]).includes(name);
 
-export type PickerMenu = "provider" | "model" | null;
-
-export type Stream = {
-  conversation: number;
-  requestId: number | null;
-  prompt: string;
-  text: string;
-  error: string;
-  // Note slugs the backend injected for this reply.
-  used: string[];
-  saved: string[];
-  updated: string[];
-  deleted: string[];
-  // `from → to` pairs the model connected this reply.
-  linked: string[];
-  // `from → to` pairs it disconnected.
-  unlinked: string[];
-  // Reminders set this reply, already rendered as local time.
-  reminders: string[];
-};
-
-// The backend's refusal when a conversation has no model; picking one clears it.
-const NO_MODEL = "no model set · pick one";
-const PICKER_REFRESH_MS = 30_000;
-
 export const state = {
   view: "brain" as View,
-  conversations: [] as api.Conversation[],
-  selected: null as number | null,
-  messages: [] as api.Message[],
-  turns: 0,
-  tokens: null as number | null,
-  stream: null as Stream | null,
-  picker: {
-    open: null as PickerMenu,
-    loading: false,
-    groups: [] as api.ProviderGroup[],
-  },
-  brevityMenu: false,
-  status: null as api.Status | null,
   hotkeyError: null as string | null,
-  ledger: {
-    preview: null as api.ContextPreview | null,
-    error: null as string | null,
-  },
   brain: {
     mode: "list" as "list" | "graph",
     overview: null as api.BrainOverview | null,
@@ -99,281 +48,24 @@ export const state = {
 };
 
 let render = (): void => {};
-let renderStream = (): void => {};
 
 export function onChange(fn: () => void): void {
   render = fn;
 }
 
-// Deltas redraw one message, not the app, so they get their own hook.
-export function onStream(fn: () => void): void {
-  renderStream = fn;
-}
-
-export const load = (): Promise<void> =>
-  guard(async () => {
-    state.conversations = await api.listConversations();
-    const first = state.conversations[0];
-    if (state.selected === null && first !== undefined) await open(first.id);
-  });
-
 export const refreshStatus = (): Promise<void> =>
   guard(async () => {
-    state.status = await api.status();
     state.hotkeyError = await api.spotlightStatus();
-  });
-
-export const selectConversation = (id: number): Promise<void> =>
-  guard(async () => {
-    await open(id);
-    state.view = "chat";
-  });
-
-export const newConversation = (): Promise<void> =>
-  guard(async () => {
-    const created = await api.createConversation();
-    state.conversations.unshift(created);
-    await open(created.id);
-    state.view = "chat";
-  });
-
-export const deleteConversation = (id: number): Promise<void> =>
-  guard(async () => {
-    await api.deleteConversation(id);
-    state.conversations = state.conversations.filter((row) => row.id !== id);
-    if (state.selected === id) {
-      state.selected = null;
-      state.messages = [];
-      state.turns = 0;
-      state.tokens = null;
-    }
   });
 
 export function setView(view: View): void {
   state.view = view;
-  shut();
   if (view === "brain") void loadBrain();
   // Re-read on every open, so an edit made outside the app is on screen.
   if (view === "config") void loadConfig();
   if (view === "reminders") void loadReminders();
   if (view === "providers") void loadProvidersConfig();
   render();
-}
-
-export function togglePicker(which: PickerMenu): void {
-  if (state.picker.open === which) {
-    closePicker();
-    return;
-  }
-  // Only the first open probes: provider → model is the same listing twice.
-  const first = state.picker.open === null;
-  state.picker.open = which;
-  if (first) {
-    // Reachability from a minute ago is not a fact: nothing stale is shown.
-    state.picker.loading = true;
-    state.picker.groups = [];
-    void loadProviders();
-    timer = window.setInterval(() => void loadProviders(), PICKER_REFRESH_MS);
-  }
-  render();
-}
-
-export function closePicker(): void {
-  if (state.picker.open === null) return;
-  shut();
-  render();
-}
-
-export const chooseModel = (provider: string, model: string): Promise<void> =>
-  guard(async () => {
-    const id = state.selected;
-    if (id === null) return;
-    await api.setConversationModel(id, provider, model);
-    const row = state.conversations.find((candidate) => candidate.id === id);
-    if (row !== undefined) {
-      row.provider = provider;
-      row.model = model;
-    }
-    const stream = state.stream;
-    if (stream !== null && stream.conversation === id && stream.error === NO_MODEL) {
-      state.stream = null;
-    }
-    shut();
-  });
-
-let timer: number | null = null;
-
-function shut(): void {
-  state.picker.open = null;
-  state.brevityMenu = false;
-  if (timer !== null) {
-    clearInterval(timer);
-    timer = null;
-  }
-}
-
-export function toggleBrevityMenu(): void {
-  state.brevityMenu = !state.brevityMenu;
-  render();
-}
-
-export function closeBrevityMenu(): void {
-  if (!state.brevityMenu) return;
-  state.brevityMenu = false;
-  render();
-}
-
-/// Writes the column immediately; the level applies from the next send on.
-export const chooseBrevity = (level: api.BrevityLevel): Promise<void> =>
-  guard(async () => {
-    const id = state.selected;
-    if (id === null) return;
-    await api.setConversationBrevity(id, level);
-    const row = state.conversations.find((candidate) => candidate.id === id);
-    if (row !== undefined) row.brevity = level;
-    state.brevityMenu = false;
-  });
-
-// A refresh while the menu is open replaces the list without blanking it.
-const loadProviders = (): Promise<void> =>
-  guard(async () => {
-    const groups = await api.providersOverview().finally(() => {
-      state.picker.loading = false;
-    });
-    if (state.picker.open !== null) state.picker.groups = groups;
-  });
-
-export function watchStream(): void {
-  api.onChatEvent(receive);
-}
-
-export const streaming = (): boolean =>
-  state.stream !== null && state.stream.error === "";
-
-export const send = (prompt: string): Promise<void> => start(prompt, false);
-
-export function resend(): void {
-  const stream = state.stream;
-  if (stream !== null) void start(stream.prompt, true);
-}
-
-export function cancelStream(): void {
-  const stream = state.stream;
-  if (!streaming() || stream === null || stream.requestId === null) return;
-  void api.cancelMessage(stream.requestId);
-}
-
-async function start(prompt: string, retry: boolean): Promise<void> {
-  const conversation = state.selected;
-  if (conversation === null) return;
-  // A retry answers a question that is already stored, and already shown.
-  if (!retry) {
-    state.messages.push({ id: -1, role: "user", content: prompt, used: [] });
-  }
-  const stream: Stream = {
-    conversation,
-    requestId: null,
-    prompt,
-    text: "",
-    error: "",
-    used: [],
-    saved: [],
-    updated: [],
-    deleted: [],
-    linked: [],
-    unlinked: [],
-    reminders: [],
-  };
-  state.stream = stream;
-  render();
-  await guard(async () => {
-    const requestId = await api.sendMessage(conversation, prompt, retry);
-    if (state.stream !== stream) return;
-    stream.requestId = requestId;
-    const queued = pending.filter((event) => event.request_id === requestId);
-    pending = [];
-    for (const event of queued) apply(event, stream);
-  });
-}
-
-// An event can arrive before the id it belongs to gets back from the backend,
-// so anything unmatched waits for that id instead of being dropped.
-let pending: api.ChatEvent[] = [];
-
-function receive(event: api.ChatEvent): void {
-  const stream = state.stream;
-  if (stream === null) return;
-  if (stream.requestId === null) {
-    pending.push(event);
-    return;
-  }
-  if (event.request_id === stream.requestId) apply(event, stream);
-}
-
-function apply(event: api.ChatEvent, stream: Stream): void {
-  if (event.kind === "context") {
-    stream.used = event.used;
-    render();
-    return;
-  }
-  if (event.kind === "delta") {
-    stream.text += event.text;
-    renderStream();
-    return;
-  }
-  if (event.kind === "saved") {
-    stream.saved.push(event.slug);
-    render();
-    return;
-  }
-  if (event.kind === "updated") {
-    stream.updated.push(event.slug);
-    render();
-    return;
-  }
-  if (event.kind === "deleted") {
-    stream.deleted.push(event.slug);
-    render();
-    return;
-  }
-  if (event.kind === "linked") {
-    stream.linked.push(`${event.from} → ${event.to}`);
-    render();
-    return;
-  }
-  if (event.kind === "unlinked") {
-    stream.unlinked.push(`${event.from} ⇢ ${event.to}`);
-    render();
-    return;
-  }
-  if (event.kind === "reminded") {
-    stream.reminders.push(`${event.text} · ${dueLabel(event.due_at)}`);
-    render();
-    return;
-  }
-  // A failed stream keeps its partial text on screen, and its retry link.
-  if (event.kind === "error") {
-    stream.error = event.message;
-    render();
-    return;
-  }
-  state.stream = null;
-  void guard(async () => {
-    state.conversations = await api.listConversations();
-    // The stored turn is the truth now: interrupted marker and token counts.
-    if (state.selected === stream.conversation) await open(stream.conversation);
-  });
-}
-
-async function open(id: number): Promise<void> {
-  const opened = await api.getConversation(id);
-  state.selected = opened.id;
-  state.turns = opened.turns;
-  state.tokens = opened.tokens;
-  state.messages = await api.messages(id);
-  // The first message titles a conversation, so the sidebar learns it here.
-  const row = state.conversations.find((candidate) => candidate.id === id);
-  if (row !== undefined) row.title = opened.title;
 }
 
 const BRAIN_PAGE = 50;
@@ -618,34 +310,6 @@ export const chooseDefaultProvider = (name: string): Promise<void> =>
 
 export const openConfigInEditor = (): Promise<void> =>
   guard(() => api.openConfig());
-
-const PREVIEW_DEBOUNCE_MS = 400;
-let previewTimer: number | null = null;
-let previewSeq = 0;
-
-// ≥400ms after the last keystroke, and never applied out of order.
-export function schedulePreview(draft: string): void {
-  if (previewTimer !== null) clearTimeout(previewTimer);
-  previewTimer = window.setTimeout(() => {
-    previewTimer = null;
-    void refreshPreview(draft);
-  }, PREVIEW_DEBOUNCE_MS);
-}
-
-export async function refreshPreview(draft: string): Promise<void> {
-  if (state.selected === null) return;
-  const seq = ++previewSeq;
-  try {
-    const preview = await api.contextPreview(state.selected, draft);
-    if (seq !== previewSeq) return;
-    state.ledger.preview = preview;
-    state.ledger.error = null;
-  } catch (err) {
-    if (seq !== previewSeq) return;
-    state.ledger.error = typeof err === "string" ? err : String(err);
-  }
-  render();
-}
 
 // Every failure the backend reports ends up on one inline line, never a dialog.
 async function guard(run: () => Promise<void>): Promise<void> {
