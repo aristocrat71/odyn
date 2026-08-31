@@ -28,7 +28,6 @@ type SpotEvent =
   | { request_id: number; kind: "linked"; from: string; to: string }
   | { request_id: number; kind: "unlinked"; from: string; to: string }
   | { request_id: number; kind: "reminded"; text: string; due_at: number }
-  | { request_id: number; kind: "scheduled"; prompt: string; next_at: number }
   | { request_id: number; kind: "done" }
   // `detail` present means `message` stands in for the provider's own words.
   | { request_id: number; kind: "error"; message: string; detail?: string };
@@ -62,8 +61,7 @@ const modelDrop = dropdown({
 });
 picks.append(providerDrop.root, modelDrop.root);
 
-// A row with a conversation_id is a finished scheduled run; clicking opens it.
-type Due = { text: string; due_at: number; conversation_id: number | null };
+type Due = { text: string; due_at: number };
 
 const chime = new Audio("/odyn-notif.wav");
 chime.loop = true;
@@ -83,7 +81,6 @@ const COMMANDS: Command[] = [
   { cmd: "/link-memory", view: null, hint: "connect two memories" },
   { cmd: "/unlink-memory", view: null, hint: "disconnect two memories" },
   { cmd: "/reminder", view: null, hint: "set a reminder" },
-  { cmd: "/schedule", view: null, hint: "run a prompt on a schedule" },
 ];
 
 let current: number | null = null;
@@ -96,7 +93,6 @@ let deleted: string[] = [];
 let linked: string[] = [];
 let unlinked: string[] = [];
 let reminders: string[] = [];
-let scheduled: string[] = [];
 let dueNow: Due[] = [];
 let target: SpotTarget | null = null;
 // While true, the ask field is the key intake: masked, saved on ⏎.
@@ -208,9 +204,6 @@ function draw(): void {
   if (!streaming && reminders.length > 0) {
     results.append(trace("◔", "reminder", reminders, "reminded"));
   }
-  if (!streaming && scheduled.length > 0) {
-    results.append(trace("⟳", "scheduled", scheduled, "scheduled"));
-  }
   // No auto-scroll: a growing answer must not yank the panel while reading.
 }
 
@@ -228,29 +221,18 @@ function drawDue(): void {
   input.blur();
   void chime.play().catch(() => {});
   for (const due of dueNow) {
-    const run = due.conversation_id;
-    const row = el(run === null ? "div" : "button", "spot-due-row");
+    const row = el("div", "spot-due-row");
     row.append(
-      el("span", "spot-due-mark", run === null ? "◔" : "⟳"),
+      el("span", "spot-due-mark", "◔"),
       el("span", "spot-due-text", due.text),
       el("span", "spot-due-at", dueLabel(due.due_at)),
     );
-    if (run !== null) {
-      row.classList.add("run");
-      row.title = "open the conversation";
-      row.addEventListener("click", () => void openRun(run));
-    }
     dueBox.append(row);
   }
   const dismiss = el("button", "spot-due-clear", "dismiss");
   dismiss.addEventListener("click", clearDue);
   dueBox.append(dismiss);
   dueBox.hidden = false;
-}
-
-async function openRun(id: number): Promise<void> {
-  clearDue();
-  await invoke("spotlight_open_conversation", { id }).catch(() => {});
 }
 
 function clearDue(): void {
@@ -288,7 +270,6 @@ function clearScreen(): void {
   linked = [];
   unlinked = [];
   reminders = [];
-  scheduled = [];
   clearDue();
   forgetTraces();
   commandMode = false;
@@ -395,7 +376,6 @@ async function ask(): Promise<void> {
   linked = [];
   unlinked = [];
   reminders = [];
-  scheduled = [];
   clearDue();
   forgetTraces();
   ledger.hidden = true;
@@ -553,8 +533,6 @@ void listen<SpotEvent>("spotlight-event", (event) => {
     unlinked.push(`${data.from} ⇢ ${data.to}`);
   } else if (data.kind === "reminded") {
     reminders.push(`${data.text} · ${dueLabel(data.due_at)}`);
-  } else if (data.kind === "scheduled") {
-    scheduled.push(`${data.prompt} · ${dueLabel(data.next_at)}`);
   } else if (data.kind === "done") {
     streaming = false;
     draw();

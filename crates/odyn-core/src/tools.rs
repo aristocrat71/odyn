@@ -3,8 +3,8 @@
 //! Tools are offered only when the message asked for them: `/memory` earns
 //! `save_memory`, `/update-memory` earns `update_memory`, `/delete-memory`
 //! earns `delete_memory`, `/link-memory` earns `link_memory`,
-//! `/unlink-memory` earns `unlink_memory`, `/reminder` earns `set_reminder`,
-//! and `/schedule` earns `schedule_ask`. One tool per trigger — small models
+//! `/unlink-memory` earns `unlink_memory` and `/reminder` earns
+//! `set_reminder`. One tool per trigger — small models
 //! misroute a choice between tools, so the user makes it. The index is not
 //! touched here — the folder is the truth, and the next recall or preview
 //! syncs it.
@@ -26,19 +26,15 @@ pub const DELETE_MEMORY: &str = "delete_memory";
 pub const LINK_MEMORY: &str = "link_memory";
 pub const UNLINK_MEMORY: &str = "unlink_memory";
 pub const SET_REMINDER: &str = "set_reminder";
-pub const SCHEDULE_ASK: &str = "schedule_ask";
 
 /// `(text, due_at, every-phrase)` → the stored row's id.
 pub type ReminderSink<'a> = dyn FnMut(&str, i64, Option<&str>) -> Result<i64, String> + Send + 'a;
-/// `(prompt, every-phrase, next_at)` → the stored row's id.
-pub type ScheduleSink<'a> = dyn FnMut(&str, &str, i64) -> Result<i64, String> + Send + 'a;
 
 /// Where a call's effects land. The caller lends a writer instead of its
 /// storage handle: that mutex must never be held across an await.
 pub struct Effects<'a> {
     pub brain_dir: &'a Path,
     pub set_reminder: &'a mut ReminderSink<'a>,
-    pub set_schedule: &'a mut ScheduleSink<'a>,
 }
 
 /// A model that keeps asking for tools is looping, not working.
@@ -61,7 +57,6 @@ pub enum TurnEvent<'a> {
     Linked { from: &'a str, to: &'a str },
     Unlinked { from: &'a str, to: &'a str },
     Reminded { text: &'a str, due_at: i64 },
-    Scheduled { prompt: &'a str, next_at: i64 },
 }
 
 pub struct TurnReply {
@@ -79,8 +74,6 @@ pub struct TurnReply {
     pub unlinked: Vec<(String, String)>,
     /// `(text, due_at)` reminders set this turn, in call order.
     pub reminders: Vec<(String, i64)>,
-    /// `(prompt, next_at)` asks scheduled this turn, in call order.
-    pub schedules: Vec<(String, i64)>,
 }
 
 pub fn save_memory_tool() -> ToolDef {
@@ -119,7 +112,6 @@ pub fn offered(
     link: bool,
     unlink: bool,
     remind: bool,
-    schedule: bool,
 ) -> Vec<ToolDef> {
     let mut tools = Vec::new();
     if update {
@@ -139,9 +131,6 @@ pub fn offered(
     }
     if remind {
         tools.push(set_reminder_tool());
-    }
-    if schedule {
-        tools.push(schedule_ask_tool());
     }
     tools
 }
@@ -183,31 +172,6 @@ pub fn set_reminder_tool() -> ToolDef {
                 }
             },
             "required": ["text"]
-        }),
-    }
-}
-
-pub fn schedule_ask_tool() -> ToolDef {
-    ToolDef {
-        name: SCHEDULE_ASK.to_string(),
-        description: "Schedule a prompt that odyn will run on a recurring \
-                      schedule, each run landing as a normal conversation."
-            .to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "The question to ask each time, in the user's own \
-                                    words."
-                },
-                "every": {
-                    "type": "string",
-                    "description": "When to run it: `every day 09:00`, \
-                                    `every monday 9:30`, or `every 45m`."
-                }
-            },
-            "required": ["prompt", "every"]
         }),
     }
 }
@@ -323,7 +287,6 @@ pub async fn run_turn(
     let mut linked = Vec::new();
     let mut unlinked = Vec::new();
     let mut reminders = Vec::new();
-    let mut schedules = Vec::new();
     let mut repeats: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
     for _ in 0..=MAX_TOOL_ROUNDS {
@@ -397,15 +360,6 @@ pub async fn run_turn(
                     reminders.push((text, due_at));
                     clean.push(result.clone());
                 }
-                Some(Written::Scheduled(prompt, next_at)) => {
-                    emit(TurnEvent::Scheduled {
-                        prompt: &prompt,
-                        next_at,
-                    })
-                    .map_err(TurnError::Write)?;
-                    schedules.push((prompt, next_at));
-                    clean.push(result.clone());
-                }
                 None => failed = true,
             }
             messages.push(Message::tool_result(call, result));
@@ -435,7 +389,6 @@ pub async fn run_turn(
         linked,
         unlinked,
         reminders,
-        schedules,
     })
 }
 
@@ -481,7 +434,6 @@ enum Written {
     Linked(String, String),
     Unlinked(String, String),
     Reminded(String, i64),
-    Scheduled(String, i64),
 }
 
 /// Answers the call with a result the model can read; a bad call gets its
@@ -494,7 +446,6 @@ fn run_tool(effects: &mut Effects<'_>, call: &ToolCall) -> (String, Option<Writt
         LINK_MEMORY => link(effects.brain_dir, call),
         UNLINK_MEMORY => unlink(effects.brain_dir, call),
         SET_REMINDER => remind(effects, call),
-        SCHEDULE_ASK => schedule(effects, call),
         other => (format!("error: no tool named `{other}`"), None),
     }
 }
@@ -550,40 +501,6 @@ fn remind(effects: &mut Effects<'_>, call: &ToolCall) -> (String, Option<Written
             (
                 format!("reminder set{when}: {text}"),
                 Some(Written::Reminded(text.to_string(), due)),
-            )
-        }
-        Err(err) => (format!("error: {err}"), None),
-    }
-}
-
-/// Stored before the model is told, like a reminder. The first run comes from
-/// the phrase alone; the sink is where the surface refuses what it must.
-fn schedule(effects: &mut Effects<'_>, call: &ToolCall) -> (String, Option<Written>) {
-    let (Some(prompt), Some(every)) = (text_arg(call, "prompt"), text_arg(call, "every")) else {
-        return (
-            "error: schedule_ask needs non-empty strings `prompt` and `every`".to_string(),
-            None,
-        );
-    };
-    let repeat = match reminder::parse_repeat(every) {
-        Ok(repeat) => repeat,
-        Err(err) => return (format!("error: {err}"), None),
-    };
-    let Some(next) = reminder::next_fire(&repeat, now_secs()) else {
-        return (
-            "error: could not work out the first run time".to_string(),
-            None,
-        );
-    };
-    match (effects.set_schedule)(prompt, &repeat.canonical(), next) {
-        Ok(_) => {
-            let stamp = reminder::local_stamp(next);
-            (
-                format!(
-                    "scheduled {}, first run {stamp}: {prompt}",
-                    repeat.canonical()
-                ),
-                Some(Written::Scheduled(prompt.to_string(), next)),
             )
         }
         Err(err) => (format!("error: {err}"), None),
@@ -690,12 +607,6 @@ fn unlink(brain_dir: &Path, call: &ToolCall) -> (String, Option<Written>) {
 /// A reminder call in a folder-only test would be a routing bug.
 fn refuse_reminders() -> impl FnMut(&str, i64, Option<&str>) -> Result<i64, String> {
     |_, _, _| Err("this turn should not have set a reminder".to_string())
-}
-
-#[cfg(test)]
-/// A schedule call outside a schedule test would be a routing bug too.
-fn refuse_schedules() -> impl FnMut(&str, &str, i64) -> Result<i64, String> {
-    |_, _, _| Err("this turn should not have scheduled anything".to_string())
 }
 
 fn text_arg<'a>(call: &'a ToolCall, name: &str) -> Option<&'a str> {
@@ -817,7 +728,7 @@ mod tests {
         written.map(|written| match written {
             Written::Saved(slug) | Written::Updated(slug) | Written::Deleted(slug) => slug,
             Written::Linked(from, to) | Written::Unlinked(from, to) => format!("{from}->{to}"),
-            Written::Reminded(text, due_at) | Written::Scheduled(text, due_at) => {
+            Written::Reminded(text, due_at) => {
                 format!("{text}@{due_at}")
             }
         })
@@ -832,7 +743,6 @@ mod tests {
             TurnEvent::Linked { from, to } => format!("linked:{from}->{to}"),
             TurnEvent::Unlinked { from, to } => format!("unlinked:{from}->{to}"),
             TurnEvent::Reminded { text, due_at } => format!("reminded:{text}@{due_at}"),
-            TurnEvent::Scheduled { prompt, next_at } => format!("scheduled:{prompt}@{next_at}"),
         }
     }
 
@@ -842,11 +752,9 @@ mod tests {
     fn a_save_call_writes_the_note_and_ends_the_turn_with_its_own_confirmation() {
         let dir = TempDir::new("save");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         let asked = call(serde_json::json!({
             "content": "Mitul takes espresso, no sugar.",
@@ -901,11 +809,9 @@ mod tests {
     fn a_failed_call_in_a_round_keeps_the_model_in_the_loop() {
         let dir = TempDir::new("mixed");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         let good = call(serde_json::json!({
             "content": "Espresso, no sugar.",
@@ -949,11 +855,9 @@ mod tests {
     fn a_bad_call_answers_with_an_error_instead_of_failing_the_turn() {
         let dir = TempDir::new("bad");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         let provider = Scripted::new(vec![
             vec![
@@ -988,11 +892,9 @@ mod tests {
     fn a_taken_slug_falls_back_to_a_derived_one() {
         let dir = TempDir::new("taken");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         notes::write_note(&dir.0, Some("espresso"), "already here").expect("seed");
         let (result, written) = run_tool(
@@ -1013,11 +915,9 @@ mod tests {
     fn an_update_call_rewrites_the_note_in_place() {
         let dir = TempDir::new("update");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         notes::write_note(&dir.0, Some("car-keys"), "Car keys are on the desk.").expect("seed");
         let asked = named_call(
@@ -1071,11 +971,9 @@ mod tests {
     fn a_delete_call_trashes_the_note_and_reports_it() {
         let dir = TempDir::new("delete");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         notes::write_note(&dir.0, Some("car-keys"), "on the desk").expect("seed");
         let (result, written) = run_tool(
@@ -1104,11 +1002,9 @@ mod tests {
     fn a_link_call_connects_the_pair_and_repeats_are_not_errors() {
         let dir = TempDir::new("link");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         notes::write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("seed");
         notes::write_note(&dir.0, Some("mitul"), "The user.").expect("seed");
@@ -1171,11 +1067,9 @@ mod tests {
     fn an_unlink_call_removes_the_edge_and_a_missing_one_is_not_an_error() {
         let dir = TempDir::new("unlink");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         notes::write_note(&dir.0, Some("football"), "He plays on Sundays.").expect("seed");
         notes::write_note(&dir.0, Some("mitul"), "The user.").expect("seed");
@@ -1243,11 +1137,9 @@ mod tests {
     fn an_update_of_a_missing_note_answers_with_an_error() {
         let dir = TempDir::new("update-missing");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         let (result, written) = run_tool(
             &mut effects,
@@ -1276,11 +1168,9 @@ mod tests {
                 stored.push((text.to_string(), due_at));
                 Ok(1)
             };
-            let mut plans = refuse_schedules();
             let mut effects = Effects {
                 brain_dir: &dir.0,
                 set_reminder: &mut sink,
-                set_schedule: &mut plans,
             };
             block_on(run_turn(
                 &provider,
@@ -1316,11 +1206,9 @@ mod tests {
                 stored.push((due_at, every.map(str::to_string)));
                 Ok(1)
             };
-            let mut plans = refuse_schedules();
             let mut effects = Effects {
                 brain_dir: &dir.0,
                 set_reminder: &mut sink,
-                set_schedule: &mut plans,
             };
             run_tool(
                 &mut effects,
@@ -1341,11 +1229,9 @@ mod tests {
                 calls += 1;
                 Ok(1)
             };
-            let mut plans = refuse_schedules();
             let mut effects = Effects {
                 brain_dir: &dir.0,
                 set_reminder: &mut sink,
-                set_schedule: &mut plans,
             };
             run_tool(
                 &mut effects,
@@ -1360,75 +1246,6 @@ mod tests {
         assert_eq!(calls, 0);
     }
 
-    /// The phrase is validated and canonicalized before the sink sees it, and
-    /// a refusal from the sink comes back as a readable error.
-    #[test]
-    fn a_schedule_call_is_stored_canonically_or_refused_readably() {
-        let dir = TempDir::new("schedule");
-        let mut stored: Vec<(String, String, i64)> = Vec::new();
-        let before = now_secs();
-        let (result, written) = {
-            let mut sink = refuse_reminders();
-            let mut plans = |prompt: &str, every: &str, next_at: i64| {
-                stored.push((prompt.to_string(), every.to_string(), next_at));
-                Ok(1)
-            };
-            let mut effects = Effects {
-                brain_dir: &dir.0,
-                set_reminder: &mut sink,
-                set_schedule: &mut plans,
-            };
-            run_tool(
-                &mut effects,
-                &named_call(
-                    SCHEDULE_ASK,
-                    serde_json::json!({"prompt": "brief me", "every": "Every Day 9:00"}),
-                ),
-            )
-        };
-        assert!(written.is_some());
-        assert!(result.starts_with("scheduled every day 09:00"), "{result}");
-        assert_eq!(stored[0].0, "brief me");
-        assert_eq!(stored[0].1, "every day 09:00");
-        assert!(stored[0].2 > before);
-
-        let refused = {
-            let mut sink = refuse_reminders();
-            let mut plans =
-                |_: &str, _: &str, _: i64| Err("a scheduled ask cannot save memories".to_string());
-            let mut effects = Effects {
-                brain_dir: &dir.0,
-                set_reminder: &mut sink,
-                set_schedule: &mut plans,
-            };
-            run_tool(
-                &mut effects,
-                &named_call(
-                    SCHEDULE_ASK,
-                    serde_json::json!({"prompt": "/memory save this", "every": "every 45m"}),
-                ),
-            )
-            .0
-        };
-        assert!(refused.starts_with("error:"), "{refused}");
-
-        let bad = {
-            let mut sink = refuse_reminders();
-            let mut plans = refuse_schedules();
-            let mut effects = Effects {
-                brain_dir: &dir.0,
-                set_reminder: &mut sink,
-                set_schedule: &mut plans,
-            };
-            run_tool(
-                &mut effects,
-                &named_call(SCHEDULE_ASK, serde_json::json!({"prompt": "brief me"})),
-            )
-            .0
-        };
-        assert!(bad.starts_with("error:"), "{bad}");
-    }
-
     #[test]
     fn a_reminder_the_clock_refuses_never_reaches_the_store() {
         let dir = TempDir::new("remind-bad");
@@ -1438,11 +1255,9 @@ mod tests {
                 calls += 1;
                 Ok(1)
             };
-            let mut plans = refuse_schedules();
             let mut effects = Effects {
                 brain_dir: &dir.0,
                 set_reminder: &mut sink,
-                set_schedule: &mut plans,
             };
             let (result, written) = run_tool(
                 &mut effects,
@@ -1469,11 +1284,9 @@ mod tests {
     fn a_repeated_failing_call_is_told_it_is_looping() {
         let dir = TempDir::new("nudge");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         let missing = || {
             Ok(ChatEvent::ToolCall(named_call(
@@ -1521,11 +1334,9 @@ mod tests {
     fn no_tools_means_exactly_one_request() {
         let dir = TempDir::new("plain");
         let mut sink = refuse_reminders();
-        let mut plans = refuse_schedules();
         let mut effects = Effects {
             brain_dir: &dir.0,
             set_reminder: &mut sink,
-            set_schedule: &mut plans,
         };
         let provider = Scripted::new(vec![vec![
             Ok(ChatEvent::TextDelta("hi".to_string())),

@@ -14,11 +14,9 @@ use crate::chat::{Role, Usage};
 
 mod memory;
 mod reminder;
-mod schedule;
 
 pub use memory::{Injection, Memory, MemorySort, MemoryStats, NotePlan};
 pub use reminder::Reminder;
-pub use schedule::Schedule;
 
 #[cfg(test)]
 pub(crate) use memory::tests as memory_tests;
@@ -208,6 +206,10 @@ DROP TABLE IF EXISTS agent_commands;
 DROP TABLE IF EXISTS agent_allow;
 ALTER TABLE conversations DROP COLUMN workspace;
 ",
+    // Scheduled asks are gone; migration 11 stays as history.
+    r"
+DROP TABLE IF EXISTS schedules;
+",
 ];
 
 /// Marks a matched term in a search snippet; its closer is `SNIPPET_END`.
@@ -237,8 +239,6 @@ pub enum StorageError {
     MissingEmbedding(String),
     #[error("a reminder needs something to say")]
     EmptyReminder,
-    #[error("a scheduled ask needs a prompt")]
-    EmptySchedule,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

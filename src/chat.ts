@@ -154,9 +154,6 @@ function streamed(stream: Stream): HTMLElement {
   if (stream.reminders.length > 0) {
     block.append(trace("◔", "reminder", stream.reminders, "stream-reminded"));
   }
-  if (stream.scheduled.length > 0) {
-    block.append(trace("⟳", "scheduled", stream.scheduled, "stream-scheduled"));
-  }
   return block;
 }
 
@@ -213,7 +210,7 @@ function ledger(): HTMLElement {
       el(
         "span",
         "ledger-note",
-        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects · /unlink-memory disconnects · /reminder sets one · /schedule repeats an ask",
+        "/brain recalls · /memory saves · /update-memory rewrites · /delete-memory forgets · /link-memory connects · /unlink-memory disconnects · /reminder sets one",
       ),
     );
     return line;
