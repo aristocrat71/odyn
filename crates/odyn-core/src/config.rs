@@ -54,7 +54,6 @@ cap_tokens = 1200        # token budget for one recall
 similarity_edge_threshold = 0.78
 min_relevance = 0.3      # inject only notes scoring this share of the best match
 save_temperature = 0.3   # sampling on /memory save turns; lower = more literal
-soul_cap_tokens = 400    # soft budget for soul.md, injected on every turn
 
 [style]
 brevity = "off"        # off | lite | full | ultra — default for new conversations
@@ -163,9 +162,10 @@ pub struct BrainConfig {
     /// Sampling temperature for `/memory` save turns. Saving is transcription,
     /// not creativity: lower is more literal.
     pub save_temperature: f32,
-    /// Soft budget for `soul.md`, the standing instructions injected on every
-    /// turn. Exceeding it warns in the ledger; nothing is ever truncated.
-    pub soul_cap_tokens: u32,
+    /// The removed `soul_cap_tokens`, swallowed and ignored: a stale key must
+    /// not brick the app.
+    #[serde(default, rename = "soul_cap_tokens")]
+    pub(crate) legacy_soul_cap: Option<toml::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -196,7 +196,7 @@ impl Default for BrainConfig {
             // best match survives on its edges alone.
             min_relevance: 0.3,
             save_temperature: 0.3,
-            soul_cap_tokens: 400,
+            legacy_soul_cap: None,
         }
     }
 }
@@ -476,6 +476,8 @@ api_key_env = "OPENCODE_API_KEY"
 kind = "ollama"
 base_url = "http://localhost:11434"
 keep_alive = "5m"
+[brain]
+soul_cap_tokens = 400
 [memory]
 core_budget_tokens = 500
 episodic_top_k = 6
@@ -554,8 +556,15 @@ kind = "ollama"
                 keep_alive: Some("5m".to_string()),
             }
         );
-        // The sample's `[memory]` section is brain v1: swallowed, not honored.
-        assert_eq!(config.brain, BrainConfig::default());
+        // Brain v1's `[memory]` and the removed `soul_cap_tokens` both parse
+        // and are ignored: a stale key must not brick the app.
+        assert_eq!(
+            config.brain,
+            BrainConfig {
+                legacy_soul_cap: Some(toml::Value::Integer(400)),
+                ..BrainConfig::default()
+            }
+        );
         assert_eq!(
             config.spotlight,
             SpotlightConfig {

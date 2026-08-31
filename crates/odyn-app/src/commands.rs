@@ -80,9 +80,6 @@ pub struct ContextPreview {
     memories: Vec<LedgerItem>,
     tokens: i64,
     cap_tokens: u32,
-    /// soul.md's standing cost, on every turn; 0 when there is none.
-    soul_tokens: i64,
-    soul_over: bool,
     system_message: String,
 }
 
@@ -124,7 +121,6 @@ pub(crate) enum Body {
     Context {
         used: Vec<String>,
         tokens: i64,
-        soul: i64,
     },
     Delta {
         text: String,
@@ -687,7 +683,6 @@ pub(crate) fn context_body(context: &InjectedContext) -> Body {
             .map(|memory| memory.slug.clone())
             .collect(),
         tokens: context.tokens,
-        soul: context.soul_tokens,
     }
 }
 
@@ -754,7 +749,6 @@ pub(crate) fn sync_index(ready: &Ready) -> Result<(), String> {
 }
 
 /// Memory is opt-in and additive here too: no `/brain`, no injection. The
-/// soul note rides every turn; a brain failure falls back to a soulless,
 /// uninjected turn rather than a failed one.
 pub(crate) async fn build_context(
     app: &AppHandle,
@@ -843,7 +837,7 @@ pub async fn context_preview(
         let brain_config = ready.config.brain.clone();
         let finish =
             |context: InjectedContext, active: bool| preview(context, &brain_config, active);
-        // A draft without triggers previews what it would send: the soul alone.
+        // A draft without triggers injects nothing but the style directive.
         if !ask.any() {
             let context = brain::build_context(None, &brain_config, &prior, &ask, brevity, || {
                 Err(embed::EmbedError::Load(
@@ -881,8 +875,6 @@ fn preview(context: InjectedContext, config: &BrainConfig, active: bool) -> Cont
             .collect(),
         tokens: context.tokens,
         cap_tokens: config.cap_tokens,
-        soul_tokens: context.soul_tokens,
-        soul_over: context.soul_tokens > i64::from(config.soul_cap_tokens),
         system_message: context.system_message,
     }
 }
