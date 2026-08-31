@@ -56,6 +56,7 @@ pub fn run() {
             spotlight::spotlight_toggle,
             spotlight::spotlight_status,
             spotlight::spotlight_ask,
+            spotlight::spotlight_forget,
             spotlight::spotlight_target,
             spotlight::spotlight_set_target,
             spotlight::spotlight_save_key,
